@@ -6,7 +6,7 @@
 
 본 규약은 IssueTracker 프로젝트에서 검증된 규약(이슈 #152, #199, #210, #212)을 이식한
 것입니다. 코드 자체의 규약은 [01-architecture.md](01-architecture.md) ~
-[07-code-style.md](07-code-style.md) 참조.
+[07-code-style.md](07-code-style.md) 및 [09-memory-context.md](09-memory-context.md) 참조.
 
 > **⚠️ 이식 상태**: 아래 규약이 참조하는 보조 도구는 IssueTracker 에서 아직 이식되지 않았다.
 > 이식 전까지는 명시된 fallback 을 사용한다.

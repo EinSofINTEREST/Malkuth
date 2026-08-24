@@ -64,42 +64,21 @@ spec:
    RetryPolicy 를 따름 — [05-error-handling.md](05-error-handling.md)
 5. **Depth Limit**: A2A 호출 체인 깊이 상한 (기본 3) — `TraceContext.depth` 로 전파/검증,
    초과 시 `A2A_005` (순환 위임 방지)
+6. **Peer Symmetry (우열 없음)**: A2A 연결에 상위/하위 개념이 없다 — 호출 방향은
+   순전히 선언의 문제이며, 역방향도 선언하면 허용된다. 상호 선언 시 양방향 협업
+   (교차 질의/위임) 가능 — 폭주는 depth limit 과 timeout 으로만 방지
 
-### Supervision Connections — 계층 위임의 자동 Allowlist
-
-그래프의 `subagents` 계층 선언 ([04-module-system.md](04-module-system.md)) 은 별도
-`connections` 선언 없이 **부모 → 자식 방향의 A2A 허용을 자동 등록**한다.
-
-1. **부모 → 자식**: 자동 허용 — 부모의 `agent__{id}` tool 경유가 유일한 진입점
-2. **자식 → 부모, 형제 간**: 기본 차단 — 필요하면 `connections` 에 명시적 선언
-3. **깊이 합산**: 위임 체인도 A2A depth limit (기본 3) 에 합산 — 팀 중첩 설계 시 고려
-4. **동일한 이중 방어**: supervision edge 에도 runtime 이 per-edge token 발급 —
-   peer 연결과 같은 방식으로 callee 측 검증
-
-### Agent-as-Tool Bridge
-
-Sub-agent 는 부모의 tool registry 에 `agent__{subagent_id}` 로 노출된다.
-
-1. **Schema 자동 생성**: tool 의 입력 스키마/설명은 sub-agent 의 AgentCard(skills)에서
-   생성 — 수기 스키마 작성 금지
-2. **네임스페이스**: `agent__` prefix — skillset tool / `mcp__` tool 과 3-원 충돌 검사
-3. **스트리밍 중계**: sub 가 streaming capability 를 제공하면 위임 중 TaskEvent 를
-   부모 이벤트 스트림에 중계 (`source: subagent` 표시)
-4. **에러 투명성**: 위임 실패는 A2A 에러 코드 그대로 부모의 tool result 에 전달 —
-   부모 모델이 재시도/우회를 판단할 수 있게 원문 유지
-
-### When to Use Delegation vs A2A vs Graph Edge
+### When to Use A2A vs Graph Edge
 
 | 상황 | 사용 |
 |---|---|
 | 워크플로의 정해진 다음 단계로 데이터 전달 | **Graph edge** (state 경유) |
-| 자기 팀 sub-agent 에게 하위 작업 위임 | **Delegation** (`agent__` tool) |
-| 실행 도중 peer main 에이전트에게 부분 작업 위임 후 결과를 이어서 사용 | **A2A call** |
-| 다른 에이전트에게 질의만 하고 즉시 응답 필요 | **A2A call** (peer) |
+| 실행 도중 peer 에이전트에게 부분 작업 위임 후 결과를 이어서 사용 | **A2A call** |
+| 다른 에이전트에게 질의만 하고 즉시 응답 필요 | **A2A call** |
 | 산출물을 여러 후속 노드가 소비 | **Graph edge** (state 경유) |
 | LLM 판단이 필요 없는 하위 능력 | **Skillset tool** (에이전트 남발 금지) |
 
-A2A/delegation 은 위임/질의용이다. 파이프라인 데이터 흐름을 A2A 로 구현하는 것은 안티패턴 —
+A2A 는 위임/질의용이다. 파이프라인 데이터 흐름을 A2A 로 구현하는 것은 안티패턴 —
 checkpoint/재개가 불가능해진다.
 
 ## MCP (Model Context Protocol) Integration
@@ -149,8 +128,7 @@ spec:
    - `shutdown()` 에서 세션/자식 프로세스 정리 — 좀비 프로세스 금지
 
 3. **Tool Namespacing**
-   - MCP tool 은 `mcp__{server}__{tool}` 로 네임스페이스 — skillset tool /
-     `agent__` 위임 tool 과 충돌 방지 (3-원 충돌 검사)
+   - MCP tool 은 `mcp__{server}__{tool}` 로 네임스페이스 — skillset tool 과 충돌 방지
    - 동일 서버 이름 중복 선언 금지 (manifest 검증에서 차단)
 
 4. **Tool Filtering**

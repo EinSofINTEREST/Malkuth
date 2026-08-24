@@ -5,7 +5,8 @@
 ### System Overview
 - **Purpose**: Modular multi-agent orchestration framework
 - **Foundation**: LangGraph state graphs over Docker-isolated agents
-- **Composition Model**: 목표(goal) 단위 그래프 = 여러 **main agent** + 각 main 에 붙는 **sub-agent 팀**
+- **Composition Model**: 목표(goal) 단위 그래프 = **동등한 에이전트들의 유기적 연결** —
+  에이전트 간 우열/계층 없음, 모든 에이전트는 직접 요청 가능한 독립 실행 단위
 - **Execution Model**: 달성형(**mission**) run 과 무한 반복형(**service**) run 모두 지원
 - **Design Philosophy**: Isolation, composability, explicit contracts — everything is a module
 
@@ -80,8 +81,7 @@
 - Agent-to-agent connections are **declared in graph config**, never hardcoded
 - Attaching / detaching an agent from a graph MUST be a config change only
 - Any agent satisfying the agent contract can be placed at any compatible node
-- Main/sub 역할은 **배선이 결정** — 같은 에이전트 모듈이 그래프에 따라 main 또는 sub 로 배치
-- Sub-agent 팀 구성(붙이기/떼기)도 그래프 config 변경만으로 완료
+- 에이전트 간 관계는 전부 **대등한 peer 연결** — 우열/소속 선언이 존재하지 않는다
 
 ### 3. Explicit Contracts
 - Every agent ships a **manifest** declaring model, modules, protocols, resources
@@ -98,39 +98,38 @@
 - Unhealthy agents are circuit-broken and restarted by the runtime
 - All external calls have timeouts and typed errors
 
-## Agent Hierarchy — Main Agents and Sub-Agents
+## Interaction Model — 동등한 에이전트, 세 가지 접근
 
-그래프는 **goal(목표) 단위**로 구성된다. 목표를 달성하기 위해 돌아가는 여러 **main agent** 가
-그래프 노드로 배치되고, 각 main agent 아래에 **sub-agent** 들이 붙어 팀을 이룬다.
+그래프는 **goal(목표) 단위**로 구성된다. 목표를 달성하기 위해 여러 에이전트가 노드로
+배치되고 유기적으로 연결되지만, **에이전트 간 우열/계층 관계는 존재하지 않는다** —
+모든 에이전트는 동등한 peer 이며, 각각 직접 요청을 받을 수 있는 독립 실행 단위다.
 
 ```
         Graph = goal 단위 ("research-pipeline", "feed-monitor", ...)
 
    START ──▶ [ planner ] ──▶ [ researcher ] ──▶ [ writer ] ──▶ END / loop
-              (main)            (main)            (main)
-                                   │ 위임 (delegation)
-                     ┌─────────────┼─────────────┐
-              [web-searcher]  [doc-reader]  [fact-checker]
-                  (sub)          (sub)          (sub)
-                                   │ 위임 (중첩 — depth 제한)
-                             [pdf-parser]
-                                (sub)
+                  ▲                │  ▲
+                  └── A2A peer ────┘  │ (connections 선언 기반, 방향 자유)
+                                      │
+   Client ────────── direct request ──┘ (그래프와 무관하게 어느 에이전트든 직접 호출)
 ```
 
-### Hierarchy Rules
+### Interaction Rules
 
-1. **Main agent**: 그래프 노드로 배치되어 워크플로 단계를 담당한다.
-   Main 간 관계는 edges(graph state)와 connections(A2A)로만 연결된다
-2. **Sub-agent**: 특정 main agent(또는 상위 sub-agent)에 붙어 위임받은 작업을 수행한다.
-   그래프 edge 에 등장하지 않으며, 부모의 tool (`agent__{id}`) 로 노출된다
-3. **역할은 배선이 결정**: main/sub 는 에이전트 코드가 아니라 그래프 config 의 배치가 결정.
-   같은 에이전트 모듈이 그래프 A 에서는 main, 그래프 B 에서는 sub 가 될 수 있다
-4. **팀 = 운영 단위**: main + 그 sub 트리는 함께 기동/드레인/정리된다
-5. **중첩 허용**: sub 아래 sub 가능 — 위임 깊이 상한 적용
-   (기본 3, [03-protocol-integration.md](03-protocol-integration.md))
-6. **격리 유지**: sub-agent 도 독립 컨테이너 — 부모와 프로세스/파일시스템 공유 금지
+1. **Orchestrated run**: 그래프가 edges/조건에 따라 에이전트를 호출 (mission / service).
+   순서는 배선의 결과일 뿐 — 앞 노드가 뒤 노드의 상위가 아니다
+2. **Direct request**: 클라이언트는 그래프 run 과 무관하게 **어느 에이전트에게든
+   인터랙티브하게 직접 요청**할 수 있다 (단독 태스크 / 스트리밍 대화).
+   Control Plane → Runtime → 해당 에이전트의 Control API 경로 사용
+3. **Peer call**: 실행 중 에이전트는 allowlist 에 선언된 peer 에게 A2A 로 위임/질의한다.
+   호출자와 피호출자는 대등하다 — 어느 방향이든 선언만 하면 허용되며,
+   상호 선언 시 양방향 협업도 가능 (깊이 상한으로 폭주만 방지)
+4. **오케스트레이터는 라우터일 뿐**: 라우팅과 state 관리를 담당하는 인프라이지
+   에이전트 위에 군림하는 "슈퍼 에이전트"가 아니다 — 협업 구조는 전적으로
+   배선(edges/connections)이 정의한다
+5. **격리 유지**: 모든 에이전트는 독립 컨테이너 — 프로세스/파일시스템 공유 금지
 
-상세 배선 스펙은 [04-module-system.md](04-module-system.md), 위임 실행 모델은
+배선 스펙은 [04-module-system.md](04-module-system.md), 직접 요청 계약은
 [02-agent-implementation.md](02-agent-implementation.md) 참조.
 
 ## Execution Modes — Mission and Service
@@ -163,7 +162,7 @@
 ### 📋 Planned (v0.1.0 — bootstrap)
 - **Core Framework**
   - Agent interface + manifest schema (pydantic)
-  - Graph topology schema + validation (mission/service 모드, sub-agent 계층 포함)
+  - Graph topology schema + validation (mission/service 모드 포함)
   - LangGraph orchestrator (config → StateGraph)
   - Service run loop (iteration checkpoint + idle backoff)
 - **Agent Runtime**
@@ -346,20 +345,20 @@ Client → Control Plane → Orchestrator(StateGraph)
 2. **Invoke**: 클라이언트가 run 제출 → orchestrator 가 initial state 구성
 3. **Node Execution**: orchestrator → runtime → 해당 agent 의 Control API `/invoke`
 4. **Tool Loop**: 에이전트 내부에서 모델 ↔ skillset/MCP tool 실행 루프
-5. **Delegation / A2A Call** (선택): main 이 sub-agent 에게 위임 (`agent__` tool)
-   하거나, allowlist 내 peer 에이전트를 A2A 로 직접 호출
+5. **Peer Call** (선택): 에이전트가 allowlist 내 peer 에이전트를 A2A 로 직접 호출
+   (위임/질의 — 어느 쪽도 상위가 아님)
 6. **Checkpoint**: node 완료마다 state 저장 (실패 시 마지막 checkpoint 에서 재개)
 7. **Edge Evaluation**: 조건 함수 평가 → 다음 node 라우팅
 8. **Complete / Iterate**: mission 은 END 도달 → 결과 반환, run 기록 저장.
    service 는 iteration checkpoint 후 다음 iteration 으로 순환 (idle 시 backoff)
 
-### Three Communication Paths — 반드시 구분
+### Communication & Access Paths — 반드시 구분
 
 | 경로 | 용도 | 매체 | 규칙 |
 |---|---|---|---|
-| **Graph state** | 워크플로 단계(main 노드) 간 데이터 전달 | Orchestrator + Checkpointer | 기본 경로. 모든 노드 산출물은 state 로 |
-| **Delegation** | main → 자기 팀 sub-agent 작업 위임 | 부모 tool (`agent__{id}`) → A2A | 그래프 `subagents` 계층 선언으로 자동 허용 — 부모→자식 방향만 |
-| **A2A peer call** | 실행 중 peer 에이전트에게 위임/질의 | A2A protocol | 그래프 config 의 `connections` allowlist 에 선언된 쌍만 허용 |
+| **Graph state** | 워크플로 단계 간 데이터 전달 | Orchestrator + Checkpointer | 기본 경로. 모든 노드 산출물은 state 로 |
+| **A2A peer call** | 실행 중 peer 에이전트에게 위임/질의 (대등) | A2A protocol | 그래프 config 의 `connections` allowlist 에 선언된 방향만 허용 |
+| **Direct request** | 클라이언트 → 특정 에이전트 직접 요청 (인터랙티브 포함) | Control Plane → Agent Control API | 그래프 run 과 독립된 단독 태스크 — graph state 를 건드리지 않음 |
 
 Graph state 를 우회하는 사이드채널 (공유 파일, 공유 DB 테이블, 전역 큐) 은 금지.
 
@@ -416,13 +415,12 @@ observability:
 
 배포 시점에 다음을 검증하고, 하나라도 실패하면 컨테이너를 기동하지 않는다:
 
-1. Graph topology 의 모든 `agent` ref (subagents 포함) 가 존재하는 manifest 를 가리키는가
+1. Graph topology 의 모든 `agent` ref 가 존재하는 manifest 를 가리키는가
 2. 모든 manifest 의 skillset/promptset ref 가 registry 에서 해석되는가
 3. `connections` 의 caller/callee 가 모두 그래프 노드인가
 4. Mode 별 토폴로지 규칙 충족 (mission: END 도달 / service: idle 정책 선언)
-5. `subagents` 계층의 위임 깊이가 상한 이내인가
-6. A2A 포트 충돌이 없는가
-7. Resource 합계 (sub-agent 팀 포함) 가 호스트 한도 내인가 (경고)
+5. A2A 포트 충돌이 없는가
+6. Resource 합계가 호스트 한도 내인가 (경고)
 
 ## Scalability Considerations
 

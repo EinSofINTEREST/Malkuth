@@ -46,9 +46,9 @@ class BaseAgent(ABC):
 ```python
 class TaskRequest(BaseModel):
     task_id: str                          # UUID — 멱등성 키
-    run_id: str                           # 소속 graph run
-    node_id: str                          # 그래프 상 노드 id
-    input: dict[str, Any]                 # state 에서 추출된 입력
+    run_id: str                           # 소속 graph run (direct 요청은 "direct-" prefix 의 ad-hoc id)
+    node_id: str | None                   # 그래프 상 노드 id — direct 요청이면 None
+    input: dict[str, Any]                 # state 에서 추출된 입력 / direct 요청 본문
     config: TaskConfig                    # timeout, max_turns 등
     trace: TraceContext                   # 분산 추적 컨텍스트
 
@@ -85,9 +85,11 @@ class TaskResult(BaseModel):
    - `output` 은 그래프 state schema 와 호환되는 키만 포함
    - 대용량 산출물(파일, 원문)은 output 에 직접 넣지 않고 artifact 저장소 참조로 전달
 
-6. **Role Agnosticism (main/sub)**
-   - 에이전트 코드는 자신이 main 인지 sub 인지 가정하지 않는다 — 역할은 그래프 배선이 결정
-   - 위임받은 태스크와 그래프 노드 태스크는 동일한 TaskRequest 계약으로 처리
+6. **Peer Equality & Wiring Agnosticism**
+   - 에이전트 코드는 자신이 어떤 그래프의 어느 위치에 배선되는지 가정하지 않는다 —
+     연결 구조는 배선이 결정하며, 에이전트 간 우열 관계는 존재하지 않는다
+   - 그래프 노드 태스크 / peer 위임 태스크 / direct 요청 태스크는 모두 동일한
+     TaskRequest 계약으로 처리
    - Mission/service 모드도 가정 금지 — iteration 간 지속 데이터는 graph state 로만
 
 ## Agent Manifest
@@ -149,9 +151,9 @@ spec:
    - 모델 변경 (minor)
 3. **No Hidden Dependencies**: manifest 에 선언되지 않은 모듈/서버/자원 사용 금지
 4. **Reference Format**: 모듈 참조는 항상 `{type}/{name}@{version}` — latest 사용 금지
-5. **No Role Declaration**: manifest 에 main/sub 역할 선언 금지 — 역할·팀 구성은
-   그래프 배선 소관 ([04-module-system.md](04-module-system.md)).
-   단, sub 로 배치될 수 있으려면 `a2a.enabled: true` 필요 (위임이 A2A 로 전달되므로)
+5. **No Hierarchy Declaration**: manifest 에 에이전트 간 우열/소속 관계 선언 금지 —
+   연결 구조는 그래프 배선 소관 ([04-module-system.md](04-module-system.md)).
+   Peer 호출을 받으려면 `a2a.enabled: true` 필요
 
 ## Docker Isolation Rules
 
@@ -279,7 +281,7 @@ POST /v1/drain           # graceful drain 개시
 ```python
 async def execute(self, task: TaskRequest) -> TaskResult:
     prompt = self.promptset.render(task.node_id, **task.input)
-    tools = [*self.skillset.tools(), *self.mcp.tools(), *self.subagents.tools()]
+    tools = [*self.skillset.tools(), *self.mcp.tools()]
 
     async with task_span(task):  # tracing + 로그 컨텍스트
         for turn in range(self.config.max_turns):
@@ -303,28 +305,29 @@ async def execute(self, task: TaskRequest) -> TaskResult:
 4. **Usage Tracking**: 매 모델 호출의 토큰 사용량 누적 → TaskResult.usage
 5. **Event Emission**: 스트리밍 모드에서 turn 별 tool_call/tool_result 이벤트 발행
 
-## Sub-Agent Delegation
+## Direct Requests — 인터랙티브 직접 호출
 
-그래프에서 이 에이전트에 `subagents` 가 선언되면, agentd 가 각 sub-agent 를
-`agent__{subagent_id}` tool 로 tool registry 에 등록한다. 모델은 일반 tool 호출과 동일한
-방식으로 위임한다.
+모든 에이전트는 그래프 run 과 무관하게 **직접 요청**을 받을 수 있다.
+클라이언트가 특정 에이전트를 지목해 단독 태스크를 실행하거나 스트리밍 대화를 나누는 경로다.
 
-```python
-# 모델이 보는 tool — description/schema 는 sub-agent 의 AgentCard 에서 자동 생성
-agent__web_searcher(task: str, context: dict | None = None) -> dict
+```
+Client → Control Plane → Runtime → 대상 에이전트 Control API (/invoke | /stream)
 ```
 
-### Delegation Rules
+### Direct Request Rules
 
-1. **Transport**: `agent__` tool 호출은 내부적으로 A2A task 로 실행 — supervision 연결
-   규칙은 [03-protocol-integration.md](03-protocol-integration.md)
-2. **Timeout**: 위임 호출별 timeout (기본 120s) — 부모 태스크의 남은 timeout 을 초과 불가
-3. **병렬 위임**: 독립적인 위임은 병렬 실행 (tool 병렬 규칙과 동일)
-4. **Cancellation 전파**: 부모 태스크 취소 시 진행 중인 위임 태스크도 취소
-5. **깊이 상한**: 위임 체인 깊이는 `TraceContext.depth` 로 검증 — 초과 시 `A2A_005`
-6. **결과 크기**: sub 의 대용량 산출물은 artifact 참조로 — 부모 컨텍스트 오염 방지
-7. **Usage 집계**: sub 의 토큰 사용량은 sub 자신의 TaskResult 로 보고 —
-   run 단위 합산은 observability 계층이 `run_id` 로 수행 (부모가 합산하지 않는다)
+1. **동일 계약**: direct 태스크도 TaskRequest — `node_id=None`,
+   `run_id` 는 runtime 이 발급한 `direct-` prefix 의 ad-hoc id
+2. **템플릿 선택**: `node_id` 가 없으므로 promptset 의 `default` 템플릿 사용
+   ([04-module-system.md](04-module-system.md) 호환성 규칙)
+3. **Graph State 불간섭**: direct 태스크는 어떤 graph run 의 state 도 읽거나 쓰지 않는다
+4. **동등한 규칙 적용**: timeout / max_turns / usage 집계 / 로깅 — 그래프 태스크와 동일.
+   Direct 요청 중에도 allowlist 내 peer A2A 호출 가능
+5. **동시성**: direct 태스크와 그래프 태스크는 같은 큐에서 처리 — 에이전트별 동시 실행
+   상한(`max_concurrent_tasks`, 기본 4) 공유. 상주 그래프에 붙은 에이전트도
+   직접 요청에 응답 가능해야 한다
+6. **인터랙티브 세션**: 멀티턴 대화는 클라이언트가 대화 이력을 재전송하는 stateless 방식
+   기본 — 에이전트가 세션 상태를 메모리에 쥐지 않는다
 
 ## Registering Agents
 

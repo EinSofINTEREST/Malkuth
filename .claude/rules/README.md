@@ -8,7 +8,8 @@ of an extensible agent runtime with per-agent isolation and freely composable ag
 
 **Malkuth** is a framework designed to:
 - Orchestrate multiple AI agents through LangGraph state graphs
-- Compose each goal as a graph of **main agents**, each carrying its own **sub-agent team**
+- Compose each goal as a graph of **equal, directly addressable agents** — no hierarchy
+  between agents; every agent also accepts interactive direct requests
 - Run goal-oriented **mission** graphs to completion, and **service** graphs that repeat
   indefinitely for perpetual tasks
 - Isolate each agent in its own Docker container, controlled through a standard runtime API
@@ -170,8 +171,7 @@ Essential for:
 **Wiring a New Graph:**
 1. Choose the execution mode — mission (terminating) vs service (perpetual),
    per [01-architecture.md](01-architecture.md)
-2. Review [04-module-system.md](04-module-system.md) — graph topology modules,
-   main agent nodes + sub-agent teams
+2. Review [04-module-system.md](04-module-system.md) — graph topology modules
 3. Validate topology (no dangling refs) before deployment
 4. Add graph-level integration tests per [06-testing.md](06-testing.md)
 
@@ -188,9 +188,9 @@ Essential for:
 - No shared mutable state between agents outside the graph state
 
 ### 2. Composability
-- Agents connect only through declared graph edges, sub-agent hierarchy, and A2A connections
-- Main/sub roles come from wiring — the same agent module can serve as either
-- Attaching/detaching an agent (or a sub-agent team) is a config change, not a code change
+- Agents connect only through declared graph edges and A2A connections
+- All agents are equal peers — no rank or ownership between agents, in any direction
+- Attaching/detaching an agent is a config change, not a code change
 - Skillsets and promptsets are swappable without touching agent code
 
 ### 3. Explicit Contracts
@@ -269,8 +269,6 @@ spec:
       agent: agents/planner@0.1.0
     - id: researcher
       agent: agents/researcher@0.1.0
-      subagents:                # sub-agent 팀 — 부모의 agent__ tool 로 노출
-        - {id: web-searcher, agent: agents/web-searcher@0.1.0}
   edges:
     - {from: START, to: planner}
     - {from: planner, to: researcher, condition: needs_research}

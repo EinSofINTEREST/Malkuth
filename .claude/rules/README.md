@@ -189,10 +189,11 @@ Key for:
 2. Follow versioning and compatibility rules
 3. Add module-level tests
 
-**Attaching Memory to an Agent or Graph:**
+**Attaching Memory to an Agent, Graph, or Group:**
 1. Review [09-memory-context.md](09-memory-context.md) — scopes and memoryset spec
-2. Declare spaces in the manifest (agent scope) or graph config (run/shared scope)
-3. Shared spaces require explicit access grants per agent
+2. Declare spaces where the scope lives: manifest (local), graph config (run),
+   group.yaml (group), groups/global.yaml (global)
+3. Group spaces follow membership; global writes require explicit writers
 
 **Wiring a New Graph:**
 1. Choose the execution mode — mission (terminating) vs service (perpetual),

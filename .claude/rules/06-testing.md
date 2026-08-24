@@ -351,23 +351,15 @@ make test-integration   # PR gate (Docker 가용 환경)
 
 ### CI Workflow
 
-```yaml
-# .github/workflows/test.yml (요지)
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v4
-      - run: uv sync --frozen
-      - run: make lint typecheck
-      - run: make test              # unit + coverage gate
-      - run: make test-integration  # Docker 기반
-  e2e-nightly:
-    if: github.event_name == 'schedule'
-    steps:
-      - run: make test-e2e
-```
+실제 워크플로는 `.github/workflows/` 에 구성되어 있다 — job 이름과 머지 게이트 연결은
+`docs/en/ci/status-checks.md` (단일 소스) 를 따른다:
+
+- `ci-quality.yml` — Lint / Type Check / Test (coverage gate) / Integration Test.
+  코드 부재(부트스트랩 단계) 시 가드로 skip 되어 게이트를 통과
+- `ci-convention.yml` — Commit Lint / PR Title Lint / Linked Issue Check
+  (+ 정보성 Branch Name Lint)
+- `ci-docs.yml` — Docs Sync Check (docs/en ↔ docs/ko 구조 미러 + 언어 선택자)
+- `ci-nightly.yml` — E2E Test (schedule 02:00 KST, PR gate 아님)
 
 ## Smoke Testing
 

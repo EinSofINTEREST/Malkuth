@@ -350,9 +350,10 @@ These rules are living documents and should evolve with the project:
 
 ### Internal Documentation
 
-- Architecture Docs: `docs/architecture/`
-- API Documentation: `docs/api/`
-- Runbooks: `docs/runbooks/`
+- Documentation index: `docs/en/README.md` (한국어: `docs/ko/README.md`)
+- Architecture overview: `docs/en/architecture.md`
+- CI conventions & status checks: `docs/en/ci/`
+- Runbooks: `docs/en/runbooks/` (운영 구현과 함께 추가 예정)
 
 ## Getting Help
 

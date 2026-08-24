@@ -8,15 +8,16 @@
 것입니다. 코드 자체의 규약은 [01-architecture.md](01-architecture.md) ~
 [07-code-style.md](07-code-style.md) 및 [09-memory-context.md](09-memory-context.md) 참조.
 
-> **⚠️ 이식 상태**: 아래 규약이 참조하는 보조 도구는 IssueTracker 에서 아직 이식되지 않았다.
+> **⚠️ 이식 상태**: 보조 도구 중 일부는 IssueTracker 에서 아직 이식되지 않았다.
 > 이식 전까지는 명시된 fallback 을 사용한다.
 >
-> | 도구 | 상태 | 이식 전 fallback |
+> | 도구 | 상태 | 비고 / 이식 전 fallback |
 > |---|---|---|
+> | `.github/PULL_REQUEST_TEMPLATE.md` | ✅ 이식 완료 | 규약 4 섹션 구성 반영 |
+> | PR 타이틀 lint / Commit lint CI | ✅ 구성 완료 | `.github/workflows/ci-convention.yml` (+ Linked Issue Check, Branch Name Lint) |
+> | 품질 CI (lint/typecheck/test) | ✅ 구성 완료 | `.github/workflows/ci-quality.yml` — 코드 부재 시 부트스트랩 가드로 skip |
 > | `scripts/gh-meta.sh` | 미이식 | `gh issue edit --add-label` / `gh api graphql` 직접 호출 |
 > | `scripts/pr-resolve-comments.sh` | 미이식 | 개별 `gh api` 호출 |
-> | `.github/PULL_REQUEST_TEMPLATE.md` | 미작성 | 규약 4 의 섹션 구성을 본문에 직접 작성 |
-> | PR 타이틀 lint / Commit lint CI | 미구성 | 규약 6 표기를 수동 준수 |
 > | Issue Type ID (본 repo) | 미조회 | 규약 6 의 조회 명령으로 최초 1회 조회 후 본 문서 갱신 |
 
 <br>
@@ -165,8 +166,7 @@ mutation($issueId: ID!, $subIssueId: ID!) {
 #### 컨벤션 + 템플릿 준수
 
 - **PR 타이틀**: `[카테고리#이슈번호] 제목` (규약 6 표기 체계)
-- **본문**: `.github/PULL_REQUEST_TEMPLATE.md` 의 모든 섹션 채움 (템플릿 이식 전에는
-  아래 섹션을 직접 구성)
+- **본문**: `.github/PULL_REQUEST_TEMPLATE.md` 의 모든 섹션 채움
   - 연관 이슈 (`Closes #N` — closing reference 명시)
   - 구현 내용
   - CI / 머지 게이트 점검
@@ -216,8 +216,8 @@ mutation($issueId: ID!, $subIssueId: ID!) {
 
 | 위치 | 형식 | 예시 | 강제 |
 |---|---|---|---|
-| Commit message | `[FEAT]:` / `[FIX]:` / `[REFAC]:` / `[DOCS]:` / `[CHORE]:` (축약 + 콜론) | `[FIX]: MCP 재연결 처리 보정` | (CI 이식 예정) |
-| PR title | `[FEAT#N]` / `[FIX#N]` / `[REFAC#N]` / `[DOCS#N]` / `[CHORE#N]` (commit 카테고리 + #이슈번호, 콜론 없음) | `[DOCS#2] 룰셋 재작성` | (CI 이식 예정) |
+| Commit message | `[FEAT]:` / `[FIX]:` / `[REFAC]:` / `[DOCS]:` / `[CHORE]:` (축약 + 콜론) | `[FIX]: MCP 재연결 처리 보정` | `ci-convention.yml` Commit Lint |
+| PR title | `[FEAT#N]` / `[FIX#N]` / `[REFAC#N]` / `[DOCS#N]` / `[CHORE#N]` (commit 카테고리 + #이슈번호, 콜론 없음) | `[DOCS#2] 룰셋 재작성` | `ci-convention.yml` PR Title Lint |
 | **Issue title** | **`[FEATURE]` / `[FIX]` / `[REFACTOR]` / `[DOCS]` / `[CHORE]` / `[HOTFIX]`** (full-word, 콜론 없음) | `[FEATURE] Docker 런타임 구현` | (규약 6 운영) |
 
 **핵심 차이**: 이슈 prefix 는 commit prefix 의 축약형이 아니라 **원본 단어** 를 그대로 쓴다.
@@ -317,4 +317,5 @@ gh pr edit <PR_NUMBER> --add-label enhancement
 - 관련 규약:
   - [07-code-style.md](07-code-style.md) — commit/PR 메시지 컨벤션
   - [06-testing.md](06-testing.md) — 작업 단위 테스트 기준
-- 관련 문서: `.github/PULL_REQUEST_TEMPLATE.md` (이식 예정)
+- 관련 문서: `.github/PULL_REQUEST_TEMPLATE.md`,
+  `docs/en/ci/` (CI 운영 규약 + Required Status Checks 단일 소스)

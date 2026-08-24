@@ -570,7 +570,7 @@ Grafana 대시보드 구성:
    - Config: git 버전 관리
 
 2. **Recovery**
-   - 복구 절차 runbook 문서화 (`docs/runbooks/`)
+   - 복구 절차 runbook 문서화 (`docs/en/runbooks/` + `docs/ko/runbooks/`)
    - 분기별 복구 리허설
 
 3. **Retention**

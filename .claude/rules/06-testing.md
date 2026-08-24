@@ -92,8 +92,12 @@ tests/
    토폴로지 검증기의 각 실패 케이스
 3. **protocols/**: 에러 변환 (원 예외 → MalkuthError 카테고리/코드/retryable),
    allowlist 검사, tool 네임스페이싱
-4. **modules/**: ref 파싱/해석, skillset schema 자동 생성, promptset 변수 검증·렌더링
-5. **agentd/**: tool loop (max turns, 병렬 tool, usage 집계), cancellation 처리,
+4. **modules/**: ref 파싱/해석, skillset schema 자동 생성, promptset 변수 검증·렌더링,
+   memoryset 정책 스키마 검증
+5. **memory/**: space ACL (`MEM_001` 경로), 하이브리드 검색 병합(RRF), recall
+   예산/threshold, supersedes 체인 — fake embedder (결정적 해시) 사용,
+   실제 embedding API 호출 금지 ([09-memory-context.md](09-memory-context.md))
+6. **agentd/**: tool loop (max turns, 병렬 tool, usage 집계), cancellation 처리,
    direct 태스크 처리 (`node_id=None` → `default` 템플릿 선택, graph state 불간섭)
 
 ### Fake Model — LLM 호출 테스트의 표준

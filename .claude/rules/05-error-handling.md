@@ -41,7 +41,8 @@ class ErrorCategory(StrEnum):
     # System
     RUNTIME = "runtime"        # 컨테이너/Docker
     GRAPH = "graph"            # 토폴로지/state
-    MODULE = "module"          # skillset/promptset/registry
+    MODULE = "module"          # skillset/promptset/memoryset/registry
+    MEMORY = "memory"          # Memory Service / 인덱스
     STORAGE = "storage"
     CONFIG = "config"
     INTERNAL = "internal"
@@ -97,6 +98,7 @@ class MalkuthError(Exception):
 | `orchestrator/` 의 node 실행/state 병합 결과 | `GRAPH` |
 | `modules/registry.py` 의 ref 해석/로드 결과 | `MODULE`, `CONFIG` |
 | `orchestrator/checkpoint.py` 의 저장/복원 결과 | `STORAGE` |
+| `memory/` 의 append/search/recall 결과 | `MEMORY`, `STORAGE` |
 
 ### MAY — plain exception 유지가 적절한 레이어
 
@@ -176,6 +178,11 @@ MOD_001: 모듈 ref 해석 실패
 MOD_002: 모듈 버전/의존성 충돌
 MOD_003: 모듈 스키마(yaml) 검증 실패
 MOD_004: Promptset 변수 검증 실패
+
+MEM_001: Memory space 미선언 / access 거부
+MEM_002: Memory 저장 실패
+MEM_003: 인덱싱 실패 누적 / 재인덱싱 필요
+MEM_004: 검색 실패 / 인덱스 손상
 
 VAL_001: 필수 필드 누락
 VAL_002: 필드 형식 오류
@@ -321,6 +328,7 @@ log.info(f"task {task_id} done in {elapsed}ms")
 | `skillset`      | str    | 스킬셋 ref |
 | `promptset`     | str    | 프롬프트셋 ref |
 | `module_ref`    | str    | 모듈 참조 문자열 (`type/name@version`) |
+| `memory_space`  | str    | 메모리 space 별칭/이름 |
 | `model`         | str    | 모델 이름 |
 | `provider`      | str    | 모델 provider |
 | `container_id`  | str    | Docker 컨테이너 id (short) |
@@ -409,6 +417,12 @@ malkuth_checkpoint_operations_total{operation, status}
 malkuth_service_iterations_total{graph, status}          # Counter — iteration 단위
 malkuth_service_idle_delay_seconds{graph}                # Gauge — 현재 idle backoff
 
+# Memory metrics ([09-memory-context.md](09-memory-context.md))
+malkuth_memory_operations_total{space, op, status}       # op: append|search|recall
+malkuth_memory_search_duration_seconds{space}
+malkuth_memory_entries{space}                            # Gauge
+malkuth_memory_index_lag_seconds{space}
+
 # Circuit breaker
 malkuth_circuit_state{target}                            # Gauge: 0 closed / 1 open / 2 half
 ```
@@ -418,7 +432,7 @@ malkuth_circuit_state{target}                            # Gauge: 0 closed / 1 o
 ```python
 class HealthStatus(BaseModel):
     status: Literal["healthy", "degraded", "unhealthy"]
-    components: dict[str, ComponentHealth]   # model, mcp:{server}, a2a, modules
+    components: dict[str, ComponentHealth]   # model, mcp:{server}, a2a, modules, memory
     checked_at: datetime
 ```
 

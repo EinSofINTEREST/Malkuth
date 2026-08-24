@@ -1,8 +1,9 @@
-# Module System Rules — Skillsets, Promptsets, Graph Modules
+# Module System Rules — Skillsets, Promptsets, Memorysets, Graph Modules
 
 ## Core Principle: Modules Are Independent Deliverables
 
-스킬셋, 프롬프트셋, 그래프는 에이전트 코드와 **독립적으로 배포/교체 가능한 모듈**이다.
+스킬셋, 프롬프트셋, 메모리셋, 그래프는 에이전트 코드와 **독립적으로 배포/교체 가능한
+모듈**이다.
 
 1. **분리**: 모듈은 프레임워크 코드(`src/`)와 에이전트 코드(`agents/*/src/`)에 포함되지 않고
    `modules/`, `graphs/` 에 별도 존재한다
@@ -23,6 +24,7 @@ Solution (= Graph, goal 단위, mode: mission | service)
 ├── connections ── A2A allowlist            (에이전트 간 유기적 연결 선언)
 ├── skillsets   ── skillsets/{name}@{ver}   (에이전트 능력)
 ├── promptsets  ── promptsets/{name}@{ver}  (에이전트 페르소나/지시)
+├── memorysets  ── memorysets/{name}@{ver}  (기억 정책 — scope/인덱스/보존)
 └── subgraphs   ── graphs/{name}@{ver}      (그래프 재사용)
 ```
 
@@ -38,6 +40,7 @@ Solution (= Graph, goal 단위, mode: mission | service)
 예:
   skillsets/web-search@0.2.0
   promptsets/researcher@0.1.0
+  memorysets/agent-longterm@0.1.0
   agents/planner@0.1.0
   graphs/research-pipeline@1.0.0
 ```
@@ -178,6 +181,19 @@ spec:
    템플릿은 표현만
 5. **Prompt Changes Are Versioned**: 프롬프트 문구 수정도 반드시 version bump —
    실험/롤백 추적 가능해야 함
+
+## Memoryset Modules
+
+컨텍스트 메모리 space 의 정책(scope, 인덱스, 보존/compaction, recall 기본값)을 선언하는
+모듈. 상세 스펙과 규칙은 [09-memory-context.md](09-memory-context.md).
+
+모듈 시스템 관점 요지:
+
+1. 디렉토리: `modules/memorysets/{name}/{version}/memoryset.yaml`
+2. 참조: 에이전트 manifest / 그래프 config 의 `memory.spaces` 선언으로만
+3. Embedding 모델/차원 변경 = **version bump + 전체 재인덱싱** (minor 이상)
+4. Shared scope 의 access grant 는 모듈이 아니라 **그래프 선언** 소관 —
+   memoryset 은 정책만, 권한은 배선이 결정
 
 ## Graph Modules — Modular Agent Wiring
 
@@ -320,6 +336,7 @@ spec:
 modules/
 ├── skillsets/{name}/{version}/skillset.yaml
 ├── promptsets/{name}/{version}/promptset.yaml
+├── memorysets/{name}/{version}/memoryset.yaml
 agents/{name}/manifest.yaml            # 버전은 manifest 내부 선언
 graphs/{name}.yaml
 ```
@@ -347,4 +364,6 @@ graphs/{name}.yaml
 
 - **Skillset**: skill 단위 유닛 테스트 + schema 생성 스냅샷 테스트
 - **Promptset**: 변수 스키마 검증 테스트 + 렌더링 골든 테스트 (스냅샷)
+- **Memoryset**: 정책 스키마 검증 + recall 예산/threshold 적용 테스트
+  ([09-memory-context.md](09-memory-context.md))
 - **Graph**: 토폴로지 검증 테스트 + fake agent 로 라우팅 시나리오 테스트

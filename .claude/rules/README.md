@@ -17,6 +17,8 @@ of an extensible agent runtime with per-agent isolation and freely composable ag
 - Connect and disconnect agents freely through config-driven, module-style graph wiring
 - Provide skillsets and promptsets as independent, versioned, swappable modules —
   a solution is assembled from modules, not written from scratch
+- Give agents context memory with scope isolation and hybrid search indexes,
+  governed by versioned memoryset policies
 
 ## Ruleset Structure
 
@@ -145,6 +147,21 @@ Essential for:
 - AI-assisted development efficiency
 - Safe boundary enforcement on destructive / external operations
 
+### [09-memory-context.md](09-memory-context.md)
+**Context Memory and Index Design**
+
+Covers:
+- Memory scopes (run / agent / shared) and graph-state boundary rules
+- Memoryset modules — versioned policies for index, retention, recall
+- Hybrid index design (vector + lexical + metadata, RRF merge)
+- Retrieval API, context assembly budgets, provenance rules
+- Compaction, retention, and storage backends
+
+Key for:
+- Giving agents durable, searchable context without breaking isolation
+- Optimizing what gets injected into each prompt
+- Keeping memory growth and cost under control
+
 ## Quick Start Guide
 
 ### For New Developers
@@ -167,6 +184,11 @@ Essential for:
 1. Review [04-module-system.md](04-module-system.md) — module specification
 2. Follow versioning and compatibility rules
 3. Add module-level tests
+
+**Attaching Memory to an Agent or Graph:**
+1. Review [09-memory-context.md](09-memory-context.md) — scopes and memoryset spec
+2. Declare spaces in the manifest (agent scope) or graph config (run/shared scope)
+3. Shared spaces require explicit access grants per agent
 
 **Wiring a New Graph:**
 1. Choose the execution mode — mission (terminating) vs service (perpetual),

@@ -70,6 +70,8 @@ class TaskResult(BaseModel):
 
 2. **Statelessness**
    - invoke 간 in-memory 상태 유지 금지 — 모든 지속 데이터는 graph state 로 반환
+   - 지속 기억이 필요하면 `AgentContext.memory` 로 선언된 space 에 저장
+     ([09-memory-context.md](09-memory-context.md)) — 프로세스 메모리/로컬 파일 금지
    - 캐시는 허용하되 correctness 에 영향을 주지 않아야 함 (컨테이너 재시작 시 소실 전제)
 
 3. **Idempotency**
@@ -120,6 +122,11 @@ spec:
   skillsets:
     - ref: skillsets/web-search@0.2.0
     - ref: skillsets/summarize@0.1.0
+
+  memory:                       # 컨텍스트 메모리 space — 09 참조
+    spaces:
+      - ref: memorysets/agent-longterm@0.1.0
+        as: longterm
 
   mcp:                          # 이 에이전트 전용 MCP 서버 — 03 참조
     servers:

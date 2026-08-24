@@ -29,11 +29,12 @@
 │  (A2A server/client, MCP client + servers)   │
 ├──────────────────────────────────────────────┤
 │  Module Layer                                │
-│  (Skillsets, Promptsets, Graph modules,      │
-│   Module registry)                           │
+│  (Skillsets, Promptsets, Memorysets,         │
+│   Graph modules, Module registry)            │
 ├──────────────────────────────────────────────┤
 │  Storage & Observability Layer               │
-│  (Checkpoints, Registry DB, Logs, Metrics)   │
+│  (Checkpoints, Memory store + index,         │
+│   Registry DB, Logs, Metrics)                │
 └──────────────────────────────────────────────┘
 ```
 
@@ -62,11 +63,14 @@
    - No protocol resource is shared across agents
 
 5. **Module Layer**
-   - Skillsets (tool bundles), promptsets (prompt bundles), graph modules
+   - Skillsets (tool bundles), promptsets (prompt bundles), memorysets (memory
+     policies), graph modules
    - Versioned, independently deployable, swappable at agent restart
 
 6. **Storage & Observability Layer**
    - Graph checkpoints, run history, module registry
+   - Memory Service: context memory spaces + hybrid search index
+     ([09-memory-context.md](09-memory-context.md))
    - Structured logs, metrics, traces
 
 ## Design Principles
@@ -173,7 +177,10 @@
   - Per-agent MCP client + server declaration
   - Per-agent A2A server + connection allowlist
 - **Module System**
-  - Skillset / promptset loaders + local registry
+  - Skillset / promptset / memoryset loaders + local registry
+- **Memory System**
+  - Memory Service (space + access token) / 하이브리드 인덱스 (vector + lexical)
+  - Auto-recall + `memory_search` tool
 - **Observability**
   - structlog structured logging
   - Prometheus metrics
@@ -185,7 +192,7 @@
 - Remote module registry
 - Kubernetes runtime backend (alternative to local Docker)
 - Multi-host agent distribution
-- Memoryset modules (long-term agent memory)
+- 전용 vector DB backend (Qdrant 등 — MemoryStore 구현 추가)
 
 ## Directory Structure
 
@@ -218,7 +225,14 @@ malkuth/
 │       ├── modules/             # 모듈 시스템
 │       │   ├── skillset.py      # Skillset 스키마 + 로더
 │       │   ├── promptset.py     # Promptset 스키마 + 로더 (Jinja2)
+│       │   ├── memoryset.py     # Memoryset 스키마 (정책 선언)
 │       │   └── registry.py      # 모듈 해석 (ref@version → 경로)
+│       │
+│       ├── memory/              # Memory Service (컨텍스트 메모리 + 인덱스)
+│       │   ├── service.py       # space 관리 + access 토큰 검증 API
+│       │   ├── store.py         # MemoryStore 추상 + sqlite/postgres 구현
+│       │   ├── index.py         # 하이브리드 인덱스 (vector + lexical + filter)
+│       │   └── recall.py        # 검색/병합(RRF) + 컨텍스트 주입 예산
 │       │
 │       ├── agentd/              # 에이전트 컨테이너 내부 실행 데몬
 │       │   ├── server.py        # Agent Control API 서버 (FastAPI)
@@ -235,7 +249,8 @@ malkuth/
 │
 ├── modules/                     # 배포 가능한 모듈 저장소 (로컬 레지스트리)
 │   ├── skillsets/<name>/        # skillset.yaml + skills/
-│   └── promptsets/<name>/       # promptset.yaml + templates/
+│   ├── promptsets/<name>/       # promptset.yaml + templates/
+│   └── memorysets/<name>/       # memoryset.yaml (메모리 정책)
 │
 ├── graphs/                      # 그래프 토폴로지 정의
 │   └── <graph-name>.yaml
@@ -305,6 +320,7 @@ malkuth/
 
 ### Storage
 - **Checkpoints**: In-memory (dev) → Redis 7+ / PostgreSQL 15+ (prod)
+- **Memory & Index**: SQLite + sqlite-vec/FTS5 (dev) → PostgreSQL + pgvector (prod)
 - **Module Registry**: Local filesystem (v0.1) → PostgreSQL (future)
 
 ### Observability
@@ -359,8 +375,10 @@ Client → Control Plane → Orchestrator(StateGraph)
 | **Graph state** | 워크플로 단계 간 데이터 전달 | Orchestrator + Checkpointer | 기본 경로. 모든 노드 산출물은 state 로 |
 | **A2A peer call** | 실행 중 peer 에이전트에게 위임/질의 (대등) | A2A protocol | 그래프 config 의 `connections` allowlist 에 선언된 방향만 허용 |
 | **Direct request** | 클라이언트 → 특정 에이전트 직접 요청 (인터랙티브 포함) | Control Plane → Agent Control API | 그래프 run 과 독립된 단독 태스크 — graph state 를 건드리지 않음 |
+| **Shared memory** | 선언된 space 를 통한 지식 축적/공유 | Memory Service | memoryset 선언 + access grant 필수 ([09-memory-context.md](09-memory-context.md)) |
 
 Graph state 를 우회하는 사이드채널 (공유 파일, 공유 DB 테이블, 전역 큐) 은 금지.
+유일한 예외는 **선언된 shared memory space** — 접근 권한이 선언·검증되는 공유 경로다.
 
 ## Configuration Strategy
 
@@ -404,6 +422,11 @@ protocols:
 registry:
   backend: filesystem
   root: ./modules
+
+memory:
+  backend: sqlite               # sqlite (dev) | postgres (prod)
+  index_lag_target_s: 5         # 비동기 인덱싱 목표 지연
+  run_scope_retention_days: 30  # run scope 보존 (checkpoint 와 동일)
 
 observability:
   log_level: DEBUG

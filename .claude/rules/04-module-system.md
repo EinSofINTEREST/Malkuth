@@ -12,6 +12,24 @@
 4. **선언적 참조**: 모듈 사용은 manifest / graph config 의 ref 선언으로만 —
    코드에서 모듈 경로 직접 import 금지
 
+### Everything Is a Module — 솔루션 = 모듈 조립
+
+Malkuth 에서 하나의 "솔루션"(특정 목표를 위한 기능 전체 오케스트레이션, 또는 무한 반복
+과업)은 새 코드가 아니라 **모듈 조립**으로 구성한다:
+
+```
+Solution (= Graph, goal 단위, mode: mission | service)
+├── agents      ── agents/{name}@{ver}      (노드 배치 — 전부 동등한 peer)
+├── connections ── A2A allowlist            (에이전트 간 유기적 연결 선언)
+├── skillsets   ── skillsets/{name}@{ver}   (에이전트 능력)
+├── promptsets  ── promptsets/{name}@{ver}  (에이전트 페르소나/지시)
+└── subgraphs   ── graphs/{name}@{ver}      (그래프 재사용)
+```
+
+새 목표가 생기면: **기존 모듈로 그래프를 배선 → 부족한 능력만 새 모듈로 추가 → 배포**.
+목표 구성에 프레임워크 코드(`src/`) 수정이 필요하다면 그것은 모듈 시스템의 결함으로
+간주하고 프레임워크 이슈로 처리한다.
+
 ### Module Reference Format
 
 ```
@@ -178,6 +196,9 @@ metadata:
   description: 질의 → 계획 → 리서치 → 작성 파이프라인
 
 spec:
+  mode: mission                 # mission(달성형, 기본) | service(상주형) — 01 참조
+  goal: 질의를 받아 계획 → 리서치 → 보고서 작성을 완료한다   # 문서화 필수
+
   state:
     schema: malkuth.graphs.schemas:ResearchState   # pydantic 모델 ref
     checkpointer: default                          # 프레임워크 설정 상속
@@ -213,6 +234,46 @@ spec:
     - {caller: researcher, callee: planner}
 ```
 
+### Service Mode Example — 무한 반복 과업
+
+```yaml
+# graphs/feed-monitor.yaml
+apiVersion: malkuth/v1
+kind: Graph
+metadata:
+  name: feed-monitor
+  version: 1.0.0
+  description: 피드 상시 감시 → 신규 항목 분류/알림
+
+spec:
+  mode: service
+  goal: 등록된 피드를 상시 감시하고 신규 항목을 분류하여 알린다
+
+  service:                       # service 모드 전용 설정
+    idle:                        # 필수 — busy-loop 방지
+      min_delay_s: 30
+      max_delay_s: 600           # 작업 없을 때 exponential backoff
+    max_failure_streak: 5        # iteration 연속 실패 임계 — 초과 시 run 정지 + 알림
+
+  state:
+    schema: malkuth.graphs.schemas:FeedMonitorState
+
+  nodes:
+    - id: watcher
+      agent: agents/feed-watcher@0.1.0
+    - id: classifier
+      agent: agents/classifier@0.1.0
+    - id: notifier
+      agent: agents/notifier@0.1.0
+
+  edges:
+    - {from: START, to: watcher}
+    - {from: watcher, to: classifier, condition: malkuth.graphs.conditions:has_new_items}
+    - {from: watcher, to: watcher, condition: malkuth.graphs.conditions:idle}  # 무한 루프 — service 만 허용
+    - {from: classifier, to: notifier}
+    - {from: notifier, to: watcher}
+```
+
 ### Graph Rules
 
 1. **Config Over Code**
@@ -221,12 +282,18 @@ spec:
 2. **Validation** (배포 시, 실패하면 배포 중단)
    - 모든 `agent` ref 해석 가능
    - dangling edge 없음 (from/to 가 노드 or START/END)
-   - START 에서 모든 노드 도달 가능, END 도달 가능
+   - START 에서 모든 노드 도달 가능 (END 도달 요건은 아래 mode 규칙)
    - `input_map` 의 state 키가 state schema 에 존재
    - conditional edge 의 조건 함수 import 가능
    - `connections` 의 caller/callee 가 모두 그래프 노드
-3. **Cycle Policy**: 순환 edge 는 허용하되 (self-loop 포함, 재시도/refinement 패턴)
-   `max_iterations` 명시 필수 — 미명시 시 검증 실패
+3. **Mode & Cycle Policy**
+   - `mission` (기본): END 도달 필수. 순환 edge (self-loop 포함, 재시도/refinement 패턴)
+     는 허용하되 `max_iterations` 명시 필수 — 미명시 시 검증 실패
+   - `service`: END 없어도 됨 — 종료는 운영자 stop / 명시적 stop 조건.
+     무한 순환 허용, 대신 `service.idle` (backoff) 미선언 시 검증 실패.
+     Iteration 마다 checkpoint, `max_failure_streak` (기본 5) 초과 시 정지 + 알림.
+     Iteration 간 state 연속성이 불필요하면 service 대신 스케줄 반복 mission 사용
+     ([01-architecture.md](01-architecture.md) Mode Rules)
 4. **State Schema**
    - pydantic 모델로 정의, 노드 산출물 병합은 `output_map` 으로만
    - 노드가 state 전체를 덮어쓰는 패턴 금지 — 선언된 키만 병합
@@ -267,7 +334,9 @@ graphs/{name}.yaml
 2. Skillset 의 `requires.env` ⊆ agent manifest 의 `env_allowlist` — 배포 검증
 3. Promptset 템플릿 이름 ⊇ 그래프에서 해당 에이전트가 사용하는 node_id 집합
    (agentd 가 `task.node_id` 로 템플릿을 선택하기 때문)
-4. Breaking change 기준:
+4. Direct 요청(그래프 밖 단독 태스크, [02-agent-implementation.md](02-agent-implementation.md))
+   을 받는 에이전트의 promptset 은 `default` 템플릿 포함 필수
+5. Breaking change 기준:
    - Skillset: tool 시그니처/이름 변경 = minor 이상
    - Promptset: 변수 스키마 변경 = minor 이상
    - Graph: state schema 변경 = major

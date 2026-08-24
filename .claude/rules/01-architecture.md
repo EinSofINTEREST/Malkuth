@@ -5,7 +5,9 @@
 ### System Overview
 - **Purpose**: Modular multi-agent orchestration framework
 - **Foundation**: LangGraph state graphs over Docker-isolated agents
-- **Design Philosophy**: Isolation, composability, explicit contracts
+- **Composition Model**: 목표(goal) 단위 그래프 = 여러 **main agent** + 각 main 에 붙는 **sub-agent 팀**
+- **Execution Model**: 달성형(**mission**) run 과 무한 반복형(**service**) run 모두 지원
+- **Design Philosophy**: Isolation, composability, explicit contracts — everything is a module
 
 ### Architectural Layers
 
@@ -78,6 +80,8 @@
 - Agent-to-agent connections are **declared in graph config**, never hardcoded
 - Attaching / detaching an agent from a graph MUST be a config change only
 - Any agent satisfying the agent contract can be placed at any compatible node
+- Main/sub 역할은 **배선이 결정** — 같은 에이전트 모듈이 그래프에 따라 main 또는 sub 로 배치
+- Sub-agent 팀 구성(붙이기/떼기)도 그래프 config 변경만으로 완료
 
 ### 3. Explicit Contracts
 - Every agent ships a **manifest** declaring model, modules, protocols, resources
@@ -94,13 +98,74 @@
 - Unhealthy agents are circuit-broken and restarted by the runtime
 - All external calls have timeouts and typed errors
 
+## Agent Hierarchy — Main Agents and Sub-Agents
+
+그래프는 **goal(목표) 단위**로 구성된다. 목표를 달성하기 위해 돌아가는 여러 **main agent** 가
+그래프 노드로 배치되고, 각 main agent 아래에 **sub-agent** 들이 붙어 팀을 이룬다.
+
+```
+        Graph = goal 단위 ("research-pipeline", "feed-monitor", ...)
+
+   START ──▶ [ planner ] ──▶ [ researcher ] ──▶ [ writer ] ──▶ END / loop
+              (main)            (main)            (main)
+                                   │ 위임 (delegation)
+                     ┌─────────────┼─────────────┐
+              [web-searcher]  [doc-reader]  [fact-checker]
+                  (sub)          (sub)          (sub)
+                                   │ 위임 (중첩 — depth 제한)
+                             [pdf-parser]
+                                (sub)
+```
+
+### Hierarchy Rules
+
+1. **Main agent**: 그래프 노드로 배치되어 워크플로 단계를 담당한다.
+   Main 간 관계는 edges(graph state)와 connections(A2A)로만 연결된다
+2. **Sub-agent**: 특정 main agent(또는 상위 sub-agent)에 붙어 위임받은 작업을 수행한다.
+   그래프 edge 에 등장하지 않으며, 부모의 tool (`agent__{id}`) 로 노출된다
+3. **역할은 배선이 결정**: main/sub 는 에이전트 코드가 아니라 그래프 config 의 배치가 결정.
+   같은 에이전트 모듈이 그래프 A 에서는 main, 그래프 B 에서는 sub 가 될 수 있다
+4. **팀 = 운영 단위**: main + 그 sub 트리는 함께 기동/드레인/정리된다
+5. **중첩 허용**: sub 아래 sub 가능 — 위임 깊이 상한 적용
+   (기본 3, [03-protocol-integration.md](03-protocol-integration.md))
+6. **격리 유지**: sub-agent 도 독립 컨테이너 — 부모와 프로세스/파일시스템 공유 금지
+
+상세 배선 스펙은 [04-module-system.md](04-module-system.md), 위임 실행 모델은
+[02-agent-implementation.md](02-agent-implementation.md) 참조.
+
+## Execution Modes — Mission and Service
+
+목표의 성격에 따라 그래프는 두 가지 모드로 실행된다. 모드는 그래프 config 에 선언한다.
+
+| | **Mission (달성형)** | **Service (상주형)** |
+|---|---|---|
+| 목표 | 특정 기능/산출물 완성을 위한 오케스트레이션 | 무한히 반복해야 할 과업 |
+| 종료 | END 도달 시 완료, 결과 반환 | 자연 종료 없음 — 운영자 stop / 명시적 stop 조건 |
+| 토폴로지 | END 필수, cycle 은 `max_iterations` 필수 | 무한 cycle 허용, idle 정책 필수 |
+| Checkpoint | node 단위 | node + iteration 단위 (재시작 시 이어서) |
+| 예시 | 리서치 보고서 생성, 기능 구현 파이프라인 | 피드 감시, 큐 소비, 주기 리포팅 |
+
+### Mode Rules
+
+1. **Mission**: `START → ... → END`. 완료 시 최종 state 반환, run 종료
+2. **Service**: iteration loop 로 영구 실행
+   - Iteration 마다 checkpoint — 프로세스/호스트 재시작 시 마지막 iteration 에서 재개
+   - **Idle 정책 필수**: 처리할 작업이 없으면 exponential backoff —
+     busy-loop 로 모델 호출을 낭비하는 것 금지
+   - 중단은 drain 방식 — 진행 중 iteration 완료 후 정지
+   - 연속 실패 임계(`max_failure_streak`) 초과 시 run 정지 + 알림 (crash loop 방지)
+3. **Recurring mission** (스케줄 반복): iteration 간 state 연속성이 **불필요**하면 service
+   대신 control plane 스케줄러로 mission run 을 반복 실행한다.
+   연속성 필요(누적 상태, 중복 방지 등) → **service** / 매회 독립 → **recurring mission**
+
 ## Current Implementation Status
 
 ### 📋 Planned (v0.1.0 — bootstrap)
 - **Core Framework**
   - Agent interface + manifest schema (pydantic)
-  - Graph topology schema + validation
+  - Graph topology schema + validation (mission/service 모드, sub-agent 계층 포함)
   - LangGraph orchestrator (config → StateGraph)
+  - Service run loop (iteration checkpoint + idle backoff)
 - **Agent Runtime**
   - Docker container lifecycle management
   - Agent Control API (invoke / stream / health / card)
@@ -281,17 +346,20 @@ Client → Control Plane → Orchestrator(StateGraph)
 2. **Invoke**: 클라이언트가 run 제출 → orchestrator 가 initial state 구성
 3. **Node Execution**: orchestrator → runtime → 해당 agent 의 Control API `/invoke`
 4. **Tool Loop**: 에이전트 내부에서 모델 ↔ skillset/MCP tool 실행 루프
-5. **A2A Call** (선택): 에이전트가 allowlist 내 peer 에이전트를 A2A 로 직접 호출
+5. **Delegation / A2A Call** (선택): main 이 sub-agent 에게 위임 (`agent__` tool)
+   하거나, allowlist 내 peer 에이전트를 A2A 로 직접 호출
 6. **Checkpoint**: node 완료마다 state 저장 (실패 시 마지막 checkpoint 에서 재개)
 7. **Edge Evaluation**: 조건 함수 평가 → 다음 node 라우팅
-8. **Complete**: END 도달 → 결과 반환, run 기록 저장
+8. **Complete / Iterate**: mission 은 END 도달 → 결과 반환, run 기록 저장.
+   service 는 iteration checkpoint 후 다음 iteration 으로 순환 (idle 시 backoff)
 
-### Two Communication Paths — 반드시 구분
+### Three Communication Paths — 반드시 구분
 
 | 경로 | 용도 | 매체 | 규칙 |
 |---|---|---|---|
-| **Graph state** | 워크플로 단계 간 데이터 전달 | Orchestrator + Checkpointer | 기본 경로. 모든 노드 산출물은 state 로 |
-| **A2A direct call** | 실행 중 peer 에이전트에게 위임/질의 | A2A protocol | 그래프 config 의 `connections` allowlist 에 선언된 쌍만 허용 |
+| **Graph state** | 워크플로 단계(main 노드) 간 데이터 전달 | Orchestrator + Checkpointer | 기본 경로. 모든 노드 산출물은 state 로 |
+| **Delegation** | main → 자기 팀 sub-agent 작업 위임 | 부모 tool (`agent__{id}`) → A2A | 그래프 `subagents` 계층 선언으로 자동 허용 — 부모→자식 방향만 |
+| **A2A peer call** | 실행 중 peer 에이전트에게 위임/질의 | A2A protocol | 그래프 config 의 `connections` allowlist 에 선언된 쌍만 허용 |
 
 Graph state 를 우회하는 사이드채널 (공유 파일, 공유 DB 테이블, 전역 큐) 은 금지.
 
@@ -320,8 +388,13 @@ runtime:
 
 orchestrator:
   checkpointer: memory        # memory | redis | postgres
-  max_concurrent_runs: 10
+  max_concurrent_runs: 10     # mission run 동시 실행 상한
+  max_service_runs: 5         # 상주(service) run 상한 — 장기 점유 슬롯 분리 관리
   node_timeout_s: 300
+  service_defaults:
+    idle_min_delay_s: 30
+    idle_max_delay_s: 600
+    max_failure_streak: 5
 
 protocols:
   a2a:
@@ -343,11 +416,13 @@ observability:
 
 배포 시점에 다음을 검증하고, 하나라도 실패하면 컨테이너를 기동하지 않는다:
 
-1. Graph topology 의 모든 `agent` ref 가 존재하는 manifest 를 가리키는가
+1. Graph topology 의 모든 `agent` ref (subagents 포함) 가 존재하는 manifest 를 가리키는가
 2. 모든 manifest 의 skillset/promptset ref 가 registry 에서 해석되는가
 3. `connections` 의 caller/callee 가 모두 그래프 노드인가
-4. A2A 포트 충돌이 없는가
-5. Resource 합계가 호스트 한도 내인가 (경고)
+4. Mode 별 토폴로지 규칙 충족 (mission: END 도달 / service: idle 정책 선언)
+5. `subagents` 계층의 위임 깊이가 상한 이내인가
+6. A2A 포트 충돌이 없는가
+7. Resource 합계 (sub-agent 팀 포함) 가 호스트 한도 내인가 (경고)
 
 ## Scalability Considerations
 

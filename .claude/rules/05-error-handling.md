@@ -169,7 +169,8 @@ RT_005:  Drain timeout
 GRAPH_001: 토폴로지 검증 실패
 GRAPH_002: Node 실행 실패 (에이전트 에러 wrapping)
 GRAPH_003: State schema 불일치 / 병합 실패
-GRAPH_004: Max iterations 초과
+GRAPH_004: Max iterations 초과 (mission)
+GRAPH_005: Service iteration 연속 실패 임계 초과 — run 정지
 
 MOD_001: 모듈 ref 해석 실패
 MOD_002: 모듈 버전/의존성 충돌
@@ -333,6 +334,8 @@ log.info(f"task {task_id} done in {elapsed}ms")
 | `input_tokens`  | int    | 입력 토큰 수 |
 | `output_tokens` | int    | 출력 토큰 수 |
 | `turn`          | int    | tool loop 회차 |
+| `iteration`     | int    | Service run 의 iteration 회차 |
+| `mode`          | str    | Run 모드 (`mission`/`service`/`direct`) |
 | `port`          | int    | 포트 |
 
 **규칙:**
@@ -346,7 +349,7 @@ log.info(f"task {task_id} done in {elapsed}ms")
 
 | 컴포넌트 | 모든 로그에 필수 |
 |---|---|
-| `orchestrator/` | `graph`, `run_id` (+node 실행 로그는 `node_id`, `agent`) |
+| `orchestrator/` | `graph`, `run_id` (+node 실행 로그는 `node_id`, `agent` / service run 로그는 `iteration`) |
 | `runtime/` | `agent` (+컨테이너 조작 로그는 `container_id`, `image`) |
 | `protocols/a2a/` | `a2a_caller`, `a2a_callee` (+task 로그는 `a2a_task_id`) |
 | `protocols/mcp/` | `agent`, `mcp_server` (+tool 로그는 `tool`, `duration_ms`) |
@@ -397,10 +400,14 @@ malkuth_container_restarts_total{agent, reason}
 malkuth_agent_health{agent}                              # Gauge: 1 healthy / 0 unhealthy
 
 # Orchestrator metrics
-malkuth_runs_active{graph}                               # Gauge
-malkuth_runs_total{graph, status}
+malkuth_runs_active{graph, mode}                         # Gauge — mode: mission|service
+malkuth_runs_total{graph, mode, status}
 malkuth_node_duration_seconds{graph, node_id}
 malkuth_checkpoint_operations_total{operation, status}
+
+# Service run metrics
+malkuth_service_iterations_total{graph, status}          # Counter — iteration 단위
+malkuth_service_idle_delay_seconds{graph}                # Gauge — 현재 idle backoff
 
 # Circuit breaker
 malkuth_circuit_state{target}                            # Gauge: 0 closed / 1 open / 2 half
@@ -462,6 +469,20 @@ groups:
         labels: {severity: critical}
         annotations:
           summary: "Checkpoint failures — run recovery at risk"
+
+      - alert: ServiceRunStalled
+        expr: |
+          malkuth_runs_active{mode="service"} > 0
+          and increase(malkuth_service_iterations_total[30m]) == 0
+        labels: {severity: critical}
+        annotations:
+          summary: "Service graph {{ $labels.graph }} made no progress for 30m"
+
+      - alert: ServiceRunHalted
+        expr: increase(malkuth_service_iterations_total{status="halted"}[10m]) > 0
+        labels: {severity: critical}
+        annotations:
+          summary: "Service graph {{ $labels.graph }} halted (GRAPH_005 failure streak)"
 ```
 
 ### Dashboards
@@ -488,6 +509,8 @@ Grafana 대시보드 구성:
    - Provider rate limit: 세마포어 축소, 필요 시 fallback 모델 전환
    - MCP 서버 불안정: `optional` 전환 또는 해당 skillset 비활성 버전으로 롤백
    - 토폴로지 문제: 이전 그래프 버전으로 롤백 (모듈 버저닝 덕에 즉시 가능)
+   - Service run 정지 (GRAPH_005): 에러 코드 분포로 원인 해소 확인 후
+     `malkuth run resume <run_id>` 로 마지막 iteration checkpoint 에서 재개
 
 3. **Escalation**
    - P0 (Critical): 전체 run 실패, checkpoint 유실

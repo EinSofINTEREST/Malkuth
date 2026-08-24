@@ -93,7 +93,8 @@ tests/
 3. **protocols/**: 에러 변환 (원 예외 → MalkuthError 카테고리/코드/retryable),
    allowlist 검사, tool 네임스페이싱
 4. **modules/**: ref 파싱/해석, skillset schema 자동 생성, promptset 변수 검증·렌더링
-5. **agentd/**: tool loop (max turns, 병렬 tool, usage 집계), cancellation 처리
+5. **agentd/**: tool loop (max turns, 병렬 tool, usage 집계), cancellation 처리,
+   direct 태스크 처리 (`node_id=None` → `default` 템플릿 선택, graph state 불간섭)
 
 ### Fake Model — LLM 호출 테스트의 표준
 
@@ -233,6 +234,11 @@ async def test_graph_conditional_routing(fake_runtime):
 
 - Checkpointer 는 in-memory 사용 (`MemorySaver`)
 - 재개 시나리오: node 실패 → 동일 checkpoint 에서 resume → 성공 경로 검증 필수
+- **Service 모드 필수 시나리오** (fake clock 주입 — 실제 sleep 금지):
+  - Iteration N 회 반복 후 state 누적 검증, iteration 마다 checkpoint 기록 확인
+  - Idle 시 exponential backoff 진행 (min → max 상한 도달) / 작업 감지 시 backoff reset
+  - Drain 요청 시 진행 중 iteration 완료 후 정지, 재시작 시 다음 iteration 부터 재개
+  - `max_failure_streak` 도달 시 GRAPH_005 로 정지 + `status="halted"` 기록
 
 ## End-to-End Testing
 

@@ -1,0 +1,318 @@
+# Context Memory and Index Rules
+
+메모리 관리와 컨텍스트 탐색 최적화를 위한 규칙. 에이전트가 태스크/run/장기 기억을
+저장·검색하는 **Memory Service** 와, 검색을 빠르고 정확하게 만드는 **인덱스 설계**를 다룬다.
+
+## Core Principles
+
+1. **선언된 space 에만 기억한다**: 모든 메모리는 선언된 memory space 에 속한다 —
+   ad-hoc 파일/DB 에 기억 저장 금지
+2. **격리 기본, 공유는 선언**: 에이전트의 장기 기억은 그 에이전트만 접근.
+   공유가 필요하면 shared space 를 **명시적 access grant** 로 선언 (A2A allowlist 와
+   같은 철학 — 동등한 peer 간 선언 기반 공유)
+3. **Graph state 와 역할 분리**: state 는 워크플로 계약 데이터, memory 는 검색 가능한
+   컨텍스트 축적 — 서로 대체하지 않는다
+4. **검색 최적화는 인덱스가 담당**: 에이전트가 raw 스캔하지 않도록 하이브리드 인덱스
+   (vector + lexical + 메타데이터 필터) 를 space 단위로 유지
+5. **모듈화**: 메모리 정책(스키마/인덱스/보존)은 **memoryset 모듈**로 버저닝 —
+   에이전트/그래프는 ref 로만 참조 ([04-module-system.md](04-module-system.md))
+
+## Memory Scopes
+
+| Scope | 소유/수명 | 접근 | 용도 |
+|---|---|---|---|
+| **task** (tier 0) | 태스크 실행 중 in-process | 해당 태스크만 | 작업 컨텍스트 (프롬프트 내) — Memory Service 저장 대상 아님 |
+| **run** | Graph run 단위, run 보존 기간 | 해당 run 의 모든 노드 에이전트 | run 내 관찰/중간 산출물 축적, 노드 간 비정형 컨텍스트 |
+| **agent** | 에이전트 단위, 영구 (보존 정책) | 소유 에이전트만 | 장기 학습 사실, 과거 작업 요약, 선호/패턴 |
+| **shared** | 명시 선언 단위, 영구 (보존 정책) | access grant 된 에이전트만 | 팀 공용 지식 베이스, 도메인 사실 축적 |
+
+### Scope Rules
+
+1. **run scope**: run 종료 후 read-only 전환 — 보존 기간(기본 30일, checkpoint 와 동일)
+   후 삭제. Service run 은 iteration 이 이어지는 동안 계속 누적 + compaction 적용
+2. **agent scope**: 컨테이너 재시작/재배포와 무관하게 유지 — 에이전트 이름 기준.
+   에이전트 버전 교체 시에도 승계 (기억은 이름에, 계약은 버전에)
+3. **shared scope**: 그래프 config 또는 별도 선언으로 생성 — 어느 에이전트도
+   소유자가 아니며, grant 는 방향 없는 권한(read/write)만 정의
+4. **Direct 태스크**: run scope 없음 — agent scope + grant 된 shared scope 만 접근
+
+### Graph State vs Memory — 판단 기준
+
+| 데이터 | 저장 위치 |
+|---|---|
+| 다음 노드가 소비하는 계약된 산출물 | **Graph state** (schema 선언) |
+| 나중에 검색해서 참고할 관찰/근거/중간 결과 | **Memory** (run scope) |
+| run 을 넘어 축적되는 사실/교훈 | **Memory** (agent / shared scope) |
+| 대용량 원문/파일 | **Artifact 저장소** + memory 에 참조(`artifact_ref`) 저장 |
+
+Memory 를 노드 간 데이터 전달 통로로 쓰는 것은 안티패턴 — 계약된 전달은 반드시 state 로
+(checkpoint/재개 가능성 보장).
+
+## Memory Entry Model
+
+```python
+class MemoryEntry(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    entry_id: str                       # UUID
+    space: str                          # 소속 space id
+    kind: MemoryKind                    # observation | fact | summary | artifact_ref | message
+    content: str                        # 본문 (검색/임베딩 대상)
+    tags: list[str]                     # 메타데이터 필터용
+    source: MemorySource                # agent, run_id, task_id, node_id
+    created_at: datetime
+    importance: float                   # 0.0~1.0 — retrieval 가중/ compaction 우선순위
+    supersedes: str | None              # 정정 시 이전 entry_id 참조
+```
+
+### Entry Rules
+
+1. **Append-only**: 항목 수정/삭제 금지 — 정정은 `supersedes` 로 새 항목 작성.
+   삭제는 retention 정책(시스템)만 수행
+2. **Kind 는 고정 enum**: 자유 문자열 금지 — 검색 필터의 일관성 보장
+3. **대용량 금지**: `content` 상한 (기본 8KB) — 초과분은 artifact 저장소에 두고
+   `artifact_ref` 항목으로 참조
+4. **Provenance 필수**: `source` 없는 항목 저장 불가 — 모든 기억은 출처 추적 가능
+
+## Memoryset Modules
+
+메모리 space 의 정책(인덱스/보존/스키마)은 memoryset 모듈로 선언한다.
+
+### Directory Specification
+
+```
+modules/memorysets/agent-longterm/
+└── 0.1.0/
+    └── memoryset.yaml
+```
+
+### memoryset.yaml
+
+```yaml
+apiVersion: malkuth/v1
+kind: Memoryset
+metadata:
+  name: agent-longterm
+  version: 0.1.0
+  description: 에이전트 장기 기억 표준 정책
+
+spec:
+  scope: agent                   # run | agent | shared
+
+  index:
+    embedding:
+      provider: openai-compatible
+      model: text-embedding-3-small   # 버전 고정 — 변경 시 재인덱싱 + version bump
+      dimensions: 1536
+    chunk:
+      max_tokens: 400            # 장문 content 분할 단위
+      overlap_tokens: 40
+    hybrid:
+      vector_weight: 0.6         # RRF 병합 가중
+      lexical_weight: 0.4
+
+  retention:
+    ttl_days: 365                # 초과 항목 삭제 (summary 는 제외)
+    compaction:
+      trigger_entries: 5000      # 항목 수 초과 시 compaction 대상
+      strategy: summarize        # raw observation → summary 로 압축
+      keep_kinds: [fact, summary]
+
+  recall:                        # 자동 주입 기본값 (에이전트 manifest 로 override 가능)
+    auto: true
+    k: 6
+    min_score: 0.35
+    budget_tokens: 2000
+```
+
+### Attachment — Manifest / Graph 선언
+
+```yaml
+# agents/<name>/manifest.yaml — agent scope 부착
+spec:
+  memory:
+    spaces:
+      - ref: memorysets/agent-longterm@0.1.0
+        as: longterm             # 에이전트 코드/프롬프트에서 부르는 space 별칭
+```
+
+```yaml
+# graphs/<name>.yaml — run/shared scope 부착
+spec:
+  memory:
+    spaces:
+      - ref: memorysets/run-scratch@0.1.0
+        as: scratch              # run scope — 모든 노드 에이전트 rw
+      - ref: memorysets/domain-knowledge@0.1.0
+        as: knowledge            # shared scope — 접근은 아래 grant 로만
+        access:
+          - {agent: researcher, mode: rw}
+          - {agent: writer, mode: ro}
+```
+
+1. 미선언 space 접근은 `MEM_001` 로 거부 — 배포 검증에서 grant 대상이 그래프 노드인지 확인
+2. Shared space 의 실체는 이름으로 식별 — 여러 그래프가 같은 space 를 참조하면 같은
+   지식 베이스를 공유 (grant 는 그래프별 선언)
+3. `as` 별칭은 에이전트 관점의 논리 이름 — promptset/skill 코드는 별칭만 사용
+
+## Index Design — 컨텍스트 탐색 최적화
+
+### Hybrid Index Structure
+
+Space 당 세 계층의 인덱스를 유지한다:
+
+```
+Memory Space ──┬── Vector index    (embedding — 의미 검색)
+               ├── Lexical index   (BM25/FTS — 키워드/식별자 검색)
+               └── Metadata index  (kind, tags, source, created_at — 구조 필터)
+```
+
+1. **병합**: vector + lexical 결과를 RRF (Reciprocal Rank Fusion) 로 병합,
+   memoryset 의 가중치 적용 — 단일 방식 검색은 fallback 전용
+2. **격리 = 인덱스 격리**: 인덱스는 space 단위로 분리 — 검색이 space 경계를 넘지 않는다
+   (cross-space 검색은 호출 측이 space 목록을 명시할 때만, 각각 검색 후 병합)
+3. **Chunking**: `chunk.max_tokens` 초과 content 는 분할 임베딩 — 검색 결과는
+   entry 단위로 dedup 하여 반환
+4. **식별자 정확 검색**: 에러 코드/함수명/URL 같은 식별자는 lexical index 가 담당 —
+   vector 만으로 매칭 실패하는 케이스의 보완 (하이브리드가 기본인 이유)
+
+### Write Path — 비동기 인덱싱
+
+```
+append() ──▶ 저장 (즉시 commit) ──▶ 인덱싱 큐 ──▶ embed + index 반영
+                                      (비동기, 목표 지연 < 5s)
+```
+
+1. 저장과 인덱싱 분리 — append 는 embedding 완료를 기다리지 않는다
+2. **Eventual consistency 명시**: 방금 저장한 항목은 검색에 즉시 안 나올 수 있다 —
+   같은 태스크 안에서 self-read 가 필요한 데이터는 memory 가 아니라 작업 컨텍스트로
+3. 인덱싱 실패는 재시도 (retry policy) — 누적 실패 시 `MEM_003` + 메트릭 경보
+4. `malkuth memory reindex <space>` — embedding 모델 교체/장애 복구용 전체 재인덱싱
+
+### Embedding Model Pinning
+
+1. Embedding 모델/차원은 memoryset 버전에 고정 — 모델 교체는 **version bump + 전체
+   재인덱싱** (혼합 임베딩 공간 금지)
+2. 재인덱싱 중에는 구 인덱스로 검색 유지 — 완료 후 원자적 전환
+
+## Retrieval API
+
+에이전트는 `AgentContext.memory` 로만 메모리에 접근한다 (DB 직접 접근 금지).
+
+```python
+# 검색 — 하이브리드, space 명시
+results = await ctx.memory.search(
+    query="mcp transport 재연결 실패 원인",
+    spaces=["longterm", "scratch"],
+    k=8,
+    filters=MemoryFilter(kinds=[MemoryKind.FACT, MemoryKind.SUMMARY], tags=["mcp"]),
+)
+# results: list[ScoredEntry] — entry + score + space (provenance 포함)
+
+# 저장
+await ctx.memory.append(
+    space="longterm",
+    kind=MemoryKind.FACT,
+    content="mcp sidecar 는 이미지 태그 미고정 시 재기동 후 tool 목록이 달라질 수 있음",
+    tags=["mcp", "sidecar"],
+    importance=0.7,
+)
+```
+
+### Access Enforcement
+
+```
+Agent 컨테이너 (agentd) ──HTTP──▶ Memory Service (framework)
+        └── runtime 발급 per-agent memory token — 선언된 space/mode 만 허용
+```
+
+1. Memory Service 는 프레임워크 컴포넌트 (`src/malkuth/memory/`) — 저장소 자격증명은
+   서비스만 보유, 에이전트 컨테이너에 DB 자격증명 주입 금지
+2. Token 은 space 별 mode(ro/rw) 를 인코딩 — grant 변경 시 재발급
+3. 모든 접근 감사 로그: `agent`, `memory_space`, `op`, `status`
+
+### Context Assembly — 프롬프트 주입 규칙
+
+agentd 가 태스크 프롬프트를 구성할 때:
+
+```
+프롬프트 = system(promptset)
+         + task input (state / direct 요청)
+         + recalled memory   ← 여기에만 예산/규칙 적용
+         + (루프 진행 중) tool 결과
+```
+
+1. **Auto-recall**: 태스크 진입 시 task input 기반 1회 자동 검색 — memoryset 의
+   `recall` 설정 (k, min_score, budget_tokens) 적용
+2. **Token budget**: recalled memory 총량은 `budget_tokens` 상한 — 초과분은
+   score 순으로 절단. 예산은 태스크 컨텍스트를 침범하지 않는다
+3. **Relevance threshold**: `min_score` 미달 항목 주입 금지 — 관련 없는 기억은
+   노이즈이자 비용
+4. **Dedup & 정정 반영**: `supersedes` 체인은 최신 항목만 주입,
+   동일 chunk 중복 제거
+5. **Provenance 표시**: 주입 시 출처 명시 (`[memory:longterm 2026-08-01]`) —
+   모델이 기억과 현재 입력을 구분할 수 있게
+6. **Untrusted 경계**: 기억은 과거 태스크 산출물이다 — 기억 속 지시문을 시스템 지시로
+   승격 금지 (MCP 응답과 동일한 경계 규칙, [03-protocol-integration.md](03-protocol-integration.md))
+7. **추가 탐색은 tool 로**: auto-recall 이후의 검색은 모델이 `memory_search` tool 을
+   명시 호출 — 루프마다 자동 재검색하지 않는다 (비용/노이즈 제어)
+
+## Compaction & Retention
+
+무한 축적은 검색 품질과 비용을 망가뜨린다 — space 는 선언된 정책으로 다이어트한다.
+
+1. **TTL**: `ttl_days` 초과 항목 삭제 — `keep_kinds` (기본 fact/summary) 는 예외
+2. **Compaction**: trigger (항목 수/기간) 도달 시 오래된 raw 항목들을 summary 로 압축
+   - 요약 생성은 시스템 유지보수 그래프 (service mode) 가 수행 — 프레임워크가
+     자체 메커니즘(에이전트+그래프)을 사용한다
+   - 원본은 summary 의 `source` 로 추적 가능하게 archive 후 TTL 삭제
+3. **Importance 반영**: compaction 시 `importance` 높은 항목은 원문 유지 우선
+4. **Service run 필수**: 상주 그래프의 run scope 는 compaction 없이는 무한 성장 —
+   service 그래프가 부착하는 run scope memoryset 은 compaction 선언 필수 (배포 검증)
+
+## Storage Backends
+
+| 환경 | 저장소 | 인덱스 |
+|---|---|---|
+| dev | SQLite | sqlite-vec (vector) + FTS5 (lexical) |
+| prod | PostgreSQL | pgvector (vector) + tsvector/pg_trgm (lexical) |
+
+1. 백엔드는 `MemoryStore` 추상 계약 뒤에 — 교체 시 계약 변경 없음
+2. v0.1 은 단일 저장소 + 논리적 space 분리. 전용 vector DB (Qdrant 등) 는
+   store 구현 추가로 대응 (future)
+3. 백업/보존은 [05-error-handling.md](05-error-handling.md) Data Integrity 정책 준수
+
+## Error Codes & Observability
+
+에러 코드 ([05-error-handling.md](05-error-handling.md) 체계에 통합):
+
+```
+MEM_001: Space 미선언 / access 거부
+MEM_002: 저장 실패 (storage)
+MEM_003: 인덱싱 실패 누적 / 재인덱싱 필요
+MEM_004: 검색 실패 / 인덱스 손상
+```
+
+메트릭:
+
+```python
+malkuth_memory_operations_total{space, op, status}     # op: append|search|recall
+malkuth_memory_search_duration_seconds{space}
+malkuth_memory_entries{space}                          # Gauge
+malkuth_memory_index_lag_seconds{space}                # 인덱싱 큐 지연
+malkuth_memory_recall_injected_tokens{agent}           # 프롬프트 주입량 추적
+```
+
+로그 필드: `memory_space`, `op`, `entry_id`, `k`, `min_score` — 표준 필드 규칙
+([05-error-handling.md](05-error-handling.md)) 준수.
+
+## Testing Requirements
+
+1. **Fake embedder**: 결정적 임베딩 (해시 기반) — 실제 embedding API 호출 금지
+2. **ACL 테스트**: 미선언 space 접근 → `MEM_001`, ro grant 에 append → `MEM_001`
+3. **하이브리드 검색**: 의미 매칭(vector)과 식별자 매칭(lexical) 각각의 히트 검증,
+   RRF 병합 순서 검증
+4. **Budget/threshold**: recall 주입이 budget_tokens 상한과 min_score 를 준수하는지
+5. **Supersedes**: 정정 체인에서 최신 항목만 주입되는지
+6. **Compaction**: trigger 도달 → summary 생성 + 원본 archive 시나리오 (fake model)
+7. **Eventual consistency**: 인덱싱 지연 중 검색 결과가 커밋 기준으로 안정적인지

@@ -67,6 +67,9 @@ spec:
 6. **Peer Symmetry (우열 없음)**: A2A 연결에 상위/하위 개념이 없다 — 호출 방향은
    순전히 선언의 문제이며, 역방향도 선언하면 허용된다. 상호 선언 시 양방향 협업
    (교차 질의/위임) 가능 — 폭주는 depth limit 과 timeout 으로만 방지
+7. **Group Neutrality**: 그룹 소속 ([01-architecture.md](01-architecture.md)) 은 연결에
+   어떤 자동 권한도 부여하지 않는다 — 같은 그룹이라도 allowlist 선언 없는 호출은
+   `A2A_004`. 그룹은 리소스 스코프, 연결은 그래프 배선 — 두 축은 직교한다
 
 ### When to Use A2A vs Graph Edge
 

@@ -107,6 +107,7 @@ kind: Agent
 metadata:
   name: researcher              # 소문자 + 하이픈, 그래프에서 참조하는 id
   version: 0.1.0                # semver — 계약 변경 시 반드시 bump
+  group: research               # 소속 그룹 (선택, 최대 1개) — 미선언 시 global 만
   description: 웹 리서치 전담 에이전트
 
 spec:
@@ -158,9 +159,13 @@ spec:
    - 모델 변경 (minor)
 3. **No Hidden Dependencies**: manifest 에 선언되지 않은 모듈/서버/자원 사용 금지
 4. **Reference Format**: 모듈 참조는 항상 `{type}/{name}@{version}` — latest 사용 금지
-5. **No Hierarchy Declaration**: manifest 에 에이전트 간 우열/소속 관계 선언 금지 —
+5. **No Hierarchy Declaration**: manifest 에 에이전트 간 우열 관계 선언 금지 —
    연결 구조는 그래프 배선 소관 ([04-module-system.md](04-module-system.md)).
    Peer 호출을 받으려면 `a2a.enabled: true` 필요
+6. **Group Membership**: `metadata.group` 은 최대 하나, 존재하는 그룹만 참조.
+   미선언 시 global 에만 소속. `group: global` 직접 선언 금지 (배포 검증 차단).
+   그룹은 리소스 스코프일 뿐 — 소속이 달라도 배선/호출 규칙은 동일
+   ([01-architecture.md](01-architecture.md) Resource Scoping)
 
 ## Docker Isolation Rules
 
@@ -196,6 +201,7 @@ spec:
    - CPU/Memory limit 필수 (manifest `runtime.resources`)
    - 미선언 시 프레임워크 기본값 적용 (CPU 1.0 / 1Gi)
    - PID limit 설정 (fork bomb 방지, 기본 256)
+   - 소속 그룹의 quota 합계 검증 — 초과 시 기동 거부 (`RT_006`)
 
 5. **Network**
    - 전용 bridge network (`malkuth-net`) 에만 연결
@@ -211,13 +217,20 @@ spec:
    - 에이전트 간 볼륨 공유 금지 (사이드채널 차단)
    - 호스트 민감 경로 (`/var/run/docker.sock` 등) 마운트 절대 금지
 
-### Secrets Injection
+### Secrets Injection — Scoped
 
 ```
-Runtime layer → (기동 시) docker env 주입 → 컨테이너
+Secret stores:   local(agent) ── group ── global   (3계층, 01 Resource Scoping)
+Runtime layer →  env_allowlist 각 키를 local > group > global 순으로 해석
+              → (기동 시) docker env 주입 → 컨테이너
 ```
 
 - Secrets 는 runtime 이 기동 시점에 env 로 주입 — `env_allowlist` 에 있는 키만
+- 키 해석은 **local > 소속 group > global** — 가까운 스코프 값이 우선 (shadowing 허용)
+- Group 스코프 키는 group.yaml 의 `secrets` 목록에 선언된 것만 멤버에게 제공 —
+  비멤버 에이전트는 같은 키를 allowlist 에 넣어도 group 값으로 해석되지 않는다
+- 배포 검증: `env_allowlist` 의 각 키가 세 스코프 중 하나에서 해석 가능해야 함
+  (실패 시 `CFG_002`)
 - 로그에 secret 값 출력 금지 (structlog processor 로 마스킹)
 - 에이전트 코드는 `os.environ` 직접 접근 대신 `AgentContext.secrets` 를 통해 접근
 

@@ -7,9 +7,10 @@
 
 1. **선언된 space 에만 기억한다**: 모든 메모리는 선언된 memory space 에 속한다 —
    ad-hoc 파일/DB 에 기억 저장 금지
-2. **격리 기본, 공유는 선언**: 에이전트의 장기 기억은 그 에이전트만 접근.
-   공유가 필요하면 shared space 를 **명시적 access grant** 로 선언 (A2A allowlist 와
-   같은 철학 — 동등한 peer 간 선언 기반 공유)
+2. **격리 기본, 공유는 스코프**: 로컬(local) 기억은 소유 에이전트만 접근.
+   공유는 리소스 스코프 체계 (**global / group / local**,
+   [01-architecture.md](01-architecture.md) Resource Scoping) 를 따른다 —
+   그룹 소속이 곧 접근 경계이며, 에이전트 간 우열 관계는 만들지 않는다
 3. **Graph state 와 역할 분리**: state 는 워크플로 계약 데이터, memory 는 검색 가능한
    컨텍스트 축적 — 서로 대체하지 않는다
 4. **검색 최적화는 인덱스가 담당**: 에이전트가 raw 스캔하지 않도록 하이브리드 인덱스
@@ -19,22 +20,29 @@
 
 ## Memory Scopes
 
-| Scope | 소유/수명 | 접근 | 용도 |
-|---|---|---|---|
-| **task** (tier 0) | 태스크 실행 중 in-process | 해당 태스크만 | 작업 컨텍스트 (프롬프트 내) — Memory Service 저장 대상 아님 |
-| **run** | Graph run 단위, run 보존 기간 | 해당 run 의 모든 노드 에이전트 | run 내 관찰/중간 산출물 축적, 노드 간 비정형 컨텍스트 |
-| **agent** | 에이전트 단위, 영구 (보존 정책) | 소유 에이전트만 | 장기 학습 사실, 과거 작업 요약, 선호/패턴 |
-| **shared** | 명시 선언 단위, 영구 (보존 정책) | access grant 된 에이전트만 | 팀 공용 지식 베이스, 도메인 사실 축적 |
+리소스 스코프 3계층 (global / group / local) 에 run 수명 스코프를 더한 체계다.
+
+| Scope | 선언 위치 | 수명 | 접근 | 용도 |
+|---|---|---|---|---|
+| **task** (tier 0) | — | 태스크 실행 중 in-process | 해당 태스크만 | 작업 컨텍스트 (프롬프트 내) — Memory Service 저장 대상 아님 |
+| **run** | 그래프 config | run 단위, run 보존 기간 | 해당 run 의 모든 노드 에이전트 | run 내 관찰/중간 산출물 축적, 노드 간 비정형 컨텍스트 |
+| **local** | 에이전트 manifest | 영구 (보존 정책) | 소유 에이전트만 | 장기 학습 사실, 과거 작업 요약, 선호/패턴 |
+| **group** | group.yaml | 영구 (보존 정책) | 그룹 멤버 (기본 rw, `mode: ro` 제한 가능) | 그룹 공용 지식 베이스, 도메인 사실 축적 |
+| **global** | groups/global.yaml | 영구 (보존 정책) | 전 에이전트 기본 ro — write 는 `writers` 명시 | 전사 공통 지식, 규범/사실 |
 
 ### Scope Rules
 
 1. **run scope**: run 종료 후 read-only 전환 — 보존 기간(기본 30일, checkpoint 와 동일)
-   후 삭제. Service run 은 iteration 이 이어지는 동안 계속 누적 + compaction 적용
-2. **agent scope**: 컨테이너 재시작/재배포와 무관하게 유지 — 에이전트 이름 기준.
+   후 삭제. Service run 은 iteration 이 이어지는 동안 계속 누적 + compaction 적용.
+   Cross-group 배선 그래프에서도 run 참여 노드 전원이 접근 (run 이 곧 경계)
+2. **local scope**: 컨테이너 재시작/재배포/그룹 이동과 무관하게 유지 — 에이전트 이름 기준.
    에이전트 버전 교체 시에도 승계 (기억은 이름에, 계약은 버전에)
-3. **shared scope**: 그래프 config 또는 별도 선언으로 생성 — 어느 에이전트도
-   소유자가 아니며, grant 는 방향 없는 권한(read/write)만 정의
-4. **Direct 태스크**: run scope 없음 — agent scope + grant 된 shared scope 만 접근
+3. **group scope**: group.yaml 로 선언 — 멤버십이 곧 접근 경계. 어느 에이전트도 소유자가
+   아니며, 비멤버는 읽기도 불가. 그룹 이동 시 이전 그룹 space 접근 즉시 상실.
+   그룹 간 공유가 필요하면 group scope 를 늘리지 말고 **global scope** 를 사용
+4. **global scope**: `groups/global.yaml` 로 선언 — 전 에이전트 read 기본,
+   write 는 space 별 `writers` 목록에 명시된 에이전트만
+5. **Direct 태스크**: run scope 없음 — local + 소속 group + global 만 접근
 
 ### Graph State vs Memory — 판단 기준
 
@@ -42,7 +50,7 @@
 |---|---|
 | 다음 노드가 소비하는 계약된 산출물 | **Graph state** (schema 선언) |
 | 나중에 검색해서 참고할 관찰/근거/중간 결과 | **Memory** (run scope) |
-| run 을 넘어 축적되는 사실/교훈 | **Memory** (agent / shared scope) |
+| run 을 넘어 축적되는 사실/교훈 | **Memory** (local / group / global scope) |
 | 대용량 원문/파일 | **Artifact 저장소** + memory 에 참조(`artifact_ref`) 저장 |
 
 Memory 를 노드 간 데이터 전달 통로로 쓰는 것은 안티패턴 — 계약된 전달은 반드시 state 로
@@ -97,7 +105,7 @@ metadata:
   description: 에이전트 장기 기억 표준 정책
 
 spec:
-  scope: agent                   # run | agent | shared
+  scope: local                   # run | local | group | global
 
   index:
     embedding:
@@ -125,10 +133,12 @@ spec:
     budget_tokens: 2000
 ```
 
-### Attachment — Manifest / Graph 선언
+### Attachment — 스코프별 선언 위치
+
+Space 는 스코프에 대응하는 아티팩트에서 선언한다 — 선언 위치가 곧 접근 경계다.
 
 ```yaml
-# agents/<name>/manifest.yaml — agent scope 부착
+# agents/<name>/manifest.yaml — local scope 부착 (소유 에이전트 전용)
 spec:
   memory:
     spaces:
@@ -137,23 +147,41 @@ spec:
 ```
 
 ```yaml
-# graphs/<name>.yaml — run/shared scope 부착
+# graphs/<name>.yaml — run scope 부착 (run 참여 노드 전원 rw)
 spec:
   memory:
     spaces:
       - ref: memorysets/run-scratch@0.1.0
-        as: scratch              # run scope — 모든 노드 에이전트 rw
-      - ref: memorysets/domain-knowledge@0.1.0
-        as: knowledge            # shared scope — 접근은 아래 grant 로만
-        access:
-          - {agent: researcher, mode: rw}
-          - {agent: writer, mode: ro}
+        as: scratch
 ```
 
-1. 미선언 space 접근은 `MEM_001` 로 거부 — 배포 검증에서 grant 대상이 그래프 노드인지 확인
-2. Shared space 의 실체는 이름으로 식별 — 여러 그래프가 같은 space 를 참조하면 같은
-   지식 베이스를 공유 (grant 는 그래프별 선언)
-3. `as` 별칭은 에이전트 관점의 논리 이름 — promptset/skill 코드는 별칭만 사용
+```yaml
+# groups/research.yaml — group scope 부착 (그룹 멤버)
+spec:
+  memory:
+    spaces:
+      - ref: memorysets/domain-knowledge@0.1.0
+        as: knowledge
+        mode: rw                 # 멤버 기본 권한 (rw | ro)
+```
+
+```yaml
+# groups/global.yaml — global scope 부착 (전 에이전트 ro 기본)
+spec:
+  memory:
+    spaces:
+      - ref: memorysets/org-facts@0.1.0
+        as: org
+        writers: [librarian]     # write 가능 에이전트 명시 — 미지정 시 read-only
+```
+
+1. 미선언/비소속 space 접근은 `MEM_001` 로 거부 — 배포 검증에서 writers/그룹 멤버십 확인
+2. Space 의 실체는 `(scope, 이름)` 으로 식별 — 여러 그래프가 같은 group/global space 를
+   쓰면 같은 지식 베이스를 공유한다
+3. `as` 별칭은 에이전트 관점의 논리 이름 — promptset/skill 코드는 별칭만 사용.
+   별칭 충돌 시 해석 순서는 **local > group > global** (가까운 스코프 우선, 리소스
+   스코프 규칙과 동일)
+4. Memoryset 의 `spec.scope` 와 부착 위치가 불일치하면 배포 검증 실패 (`MOD_003`)
 
 ## Index Design — 컨텍스트 탐색 최적화
 
@@ -228,8 +256,9 @@ Agent 컨테이너 (agentd) ──HTTP──▶ Memory Service (framework)
 
 1. Memory Service 는 프레임워크 컴포넌트 (`src/malkuth/memory/`) — 저장소 자격증명은
    서비스만 보유, 에이전트 컨테이너에 DB 자격증명 주입 금지
-2. Token 은 space 별 mode(ro/rw) 를 인코딩 — grant 변경 시 재발급
-3. 모든 접근 감사 로그: `agent`, `memory_space`, `op`, `status`
+2. Token 은 에이전트가 접근 가능한 space 목록 + mode(ro/rw) 를 인코딩 —
+   그룹 이동 / group.yaml·global.yaml 의 mode·writers 변경 시 재발급
+3. 모든 접근 감사 로그: `agent`, `group`, `memory_space`, `op`, `status`
 
 ### Context Assembly — 프롬프트 주입 규칙
 
@@ -269,6 +298,8 @@ agentd 가 태스크 프롬프트를 구성할 때:
 3. **Importance 반영**: compaction 시 `importance` 높은 항목은 원문 유지 우선
 4. **Service run 필수**: 상주 그래프의 run scope 는 compaction 없이는 무한 성장 —
    service 그래프가 부착하는 run scope memoryset 은 compaction 선언 필수 (배포 검증)
+5. **영구 스코프 retention 필수**: local/group/global memoryset 은 `retention`
+   (ttl 또는 compaction) 선언 필수 — 특히 group/global 은 다중 작성자로 성장이 빠르다
 
 ## Storage Backends
 
@@ -309,7 +340,9 @@ malkuth_memory_recall_injected_tokens{agent}           # 프롬프트 주입량 
 ## Testing Requirements
 
 1. **Fake embedder**: 결정적 임베딩 (해시 기반) — 실제 embedding API 호출 금지
-2. **ACL 테스트**: 미선언 space 접근 → `MEM_001`, ro grant 에 append → `MEM_001`
+2. **ACL 테스트**: 미선언 space 접근 / 비멤버의 group space 접근 / writers 에 없는
+   에이전트의 global write / `mode: ro` space 에 append → 모두 `MEM_001`.
+   별칭 충돌 시 local > group > global 해석 순서 검증
 3. **하이브리드 검색**: 의미 매칭(vector)과 식별자 매칭(lexical) 각각의 히트 검증,
    RRF 병합 순서 검증
 4. **Budget/threshold**: recall 주입이 budget_tokens 상한과 min_score 를 준수하는지

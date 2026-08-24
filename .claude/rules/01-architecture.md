@@ -7,6 +7,8 @@
 - **Foundation**: LangGraph state graphs over Docker-isolated agents
 - **Composition Model**: 목표(goal) 단위 그래프 = **동등한 에이전트들의 유기적 연결** —
   에이전트 간 우열/계층 없음, 모든 에이전트는 직접 요청 가능한 독립 실행 단위
+- **Resource Model**: 에이전트 리소스는 **전역(global) / 소속 그룹(group) / 로컬(local)**
+  3계층 스코프로 관리
 - **Execution Model**: 달성형(**mission**) run 과 무한 반복형(**service**) run 모두 지원
 - **Design Philosophy**: Isolation, composability, explicit contracts — everything is a module
 
@@ -79,7 +81,9 @@
 - Each agent MUST run in its own Docker container
 - Protocol resources (A2A endpoint, MCP servers) MUST belong to exactly one agent
 - Agents MUST NOT share filesystem, process space, or in-memory state
-- The only shared data paths are: graph state (via orchestrator) and A2A messages
+- The only shared data paths are: graph state (via orchestrator), A2A messages,
+  and declared scoped memory spaces (group/global)
+- Resource access is bounded by scope — **local > group > global** 의 소속 기반 경계
 
 ### 2. Composability (Modular Wiring)
 - Agent-to-agent connections are **declared in graph config**, never hardcoded
@@ -161,12 +165,87 @@
    대신 control plane 스케줄러로 mission run 을 반복 실행한다.
    연속성 필요(누적 상태, 중복 방지 등) → **service** / 매회 독립 → **recurring mission**
 
+## Resource Scoping — Global / Group / Local
+
+에이전트를 위한 리소스(secrets, 메모리 space, artifact 저장, 리소스 quota)는
+**전역(global) / 소속 그룹(group) / 로컬(local)** 3계층 스코프로 관리한다.
+
+```
+global  ─ 모든 에이전트                (groups/global.yaml — 예약 그룹)
+group   ─ 소속 그룹 멤버               (groups/<name>.yaml)
+local   ─ 개별 에이전트                (agents/<name>/manifest.yaml)
+```
+
+### Group Concept
+
+1. **그룹 = 리소스 경계, 우열 아님**: 그룹은 에이전트의 소속 단위이자 리소스 관리
+   경계일 뿐이다 — 그룹 간에도, 그룹 내에서도 에이전트 우열 관계를 만들지 않는다
+   (peer 원칙 유지)
+2. **소속**: 에이전트는 manifest `metadata.group` 으로 **최대 하나의 그룹**에 소속.
+   미선언 시 global 에만 속한다. 모든 에이전트는 암묵적으로 예약 그룹 `global` 의 멤버
+3. **그룹은 연결이 아니다**: 같은 그룹이라도 A2A 자동 허용 없음 — 연결은 여전히
+   그래프 `connections` 선언만 ([03-protocol-integration.md](03-protocol-integration.md)).
+   그래프는 서로 다른 그룹의 에이전트를 자유롭게 배선한다 (cross-group wiring 허용)
+4. **해석 순서**: 동일 키/이름의 리소스는 **local > group > global** —
+   가까운 스코프가 우선 (shadowing 허용)
+
+### Scoped Resources
+
+| 리소스 | global | group | local |
+|---|---|---|---|
+| Secrets (env) | 전사 공용 키 | 그룹 공용 키 (멤버만) | 에이전트 전용 키 |
+| Memory space | 전역 지식 (기본 ro) | 그룹 지식 베이스 (멤버 rw 기본) | 에이전트 장기 기억 |
+| Artifact 저장 | 전역 공유 산출물 | 그룹 산출물 | 에이전트 산출물 |
+| Resource quota | 호스트 총량 | 그룹 합계 상한 | manifest limit |
+
+상세 규칙: secrets 는 [02-agent-implementation.md](02-agent-implementation.md),
+memory 는 [09-memory-context.md](09-memory-context.md).
+
+### Group Specification
+
+```yaml
+# groups/research.yaml
+apiVersion: malkuth/v1
+kind: Group
+metadata:
+  name: research
+  description: 리서치 도메인 에이전트 그룹
+
+spec:
+  quotas:                        # 소속 에이전트 리소스 합계 상한 (배포/기동 시 검증)
+    cpu: "8.0"
+    memory: 16Gi
+    max_agents: 10
+
+  secrets:                       # 그룹 스코프 secret 키 — 멤버 에이전트만 주입 가능
+    - SEARCH_API_KEY
+
+  memory:                        # 그룹 스코프 memory space — 09 참조
+    spaces:
+      - ref: memorysets/domain-knowledge@0.1.0
+        as: knowledge
+        mode: rw                 # 멤버 기본 권한 (rw | ro)
+
+  artifacts:
+    quota: 50Gi
+```
+
+### Group Rules
+
+1. 예약 그룹 `global` (`groups/global.yaml`) 은 전역 스코프 리소스 선언 전용 —
+   에이전트가 `metadata.group: global` 로 직접 소속을 선언하는 것은 금지 (검증 차단)
+2. 그룹 이동 = manifest 변경 (version bump + 재배포) — 이전 그룹 리소스 접근은
+   즉시 상실 (토큰 재발급), local 리소스는 유지
+3. Quota 는 배포 검증 + 기동 시 재검증 — 그룹 합계 초과 시 기동 거부 (`RT_006`)
+4. 그룹 정의 삭제는 소속 에이전트가 0이 될 때만 허용
+
 ## Current Implementation Status
 
 ### 📋 Planned (v0.1.0 — bootstrap)
 - **Core Framework**
   - Agent interface + manifest schema (pydantic)
   - Graph topology schema + validation (mission/service 모드 포함)
+  - Group schema + 리소스 스코프 해석 (global/group/local)
   - LangGraph orchestrator (config → StateGraph)
   - Service run loop (iteration checkpoint + idle backoff)
 - **Agent Runtime**
@@ -254,6 +333,10 @@ malkuth/
 │
 ├── graphs/                      # 그래프 토폴로지 정의
 │   └── <graph-name>.yaml
+│
+├── groups/                      # 그룹 정의 (리소스 스코프 경계)
+│   ├── global.yaml              # 예약 그룹 — 전역 스코프 리소스 선언
+│   └── <group-name>.yaml
 │
 ├── tests/                       # 모든 테스트 (src 구조 미러링)
 │   ├── unit/
@@ -375,10 +458,11 @@ Client → Control Plane → Orchestrator(StateGraph)
 | **Graph state** | 워크플로 단계 간 데이터 전달 | Orchestrator + Checkpointer | 기본 경로. 모든 노드 산출물은 state 로 |
 | **A2A peer call** | 실행 중 peer 에이전트에게 위임/질의 (대등) | A2A protocol | 그래프 config 의 `connections` allowlist 에 선언된 방향만 허용 |
 | **Direct request** | 클라이언트 → 특정 에이전트 직접 요청 (인터랙티브 포함) | Control Plane → Agent Control API | 그래프 run 과 독립된 단독 태스크 — graph state 를 건드리지 않음 |
-| **Shared memory** | 선언된 space 를 통한 지식 축적/공유 | Memory Service | memoryset 선언 + access grant 필수 ([09-memory-context.md](09-memory-context.md)) |
+| **Scoped memory** | group/global space 를 통한 지식 축적/공유 | Memory Service | memoryset 선언 + 소속 기반 접근 ([09-memory-context.md](09-memory-context.md)) |
 
 Graph state 를 우회하는 사이드채널 (공유 파일, 공유 DB 테이블, 전역 큐) 은 금지.
-유일한 예외는 **선언된 shared memory space** — 접근 권한이 선언·검증되는 공유 경로다.
+유일한 예외는 **선언된 group/global memory space** — 소속과 스코프로 접근이 검증되는
+공유 경로다.
 
 ## Configuration Strategy
 
@@ -439,11 +523,13 @@ observability:
 배포 시점에 다음을 검증하고, 하나라도 실패하면 컨테이너를 기동하지 않는다:
 
 1. Graph topology 의 모든 `agent` ref 가 존재하는 manifest 를 가리키는가
-2. 모든 manifest 의 skillset/promptset ref 가 registry 에서 해석되는가
-3. `connections` 의 caller/callee 가 모두 그래프 노드인가
-4. Mode 별 토폴로지 규칙 충족 (mission: END 도달 / service: idle 정책 선언)
-5. A2A 포트 충돌이 없는가
-6. Resource 합계가 호스트 한도 내인가 (경고)
+2. 모든 manifest 의 skillset/promptset/memoryset ref 가 registry 에서 해석되는가
+3. 모든 manifest 의 `group` 이 존재하는 그룹을 가리키는가 (`global` 직접 소속 금지)
+4. `env_allowlist` 의 각 키가 스코프 체인 (local > group > global) 에서 해석되는가
+5. `connections` 의 caller/callee 가 모두 그래프 노드인가
+6. Mode 별 토폴로지 규칙 충족 (mission: END 도달 / service: idle 정책 선언)
+7. A2A 포트 충돌이 없는가
+8. 그룹별 리소스 합계가 quota 이내인가, 전체 합계가 호스트 한도 내인가 (초과 시 경고/거부)
 
 ## Scalability Considerations
 

@@ -19,6 +19,8 @@ of an extensible agent runtime with per-agent isolation and freely composable ag
   a solution is assembled from modules, not written from scratch
 - Give agents context memory with scope isolation and hybrid search indexes,
   governed by versioned memoryset policies
+- Manage agent resources (secrets, memory, artifacts, quotas) at three scopes —
+  **global / group / local** — with nearest-scope resolution
 
 ## Ruleset Structure
 
@@ -29,6 +31,8 @@ The rules are organized into specialized domains:
 
 Covers:
 - Overall system architecture and layers
+- Interaction model (orchestrated / direct / peer) and execution modes (mission / service)
+- Resource scoping — global / group / local, and the Group specification
 - Technology stack requirements
 - Directory structure and organization
 - Control flow: graph invocation → agent runtime → protocol layer
@@ -151,7 +155,7 @@ Essential for:
 **Context Memory and Index Design**
 
 Covers:
-- Memory scopes (run / agent / shared) and graph-state boundary rules
+- Memory scopes (run / local / group / global) and graph-state boundary rules
 - Memoryset modules — versioned policies for index, retention, recall
 - Hybrid index design (vector + lexical + metadata, RRF merge)
 - Retrieval API, context assembly budgets, provenance rules
@@ -207,7 +211,9 @@ Key for:
 ### 1. Isolation First
 - One agent = one Docker container
 - Protocol resources (A2A endpoints, MCP servers) belong to exactly one agent
-- No shared mutable state between agents outside the graph state
+- No shared mutable state between agents outside the graph state and declared
+  scoped memory
+- Resource access is bounded by scope: global / group / local (nearest wins)
 
 ### 2. Composability
 - Agents connect only through declared graph edges and A2A connections

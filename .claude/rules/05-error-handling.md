@@ -167,6 +167,7 @@ RT_002:  컨테이너 unhealthy
 RT_003:  OOM killed
 RT_004:  이미지 빌드/풀 실패
 RT_005:  Drain timeout
+RT_006:  그룹 리소스 quota 초과 — 기동 거부
 
 GRAPH_001: 토폴로지 검증 실패
 GRAPH_002: Node 실행 실패 (에이전트 에러 wrapping)
@@ -192,6 +193,7 @@ STOR_002: Checkpoint 복원 실패
 STOR_003: Registry 저장소 오류
 
 CFG_001: 설정 파싱/검증 실패
+CFG_002: 그룹 정의 오류 / 스코프 해석 실패 (secrets 미해석 포함)
 ```
 
 ## Retry Logic
@@ -316,6 +318,7 @@ log.info(f"task {task_id} done in {elapsed}ms")
 |-----------------|--------|------|
 | `agent`         | str    | 에이전트 이름 (manifest metadata.name) |
 | `agent_version` | str    | 에이전트 버전 |
+| `group`         | str    | 에이전트 소속 그룹 (미소속 시 생략) |
 | `graph`         | str    | 그래프 이름 |
 | `run_id`        | str    | Graph run UUID |
 | `task_id`       | str    | 태스크 UUID |
@@ -389,9 +392,9 @@ log = structlog.get_logger().bind(
 Prometheus (`prometheus-client`) 사용. 표준 메트릭:
 
 ```python
-# Task metrics
-malkuth_agent_tasks_total{agent, graph, status}          # Counter
-malkuth_agent_task_duration_seconds{agent, graph}        # Histogram
+# Task metrics — 에이전트 단위 메트릭은 group 라벨 포함 (그룹별 집계/quota 감시용)
+malkuth_agent_tasks_total{agent, group, graph, status}   # Counter
+malkuth_agent_task_duration_seconds{agent, group, graph} # Histogram
 
 # Model metrics
 malkuth_model_requests_total{agent, provider, model, status}

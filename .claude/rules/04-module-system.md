@@ -344,6 +344,9 @@ graphs/{name}.yaml
 1. **Resolution**: `registry.resolve(ref)` 가 유일한 해석 경로 — 경로 하드코딩 금지
 2. **Immutability**: 게시된 버전 디렉토리는 수정 금지 — 변경은 새 버전으로
 3. **Integrity**: resolve 시 kind/name/version 이 ref 와 일치하는지 검증
+4. **Scope Neutrality**: 모듈 아티팩트는 전역 레지스트리 소속 — 리소스 스코프
+   (global/group/local, [01-architecture.md](01-architecture.md)) 는 런타임 리소스
+   (secrets/memory/artifact/quota) 에 적용되며, 모듈 가시성은 제한하지 않는다 (v0.1)
 
 ### Compatibility Rules
 

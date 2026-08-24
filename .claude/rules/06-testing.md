@@ -87,14 +87,17 @@ tests/
 
 ### What to Test
 
-1. **core/**: manifest/topology 스키마 검증 (유효/무효 케이스 전수), 에러 타입 동작
+1. **core/**: manifest/topology/group 스키마 검증 (유효/무효 케이스 전수 —
+   `group: global` 직접 선언 거부 포함), 스코프 해석 (secrets local > group > global),
+   에러 타입 동작
 2. **orchestrator/**: config → StateGraph 빌드 결과, edge 조건 라우팅, state 병합 규칙,
    토폴로지 검증기의 각 실패 케이스
 3. **protocols/**: 에러 변환 (원 예외 → MalkuthError 카테고리/코드/retryable),
    allowlist 검사, tool 네임스페이싱
 4. **modules/**: ref 파싱/해석, skillset schema 자동 생성, promptset 변수 검증·렌더링,
    memoryset 정책 스키마 검증
-5. **memory/**: space ACL (`MEM_001` 경로), 하이브리드 검색 병합(RRF), recall
+5. **memory/**: space ACL (비멤버 group 접근 / global write / ro append → `MEM_001`),
+   별칭 스코프 해석 (local > group > global), 하이브리드 검색 병합(RRF), recall
    예산/threshold, supersedes 체인 — fake embedder (결정적 해시) 사용,
    실제 embedding API 호출 금지 ([09-memory-context.md](09-memory-context.md))
 6. **agentd/**: tool loop (max turns, 병렬 tool, usage 집계), cancellation 처리,
@@ -201,6 +204,7 @@ async def test_agent_container_lifecycle(docker_runtime):
 - 테스트 전용 경량 에이전트 이미지 (`malkuth/agent-echo`) 를 fixture 로 유지 —
   모델 호출 없이 입력을 echo (프로토콜/lifecycle 검증용)
 - 테스트 후 컨테이너/네트워크 정리 보장 (fixture finalizer)
+- 그룹 quota 초과 manifest 기동 시도 → `RT_006` 으로 거부되는지 검증
 
 ### MCP Session Tests
 

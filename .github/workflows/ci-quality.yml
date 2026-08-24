@@ -1,0 +1,84 @@
+# 코드 품질 게이트 — job 이름은 docs/en/ci/status-checks.md 와 토씨 단위로 일치해야 한다.
+# 부트스트랩 가드: pyproject.toml/Makefile 부재(문서 단계) 시 품질 job 을 skip 하여
+# required check 가 게이트를 통과하게 유지한다 (skipped = pass).
+name: ci-quality
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  detect:
+    name: Detect Sources
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.check.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: check
+        name: bootstrap guard
+        run: |
+          if [ -f pyproject.toml ] && [ -f Makefile ]; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "code=false" >> "$GITHUB_OUTPUT"
+            echo "bootstrap phase (no pyproject.toml/Makefile) — quality jobs will be skipped"
+          fi
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    needs: detect
+    if: needs.detect.outputs.code == 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+      - run: uv sync --frozen
+      - run: make lint
+
+  typecheck:
+    name: Type Check
+    runs-on: ubuntu-latest
+    needs: detect
+    if: needs.detect.outputs.code == 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+      - run: uv sync --frozen
+      - run: make typecheck
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    needs: detect
+    if: needs.detect.outputs.code == 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+      - run: uv sync --frozen
+      # 커버리지 게이트(≥ 70%)는 make test 내부의 pytest-cov 설정이 강제한다
+      - run: make test
+
+  integration:
+    name: Integration Test
+    runs-on: ubuntu-latest
+    needs: detect
+    if: needs.detect.outputs.code == 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+      - run: uv sync --frozen
+      # ubuntu-latest 러너에는 Docker 가 기본 탑재 — testcontainers 기반 통합 테스트
+      - run: make test-integration

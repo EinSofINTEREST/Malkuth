@@ -1,0 +1,35 @@
+# Nightly 전체 스택 검증 — E2E 는 PR gate 가 아니다 (.claude/rules/06-testing.md).
+# 실 LLM 호출 금지: compose 스택은 fake provider 컨테이너를 사용한다.
+name: ci-nightly
+
+on:
+  schedule:
+    - cron: "0 17 * * *" # 02:00 KST
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    name: E2E Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: check
+        name: bootstrap guard
+        run: |
+          if [ -f pyproject.toml ] && [ -f Makefile ]; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "code=false" >> "$GITHUB_OUTPUT"
+            echo "bootstrap phase — e2e skipped"
+          fi
+      - if: steps.check.outputs.code == 'true'
+        uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+      - if: steps.check.outputs.code == 'true'
+        run: uv sync --frozen
+      - if: steps.check.outputs.code == 'true'
+        run: make test-e2e

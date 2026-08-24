@@ -1,0 +1,108 @@
+# PR/커밋 메타데이터 컨벤션 강제 — job 이름은 docs/en/ci/status-checks.md 와 일치 필수.
+# 컨벤션 정의: .claude/rules/07-code-style.md, .claude/rules/08-workflow.md (규약 6)
+name: ci-convention
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  pr-title-lint:
+    name: PR Title Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: check pr title
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          # 형식: [카테고리#이슈번호] 제목  (콜론 허용: [카테고리#이슈번호]: 제목)
+          if echo "$TITLE" | grep -Eq '^\[(FEAT|FIX|REFAC|DOCS|CHORE)#[0-9]+\]:? .+'; then
+            echo "PR title ok: $TITLE"
+          else
+            echo "::error::PR 타이틀 형식 위반: '$TITLE' — '[카테고리#이슈번호] 제목' 형식이어야 합니다 (예: [DOCS#2] 룰셋 재작성). 카테고리: FEAT|FIX|REFAC|DOCS|CHORE"
+            exit 1
+          fi
+
+  commit-lint:
+    name: Commit Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: check commit messages
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          fail=0
+          while IFS= read -r msg; do
+            # merge 커밋은 검사 제외
+            case "$msg" in "Merge "*) continue ;; esac
+            if ! echo "$msg" | grep -Eq '^\[(FEAT|FIX|REFAC|DOCS|CHORE)\]: .+'; then
+              echo "::error::커밋 메시지 컨벤션 위반: '$msg' — '[카테고리]: 한국어 요약' 형식이어야 합니다 (07-code-style.md)"
+              fail=1
+            fi
+          done < <(gh api "repos/$REPO/pulls/$PR/commits" --paginate \
+                     --jq '.[].commit.message | split("\n")[0]')
+          exit "$fail"
+
+  linked-issue:
+    name: Linked Issue Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: bot allowlist
+        id: allow
+        env:
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          # docs/en/ci/conventions.md 부록 A 와 동기화 유지
+          allowlist="dependabot[bot]"
+          if printf '%s\n' "$allowlist" | grep -Fxq "$AUTHOR"; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "allowlisted bot author: $AUTHOR — check skipped"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: check closing reference
+        if: steps.allow.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OWNER: ${{ github.repository_owner }}
+          NAME: ${{ github.event.repository.name }}
+          NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          count=$(gh api graphql \
+            -f query='query($owner: String!, $name: String!, $number: Int!) {
+              repository(owner: $owner, name: $name) {
+                pullRequest(number: $number) {
+                  closingIssuesReferences { totalCount }
+                }
+              }
+            }' \
+            -f owner="$OWNER" -f name="$NAME" -F number="$NUMBER" \
+            --jq '.data.repository.pullRequest.closingIssuesReferences.totalCount')
+          if [ "$count" -lt 1 ]; then
+            echo "::error::closing reference 가 없습니다 — 본문에 'Closes #N' 을 명시하거나 Development 사이드바에서 이슈 연결 시 'Will close this issue when merged' 를 선택하세요 (08-workflow.md 규약 1/4)"
+            exit 1
+          fi
+          echo "closing references: $count"
+
+  # 정보성 체크 — Required 등록 금지 (docs/en/ci/conventions.md 3.4)
+  branch-lint:
+    name: Branch Name Lint
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: check branch name
+        env:
+          BRANCH: ${{ github.event.pull_request.head.ref }}
+        run: |
+          if echo "$BRANCH" | grep -Eq '^(feature|fix|refactor|docs|chore)/#[0-9]+/[a-z0-9-]{1,30}$'; then
+            echo "branch name ok: $BRANCH"
+          else
+            echo "::warning::브랜치명이 컨벤션과 다릅니다: '$BRANCH' — '{카테고리}/#{이슈번호}/{핵심-변경-대상-요약}' 권장 (07-code-style.md)"
+            exit 1
+          fi

@@ -16,9 +16,10 @@
 > | `.github/PULL_REQUEST_TEMPLATE.md` | ✅ 이식 완료 | 규약 4 섹션 구성 반영 |
 > | PR 타이틀 lint / Commit lint CI | ✅ 구성 완료 | `.github/workflows/ci-convention.yml` (+ Linked Issue Check, Branch Name Lint) |
 > | 품질 CI (lint/typecheck/test) | ✅ 구성 완료 | `.github/workflows/ci-quality.yml` — 코드 부재 시 부트스트랩 가드로 skip |
+> | `refactor`/`hotfix` 라벨 | ✅ 생성 완료 | — |
+> | Issue Type ID (본 repo) | ✅ 조회 완료 | 규약 6 의 ID 표 참조 |
 > | `scripts/gh-meta.sh` | 미이식 | `gh issue edit --add-label` / `gh api graphql` 직접 호출 |
 > | `scripts/pr-resolve-comments.sh` | 미이식 | 개별 `gh api` 호출 |
-> | Issue Type ID (본 repo) | 미조회 | 규약 6 의 조회 명령으로 최초 1회 조회 후 본 문서 갱신 |
 
 <br>
 
@@ -237,8 +238,8 @@ mutation($issueId: ID!, $subIssueId: ID!) {
 
 PR 의 Label 은 그 PR 이 닫는 이슈 (`Closes #N`) 의 Label 과 동일하게 부여한다.
 
-> `refactor`, `hotfix` 라벨은 GitHub 기본 라벨이 아니다 — 본 repo 최초 사용 시 생성 필요:
-> `gh label create refactor --color D4C5F9`, `gh label create hotfix --color B60205`
+> `refactor`, `hotfix` 라벨은 GitHub 기본 라벨이 아니다 — 본 repo 에는 생성 완료
+> (`refactor` #D4C5F9, `hotfix` #B60205).
 
 #### Issue Type 매핑 (이슈 전용)
 
@@ -251,14 +252,23 @@ GitHub Issue Type 은 라벨과 별개의 native 분류 — `gh api graphql` 의
 | `[FIX]` / `[HOTFIX]` | `Bug` |
 | `[REFACTOR]` / `[CHORE]` / `[DOCS]` | `Task` |
 
-본 repo (EinSofINTEREST/Malkuth) 의 Issue Type ID 는 **아직 조회 전** — 최초 부여 시 아래
-명령으로 조회하고 본 문서의 이 절을 갱신한다:
+본 repo (EinSofINTEREST/Malkuth) 의 Issue Type ID (2026-08-24 조회):
+
+| Issue Type | ID |
+|---|---|
+| `Task` | `IT_kwDODsDQh84By0jZ` |
+| `Bug` | `IT_kwDODsDQh84By0ja` |
+| `Feature` | `IT_kwDODsDQh84By0jb` |
 
 ```bash
+# Type 부여 (updateIssueIssueType mutation)
+ISSUE_ID=$(gh issue view <NUMBER> --json id --jq .id)
 gh api graphql -f query='
-query { repository(owner: "EinSofINTEREST", name: "Malkuth") {
-  issueTypes(first: 10) { nodes { id name } }
-} }'
+mutation($issueId: ID!, $issueTypeId: ID!) {
+  updateIssueIssueType(input: {issueId: $issueId, issueTypeId: $issueTypeId}) {
+    issue { number issueType { name } }
+  }
+}' -f issueId="$ISSUE_ID" -f issueTypeId="<위 표의 ID>"
 ```
 
 #### 부여 명령 예시

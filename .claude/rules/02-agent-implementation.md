@@ -85,6 +85,11 @@ class TaskResult(BaseModel):
    - `output` 은 그래프 state schema 와 호환되는 키만 포함
    - 대용량 산출물(파일, 원문)은 output 에 직접 넣지 않고 artifact 저장소 참조로 전달
 
+6. **Role Agnosticism (main/sub)**
+   - 에이전트 코드는 자신이 main 인지 sub 인지 가정하지 않는다 — 역할은 그래프 배선이 결정
+   - 위임받은 태스크와 그래프 노드 태스크는 동일한 TaskRequest 계약으로 처리
+   - Mission/service 모드도 가정 금지 — iteration 간 지속 데이터는 graph state 로만
+
 ## Agent Manifest
 
 ### Manifest Specification
@@ -144,6 +149,9 @@ spec:
    - 모델 변경 (minor)
 3. **No Hidden Dependencies**: manifest 에 선언되지 않은 모듈/서버/자원 사용 금지
 4. **Reference Format**: 모듈 참조는 항상 `{type}/{name}@{version}` — latest 사용 금지
+5. **No Role Declaration**: manifest 에 main/sub 역할 선언 금지 — 역할·팀 구성은
+   그래프 배선 소관 ([04-module-system.md](04-module-system.md)).
+   단, sub 로 배치될 수 있으려면 `a2a.enabled: true` 필요 (위임이 A2A 로 전달되므로)
 
 ## Docker Isolation Rules
 
@@ -271,7 +279,7 @@ POST /v1/drain           # graceful drain 개시
 ```python
 async def execute(self, task: TaskRequest) -> TaskResult:
     prompt = self.promptset.render(task.node_id, **task.input)
-    tools = [*self.skillset.tools(), *self.mcp.tools()]
+    tools = [*self.skillset.tools(), *self.mcp.tools(), *self.subagents.tools()]
 
     async with task_span(task):  # tracing + 로그 컨텍스트
         for turn in range(self.config.max_turns):
@@ -294,6 +302,29 @@ async def execute(self, task: TaskRequest) -> TaskResult:
 3. **Parallel Tools**: 독립 tool call 은 `asyncio.gather` 로 병렬 실행
 4. **Usage Tracking**: 매 모델 호출의 토큰 사용량 누적 → TaskResult.usage
 5. **Event Emission**: 스트리밍 모드에서 turn 별 tool_call/tool_result 이벤트 발행
+
+## Sub-Agent Delegation
+
+그래프에서 이 에이전트에 `subagents` 가 선언되면, agentd 가 각 sub-agent 를
+`agent__{subagent_id}` tool 로 tool registry 에 등록한다. 모델은 일반 tool 호출과 동일한
+방식으로 위임한다.
+
+```python
+# 모델이 보는 tool — description/schema 는 sub-agent 의 AgentCard 에서 자동 생성
+agent__web_searcher(task: str, context: dict | None = None) -> dict
+```
+
+### Delegation Rules
+
+1. **Transport**: `agent__` tool 호출은 내부적으로 A2A task 로 실행 — supervision 연결
+   규칙은 [03-protocol-integration.md](03-protocol-integration.md)
+2. **Timeout**: 위임 호출별 timeout (기본 120s) — 부모 태스크의 남은 timeout 을 초과 불가
+3. **병렬 위임**: 독립적인 위임은 병렬 실행 (tool 병렬 규칙과 동일)
+4. **Cancellation 전파**: 부모 태스크 취소 시 진행 중인 위임 태스크도 취소
+5. **깊이 상한**: 위임 체인 깊이는 `TraceContext.depth` 로 검증 — 초과 시 `A2A_005`
+6. **결과 크기**: sub 의 대용량 산출물은 artifact 참조로 — 부모 컨텍스트 오염 방지
+7. **Usage 집계**: sub 의 토큰 사용량은 sub 자신의 TaskResult 로 보고 —
+   run 단위 합산은 observability 계층이 `run_id` 로 수행 (부모가 합산하지 않는다)
 
 ## Registering Agents
 

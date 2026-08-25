@@ -164,7 +164,8 @@ def build_spec(fn: Callable[..., Any], *, name: str | None = None) -> SkillSpec:
         The derived skill specification.
 
     Raises:
-        ValueError: If the function is not async or lacks a SkillContext parameter.
+        ValueError: If the function is not async, has no parameters, or its first
+            parameter is annotated as something other than :class:`SkillContext`.
     """
     if not inspect.iscoroutinefunction(fn):
         raise ValueError(f"skill '{fn.__name__}' must be an async function")
@@ -178,6 +179,15 @@ def build_spec(fn: Callable[..., Any], *, name: str | None = None) -> SkillSpec:
         hints = get_type_hints(fn)
     except Exception:  # noqa: BLE001 - 해석 불가한 힌트는 스키마 없이 진행
         hints = {}
+
+    # 첫 파라미터는 반드시 SkillContext — 어긋나면 런타임 주입 계약이 조용히 깨진다.
+    # 힌트가 아예 없는 경우는 허용한다 (동적 정의 skill 을 막지 않기 위해)
+    context_hint = hints.get(params[0].name)
+    if context_hint is not None and context_hint is not SkillContext:
+        raise ValueError(
+            f"skill '{fn.__name__}' first parameter must be SkillContext, "
+            f"got {getattr(context_hint, '__name__', context_hint)}"
+        )
 
     properties: dict[str, Any] = {}
     required: list[str] = []

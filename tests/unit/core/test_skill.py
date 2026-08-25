@@ -226,3 +226,24 @@ def test_variadic_params_are_excluded():
     props = build_spec(_variadic).parameters["properties"]
 
     assert set(props) == {"first"}
+
+
+def test_wrong_context_type_is_rejected():
+    """첫 파라미터가 SkillContext 가 아니면 런타임 주입 계약이 깨진다."""
+
+    async def wrong_ctx(ctx: str, q: str) -> str:
+        """잘못된 컨텍스트 타입."""
+        return q
+
+    with pytest.raises(ValueError, match="first parameter must be SkillContext"):
+        build_spec(wrong_ctx)
+
+
+def test_unannotated_context_is_allowed():
+    """힌트가 없는 동적 정의 skill 은 막지 않는다."""
+
+    async def dynamic(ctx, q: str) -> str:
+        """힌트 없는 컨텍스트."""
+        return q
+
+    assert build_spec(dynamic).parameters["required"] == ["q"]

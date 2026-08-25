@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Self, TypeVar
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 T = TypeVar("T")
 
@@ -125,6 +125,9 @@ class ErrorCode(StrEnum):
     CFG_001 = "CFG_001"  # 설정 파싱/검증 실패
     CFG_002 = "CFG_002"  # 그룹 정의 오류 / 스코프 해석 실패
 
+    # Internal — 분류되지 않은 프레임워크 내부 실패 (최상위 핸들러 변환 대상)
+    INTERNAL_001 = "INTERNAL_001"
+
 
 class MalkuthErrorPayload(BaseModel):
     """Serialized error representation carried by TaskResult and API responses.
@@ -140,7 +143,7 @@ class MalkuthErrorPayload(BaseModel):
     agent: str | None = None
     task_id: str | None = None
     retryable: bool = False
-    details: dict[str, Any] = {}
+    details: dict[str, Any] = Field(default_factory=dict)
 
 
 class MalkuthError(Exception):
@@ -164,7 +167,7 @@ class MalkuthError(Exception):
         self.agent = agent
         self.task_id = task_id
         self.retryable = retryable
-        self.details = details or {}
+        self.details = {} if details is None else details
 
     def payload(self) -> MalkuthErrorPayload:
         """Serialize for TaskResult / API responses.
@@ -267,10 +270,17 @@ class CircuitBreaker:
 
     외부 의존 대상(모델 provider, MCP 서버, A2A peer, Agent Control API)별로
     적용한다. 시간 판정은 ``clock`` 주입으로 테스트에서 결정적으로 만든다.
+
+    Open 상태에서 던질 에러의 카테고리/코드는 **소유자가 주입한다** —
+    같은 브레이커가 MCP·A2A·runtime 어디에도 붙기 때문에 브레이커가 임의로
+    코드를 정하면 코드 기반 라우팅이 어긋난다.
     """
 
     max_failures: int = 5
     reset_timeout_s: float = 60.0
+    target: str = "unknown"
+    open_category: ErrorCategory = ErrorCategory.INTERNAL
+    open_code: str = ErrorCode.INTERNAL_001
     clock: Callable[[], float] = field(default_factory=lambda: _monotonic)
 
     _failures: int = field(default=0, init=False)
@@ -311,14 +321,15 @@ class CircuitBreaker:
         서킷브레이커 보호 하에 호출을 실행합니다.
 
         Raises:
-            MalkuthError: INTERNAL/``NET_001`` if the circuit is open.
+            MalkuthError: ``open_category``/``open_code`` if the circuit is open.
         """
         if not self.can_attempt():
             raise MalkuthError(
-                category=ErrorCategory.INTERNAL,
-                code=ErrorCode.NET_001,
+                category=self.open_category,
+                code=self.open_code,
                 message="circuit open",
                 retryable=True,
+                details={"target": self.target},
             )
         try:
             result = await fn()

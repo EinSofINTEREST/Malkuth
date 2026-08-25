@@ -184,6 +184,7 @@ async def test_breaker_call_raises_retryable_error_when_open():
 
     assert exc_info.value.message == "circuit open"
     assert exc_info.value.retryable is True
+    assert exc_info.value.category is ErrorCategory.INTERNAL
 
 
 async def test_breaker_call_records_failure_and_propagates():
@@ -230,6 +231,52 @@ def test_all_documented_error_codes_exist():
         "VAL_001", "VAL_002",
         "STOR_001", "STOR_002", "STOR_003",
         "CFG_001", "CFG_002",
+        "INTERNAL_001",
     }  # fmt: skip
 
     assert {c.value for c in ErrorCode} == expected
+
+
+def test_explicit_empty_details_is_preserved():
+    """빈 dict 는 유효한 입력이다 — falsy 라는 이유로 대체하지 않는다."""
+    err = MalkuthError(
+        category=ErrorCategory.INTERNAL, code=ErrorCode.INTERNAL_001, message="m", details={}
+    )
+
+    assert err.details == {}
+
+
+def test_payload_details_default_is_not_shared():
+    """가변 기본값 공유 방지 — 인스턴스마다 새 dict."""
+    first = MalkuthErrorPayload(
+        category=ErrorCategory.INTERNAL, code=ErrorCode.INTERNAL_001, message="a"
+    )
+    second = MalkuthErrorPayload(
+        category=ErrorCategory.INTERNAL, code=ErrorCode.INTERNAL_001, message="b"
+    )
+
+    first.details["k"] = "v"
+
+    assert second.details == {}
+
+
+async def test_breaker_open_error_uses_injected_category_and_code():
+    """브레이커는 붙는 대상에 따라 카테고리/코드가 다르다 — 소유자가 주입한다."""
+    breaker = CircuitBreaker(
+        max_failures=1,
+        target="mcp:filesystem",
+        open_category=ErrorCategory.MCP,
+        open_code=ErrorCode.MCP_004,
+        clock=FakeClock(),
+    )
+    breaker.record_failure()
+
+    async def never_called() -> str:  # pragma: no cover - 도달하면 안 된다
+        raise AssertionError("must not be called")
+
+    with pytest.raises(MalkuthError) as exc_info:
+        await breaker.call(never_called)
+
+    assert exc_info.value.category is ErrorCategory.MCP
+    assert exc_info.value.code == "MCP_004"
+    assert exc_info.value.details["target"] == "mcp:filesystem"

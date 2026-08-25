@@ -136,11 +136,17 @@ class RunManager:
                 details={"graph": topology.name, "mode": str(mode), "limit": limit},
             )
 
-        handle = RunHandle(
-            run_id=run_id or f"run-{uuid.uuid4()}",
-            graph=topology.name,
-            mode=mode,
-        )
+        resolved_id = run_id or f"run-{uuid.uuid4()}"
+        if resolved_id in self._runs:
+            # 덮어쓰면 앞선 run 의 추적이 사라지고 슬롯 회계가 어긋난다
+            raise MalkuthError(
+                category=ErrorCategory.VALIDATION,
+                code=ErrorCode.VAL_002,
+                message=f"run id already in use: {resolved_id}",
+                details={"run_id": resolved_id, "graph": topology.name},
+            )
+
+        handle = RunHandle(run_id=resolved_id, graph=topology.name, mode=mode)
         self._runs[handle.run_id] = handle
         return handle
 
@@ -156,7 +162,7 @@ class RunManager:
         if run is None:
             raise MalkuthError(
                 category=ErrorCategory.NOT_FOUND,
-                code=ErrorCode.VAL_001,
+                code=ErrorCode.NF_001,
                 message=f"unknown run: {run_id}",
                 details={"run_id": run_id},
             )
@@ -240,8 +246,17 @@ class ServiceRunner:
 
             try:
                 state = await self._iterate(handle, state)
+            except asyncio.CancelledError:
+                # 협조적 취소는 그대로 전파한다 (drain/shutdown 경로)
+                handle.status = RunStatus.STOPPED
+                raise
             except MalkuthError as err:
                 if self._record_failure(handle, err):
+                    return handle
+                continue
+            except Exception as err:
+                # 예상 못한 예외가 전파되면 handle 이 running 인 채 남아 슬롯이 샌다
+                if self._record_failure(handle, self._wrap_unexpected(err, handle)):
                     return handle
                 continue
 
@@ -266,6 +281,18 @@ class ServiceRunner:
         handle.state = dict(result)
         return dict(result)
 
+    @staticmethod
+    def _wrap_unexpected(err: Exception, handle: RunHandle) -> MalkuthError:
+        """구조화되지 않은 예외를 INTERNAL 로 변환한다."""
+        wrapped = MalkuthError(
+            category=ErrorCategory.INTERNAL,
+            code=ErrorCode.INTERNAL_001,
+            message="unexpected error during service iteration",
+            details={"graph": handle.graph, "run_id": handle.run_id},
+        )
+        wrapped.__cause__ = err
+        return wrapped
+
     def _record_failure(self, handle: RunHandle, err: MalkuthError) -> bool:
         """실패를 누적하고, 임계 초과 시 run 을 halted 로 정지한다."""
         handle.failure_streak += 1
@@ -280,7 +307,8 @@ class ServiceRunner:
             details={
                 "graph": handle.graph,
                 "run_id": handle.run_id,
-                "iteration": handle.iteration,
+                # _iterate 는 실패해도 카운터를 올리므로, 실패한 회차는 직전 인덱스다
+                "iteration": max(handle.iteration - 1, 0),
                 "max_failure_streak": self._service.max_failure_streak,
             },
         )

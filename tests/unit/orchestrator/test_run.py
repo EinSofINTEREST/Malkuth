@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
@@ -125,10 +127,12 @@ def test_active_counts_only_live_runs():
 
 
 def test_unknown_run_lookup_is_rejected():
+    """미존재 조회는 검증 코드가 아니라 not-found 전용 코드로 보고한다."""
     with pytest.raises(MalkuthError) as exc_info:
         RunManager().get("run-missing")
 
     assert exc_info.value.category is ErrorCategory.NOT_FOUND
+    assert exc_info.value.code == "NF_001"
 
 
 def test_release_of_unknown_run_is_a_noop():
@@ -383,3 +387,105 @@ async def test_each_failed_iteration_opens_a_new_checkpoint_thread():
 
     thread_ids = [c["configurable"]["thread_id"] for c in graph.configs]
     assert thread_ids == ["run-threads:0", "run-threads:1", "run-threads:2"]
+
+
+def test_duplicate_run_id_is_rejected():
+    """덮어쓰면 앞선 run 의 추적이 사라지고 슬롯 회계가 어긋난다."""
+    manager = RunManager()
+    manager.acquire(make_mission(), run_id="run-dup")
+
+    with pytest.raises(MalkuthError) as exc_info:
+        manager.acquire(make_mission(), run_id="run-dup")
+
+    assert exc_info.value.code == "VAL_002"
+    assert len(manager.runs) == 1
+
+
+def test_released_run_id_stays_reserved():
+    """종료된 run 의 id 도 기록으로 남으므로 재사용하지 않는다."""
+    manager = RunManager()
+    handle = manager.acquire(make_mission(), run_id="run-once")
+    manager.release(handle.run_id, RunStatus.COMPLETED)
+
+    with pytest.raises(MalkuthError):
+        manager.acquire(make_mission(), run_id="run-once")
+
+
+class BoomGraph:
+    """구조화되지 않은 예외를 내는 그래프 대역."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def ainvoke(self, state: dict, config: dict | None = None) -> dict:
+        self.calls += 1
+        raise RuntimeError("unexpected")
+
+
+async def test_unexpected_exception_reaches_a_terminal_state():
+    """예상 못한 예외가 전파되면 handle 이 running 인 채 남아 슬롯이 샌다."""
+    topology = make_service(
+        service={"idle": {"min_delay_s": 1, "max_delay_s": 2}, "max_failure_streak": 2}
+    )
+    manager = RunManager()
+    handle = manager.acquire(topology)
+    runner = ServiceRunner(topology, BoomGraph(), sleep=FakeSleep())
+
+    await runner.run(handle, {"feeds": []}, max_iterations=5)
+
+    assert handle.status is RunStatus.HALTED
+    assert handle.error is not None
+    assert handle.error.code == "GRAPH_005"
+    assert manager.active(GraphMode.SERVICE) == 0  # 슬롯이 반납된다
+
+
+async def test_unexpected_exception_preserves_original_cause():
+    topology = make_service(
+        service={"idle": {"min_delay_s": 1, "max_delay_s": 2}, "max_failure_streak": 1}
+    )
+    handle = RunManager().acquire(topology)
+    runner = ServiceRunner(topology, BoomGraph(), sleep=FakeSleep())
+
+    await runner.run(handle, {"feeds": []}, max_iterations=3)
+
+    assert handle.error is not None
+    inner = handle.error.__cause__
+    assert isinstance(inner, MalkuthError)
+    assert inner.code == "INTERNAL_001"
+    assert isinstance(inner.__cause__, RuntimeError)
+
+
+class CancelGraph:
+    """취소를 일으키는 그래프 대역."""
+
+    async def ainvoke(self, state: dict, config: dict | None = None) -> dict:
+        raise asyncio.CancelledError
+
+
+async def test_cancellation_propagates_and_is_not_counted_as_failure():
+    """협조적 취소는 실패 스트릭이 아니라 그대로 전파돼야 한다."""
+    topology = make_service(
+        service={"idle": {"min_delay_s": 1, "max_delay_s": 2}, "max_failure_streak": 5}
+    )
+    handle = RunManager().acquire(topology)
+    runner = ServiceRunner(topology, CancelGraph(), sleep=FakeSleep())
+
+    with pytest.raises(asyncio.CancelledError):
+        await runner.run(handle, {"feeds": []}, max_iterations=3)
+
+    assert handle.failure_streak == 0
+    assert handle.status is RunStatus.STOPPED
+
+
+async def test_halt_records_the_failed_iteration_index():
+    """실패한 회차를 가리켜야 한다 — 카운터는 실패해도 올라가므로 직전 인덱스다."""
+    topology = make_service(
+        service={"idle": {"min_delay_s": 1, "max_delay_s": 2}, "max_failure_streak": 1}
+    )
+    handle = RunManager().acquire(topology)
+    runner = ServiceRunner(topology, FakeGraph([graph_error()]), sleep=FakeSleep())
+
+    await runner.run(handle, {"feeds": []}, max_iterations=5)
+
+    assert handle.error is not None
+    assert handle.error.details["iteration"] == 0

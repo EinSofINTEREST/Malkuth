@@ -356,10 +356,13 @@ graphs/{name}.yaml
    (agentd 가 `task.node_id` 로 템플릿을 선택하기 때문)
 4. Direct 요청(그래프 밖 단독 태스크, [02-agent-implementation.md](02-agent-implementation.md))
    을 받는 에이전트의 promptset 은 `default` 템플릿 포함 필수
-5. Breaking change 기준:
-   - Skillset: tool 시그니처/이름 변경 = minor 이상
-   - Promptset: 변수 스키마 변경 = minor 이상
-   - Graph: state schema 변경 = major
+5. Breaking change 기준 (semver):
+   - Skillset: tool 이름/시그니처 변경·삭제 = **major** /
+     하위 호환 추가 (신규 tool, optional 파라미터) = minor
+   - Promptset: 필수 변수 추가·삭제 등 변수 스키마 breaking 변경 = **major** /
+     optional 변수 추가·문구 수정 = minor/patch
+   - Memoryset: 임베딩 모델/차원 변경 = minor 이상 (전체 재인덱싱 수반)
+   - Graph: state schema 변경 = **major**
 
 ## Testing Modules
 

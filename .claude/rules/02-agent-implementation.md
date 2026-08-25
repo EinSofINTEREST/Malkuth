@@ -30,7 +30,12 @@ class BaseAgent(ABC):
 
     @abstractmethod
     def stream(self, task: TaskRequest) -> AsyncIterator[TaskEvent]:
-        """스트리밍 실행. 이벤트 단위: token / tool_call / tool_result / done / error."""
+        """스트리밍 실행 — 구현은 async generator (`async def` + `yield`) 로 작성한다.
+
+        호출자는 `async for event in agent.stream(task)` 로 소비한다 (별도 await 없음).
+        07 의 async-first 규칙을 async generator 형태로 적용한 계약이다.
+        이벤트 단위: token / tool_call / tool_result / done / error.
+        """
 
     @abstractmethod
     async def health(self) -> HealthStatus:
@@ -166,6 +171,10 @@ spec:
    미선언 시 global 에만 소속. `group: global` 직접 선언 금지 (배포 검증 차단).
    그룹은 리소스 스코프일 뿐 — 소속이 달라도 배선/호출 규칙은 동일
    ([01-architecture.md](01-architecture.md) Resource Scoping)
+7. **MCP Server Schema**: `spec.mcp.servers` 항목의 정식 필드 집합은
+   [03-protocol-integration.md](03-protocol-integration.md) 의 서버 선언 스펙을 따른다 —
+   stdio/sidecar/external 3 패턴과 `allowed_tools` / `optional` / `auth` /
+   `env_allowlist` 전부 manifest 스키마의 정식 필드다 (03 의 예시가 곧 스키마 계약)
 
 ## Docker Isolation Rules
 

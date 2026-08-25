@@ -282,6 +282,7 @@ malkuth/
 │       ├── core/                # 프레임워크 핵심 계약 (모든 레이어가 의존)
 │       │   ├── agent.py         # BaseAgent, AgentContext, TaskRequest/Result
 │       │   ├── manifest.py      # AgentManifest 스키마 (pydantic)
+│       │   ├── skill.py         # @skill 데코레이터 + SkillContext
 │       │   ├── errors.py        # MalkuthError + ErrorCategory + 코드 상수
 │       │   └── events.py        # TaskEvent, 스트리밍 이벤트 모델
 │       │
@@ -317,6 +318,10 @@ malkuth/
 │       │   ├── server.py        # Agent Control API 서버 (FastAPI)
 │       │   ├── executor.py      # 모델 호출 + tool 실행 루프
 │       │   └── bootstrap.py     # manifest 로드 → 모듈/프로토콜 초기화
+│       │
+│       ├── graphs/              # 그래프 배선용 Python 계약 모음
+│       │   ├── schemas.py       # 그래프 state pydantic 모델 (topology 의 state.schema ref 대상)
+│       │   └── conditions.py    # conditional edge 조건 함수 (edges 의 condition ref 대상)
 │       │
 │       └── cli/                 # malkuth CLI (deploy/run/status/logs)
 │
@@ -505,7 +510,12 @@ protocols:
 
 registry:
   backend: filesystem
-  root: ./modules
+  roots:                        # ref type 별 해석 루트 — registry.resolve 가 모든 타입 커버
+    skillsets: ./modules/skillsets
+    promptsets: ./modules/promptsets
+    memorysets: ./modules/memorysets
+    agents: ./agents
+    graphs: ./graphs
 
 memory:
   backend: sqlite               # sqlite (dev) | postgres (prod)

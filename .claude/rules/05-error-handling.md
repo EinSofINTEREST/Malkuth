@@ -107,7 +107,8 @@ class MalkuthError(Exception):
 - **pydantic 검증**: `ValidationError` 그대로 두고, boundary(배포 검증, API 입력)에서
   `VALIDATION` 카테고리로 변환
 - **skill 구현 내부**: skill 은 도메인 예외를 그대로 던진다 —
-  agentd 의 tool 실행 boundary 가 `MCP_003`/`SKILL` 계열로 변환·기록
+  agentd 의 tool 실행 boundary 가 skillset tool 은 `SKILL_001`, MCP tool 은
+  `MCP_003` 으로 변환·기록
 
 ### 예시 — boundary 변환 패턴
 
@@ -161,6 +162,9 @@ MCP_001: 서버 기동/initialize 실패
 MCP_002: Tool 미존재
 MCP_003: Tool 실행 실패
 MCP_004: Transport 단절
+
+SKILL_001: Skillset tool 실행 실패 (category: module — skill 도메인 예외 wrapping.
+           timeout 은 TO_002 사용)
 
 RT_001:  컨테이너 기동 실패
 RT_002:  컨테이너 unhealthy

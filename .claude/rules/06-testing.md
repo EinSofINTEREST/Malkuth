@@ -5,9 +5,12 @@
 ### Core Principles
 
 1. **Test Coverage**
-   - Minimum 70% code coverage for core packages
+   - **강제 게이트는 하나**: `src/malkuth` 전체 기준 70% — `make test` 의
+     pytest-cov `--cov-fail-under=70` 가 유일한 CI 강제 수단
    - 90%+ coverage for critical paths (`core/`, `orchestrator/`, protocol boundaries)
-   - 100% coverage for error handling paths (boundary 변환 로직)
+     — 목표치 (리뷰에서 확인, CI 강제 아님)
+   - 100% coverage for error handling paths (boundary 변환 로직) — 목표치, 신규
+     boundary 코드는 리뷰에서 에러 경로 테스트 부재 시 반려
 
 2. **Test Pyramid**
    ```

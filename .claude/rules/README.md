@@ -281,10 +281,11 @@ Key for:
 # Follow the agent interface from 02-agent-implementation.md
 class ResearchAgent(BaseAgent):
     async def invoke(self, task: TaskRequest) -> TaskResult:
-        prompt = self.promptset.render("research", query=task.input)
-        tools = self.skillset.tools() + self.mcp.tools()
+        prompt = self.promptset.render("research", query=task.input["query"])
+        tools = [*self.skillset.tools(), *self.mcp.tools()]
         result = await self.model.run(prompt, tools=tools)
-        return TaskResult(output=result.content)
+        # completed factory 가 task_id/status/usage 를 채운다 (02 의 TaskResult 계약)
+        return TaskResult.completed(task, output={"findings": result.content})
 ```
 
 ### Graph Wiring (config, not code)
@@ -300,7 +301,9 @@ spec:
       agent: agents/researcher@0.1.0
   edges:
     - {from: START, to: planner}
-    - {from: planner, to: researcher, condition: needs_research}
+    - from: planner
+      to: researcher
+      condition: malkuth.graphs.conditions:needs_research   # importable ref (04 규칙)
     - {from: researcher, to: END}
 ```
 

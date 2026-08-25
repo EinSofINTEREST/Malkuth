@@ -81,8 +81,9 @@ required check 는 게이트를 통과하므로, Ruleset 을 첫날부터 등록
 - 기본: job 실패 시 PR 머지 차단 (Required check).
 - Required job 에 `continue-on-error: true` 사용 금지 (게이트 우회가 됨).
 - 정보성 job (예: `Branch Name Lint`) 은 Required 에 등록하지 않으며
-  `continue-on-error: true` 허용. `if: always()` 대신 `if: !cancelled()` 사용
-  (수동 취소 시 러너 낭비 방지).
+  `continue-on-error: true` 허용. `if: always()` 대신 `if: ${{ !cancelled() }}` 사용
+  (수동 취소 시 러너 낭비 방지 — `!` 로 시작하는 표현식은 `${{ }}` 로 감싸지 않으면
+  YAML 파싱이 깨진다).
 
 ---
 

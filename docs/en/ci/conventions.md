@@ -82,8 +82,9 @@ from day one. The guard removes itself from relevance the moment code lands.
 - Default: job failure blocks the merge (Required check).
 - `continue-on-error: true` is forbidden on Required jobs (it bypasses the gate).
 - Informational jobs (e.g. `Branch Name Lint`) are **not** registered as Required and
-  may use `continue-on-error: true`. Use `if: !cancelled()` instead of `if: always()`
-  (the latter wastes runners on manual cancellation).
+  may use `continue-on-error: true`. Use `if: ${{ !cancelled() }}` instead of
+  `if: always()` (the latter wastes runners on manual cancellation — an expression
+  starting with `!` must be wrapped in `${{ }}` or YAML parsing breaks).
 
 ---
 

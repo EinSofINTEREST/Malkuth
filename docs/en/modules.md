@@ -77,5 +77,6 @@ each other. Resource lookup resolves **local > group > global**.
 
 - Agents pin exact module versions; deploy validation cross-checks requirements
   (e.g. skillset `requires.env` ⊆ agent `env_allowlist`)
-- Breaking-change guide: tool signature / variable schema changes → minor+;
-  graph state schema changes → major; embedding model changes → version bump + reindex
+- Breaking-change guide (semver): tool rename/signature change/removal and required
+  prompt-variable changes → **major**; backward-compatible additions → minor;
+  graph state schema changes → major; embedding model changes → minor+ with full reindex

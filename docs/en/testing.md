@@ -53,6 +53,7 @@ make test          # pytest unit + coverage ≥ 70% (fails below)
 make test-integration
 ```
 
-Coverage targets: 70% minimum overall, 90%+ on critical paths
-(`core/`, `orchestrator/`, protocol boundaries), 100% on error-conversion paths.
+Coverage: a **single enforced gate** — ≥ 70% across `src/malkuth`, enforced by
+`make test` via pytest-cov `--cov-fail-under=70`. The 90%+ (critical paths) and 100%
+(error-conversion paths) figures are review targets, not separate CI gates.
 Check names and merge-gate wiring: [ci/status-checks.md](ci/status-checks.md).

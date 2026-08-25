@@ -40,14 +40,20 @@ all of:
 
 1. **Review completion** — zero unresolved review threads, no outstanding
    `changes_requested` review per reviewer
-2. **Gates** — every required status check SUCCESS or SKIPPED
-   (per [status-checks.md](status-checks.md))
+2. **Gates** — every required status check SUCCESS, NEUTRAL, or SKIPPED
+   (GitHub treats all three as passing; per [status-checks.md](status-checks.md))
 3. **Goal attainment** — the linked issue's scope/acceptance criteria are satisfied by
    the PR's actual diff
 
 On any failure the routine comments the gaps and **removes the label** instead of
 merging (re-label after fixing). PRs without the label are never merged automatically,
 and the Ruleset gates still bind the routine — it cannot bypass required checks.
+
+**Label authority**: anyone with the Triage role or higher can apply labels on GitHub,
+so granting Triage effectively grants merge-approval authority. The gatekeeper
+therefore verifies the `labeled` timeline-event actor against a maintainer allowlist
+(currently `juhy0987`) before merging — extend the allowlist deliberately, in the same
+PR that adds a collaborator.
 
 ---
 

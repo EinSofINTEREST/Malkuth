@@ -38,13 +38,18 @@ PR 에 `automerge` 라벨을 붙이는 것은 **사람의 명시적 머지 승�
 squash merge 합니다:
 
 1. **리뷰 완결** — 미해결 리뷰 thread 0건, 리뷰어별 미해소 `changes_requested` 없음
-2. **게이트** — required status check 전부 SUCCESS 또는 SKIPPED
-   ([status-checks.md](status-checks.md) 기준)
+2. **게이트** — required status check 전부 SUCCESS / NEUTRAL / SKIPPED
+   (GitHub 은 셋 모두 통과로 취급, [status-checks.md](status-checks.md) 기준)
 3. **목표 달성** — 연결 이슈의 작업 범위/완료 조건이 PR 의 실제 diff 로 충족됨
 
 하나라도 실패하면 merge 하지 않고 부족한 항목을 코멘트로 남긴 뒤 **라벨을 제거**합니다
 (보완 후 다시 라벨 부착). 라벨 없는 PR 은 절대 자동 머지되지 않으며, 루틴도 Ruleset
 게이트를 우회할 수 없습니다.
+
+**라벨 권한**: GitHub 에서 Triage 이상 role 은 라벨을 붙일 수 있으므로, Triage 부여가
+곧 머지 승인 권한 부여가 됩니다. 이를 보완하기 위해 게이트키퍼는 merge 전에 `labeled`
+timeline 이벤트의 actor 를 메인테이너 allowlist (현재 `juhy0987`) 와 대조합니다 —
+협업자 추가 시 allowlist 확장은 같은 PR 에서 의도적으로 수행합니다.
 
 ---
 

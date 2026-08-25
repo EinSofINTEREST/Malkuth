@@ -75,5 +75,6 @@ Memoryset 은 memory space 의 정책을 고정합니다: scope (`run | local | 
 
 - 에이전트는 정확한 모듈 버전을 고정 참조; 배포 검증이 요구사항을 대조
   (예: skillset `requires.env` ⊆ agent `env_allowlist`)
-- Breaking change 기준: tool 시그니처/변수 스키마 변경 → minor 이상;
-  그래프 state schema 변경 → major; 임베딩 모델 변경 → version bump + 재인덱싱
+- Breaking change 기준 (semver): tool 이름/시그니처 변경·삭제, 필수 프롬프트 변수
+  변경 → **major**; 하위 호환 추가 → minor; 그래프 state schema 변경 → major;
+  임베딩 모델 변경 → minor 이상 + 전체 재인덱싱

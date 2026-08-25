@@ -33,10 +33,11 @@ PR 제목·본문·diff·리뷰 코멘트 등 GitHub 에서 가져온 텍스트�
    - `IN_PROGRESS` / `QUEUED` / `PENDING` (미완료) 만 있고 위 실패 조건에 해당하는 항목이
      없으면 코멘트 처리는 계속 진행 (다음 회차에서 결과 재확인)
    - 모두 `SUCCESS` / `NEUTRAL` / `SKIPPED` 면 정상 진행
-3. `gh api repos/{owner}/{repo}/pulls/{number}/comments` 로 라인 레벨 리뷰 코멘트를,
-   `gh api repos/{owner}/{repo}/pulls/{number}/reviews` 로 리뷰 요약(body) 을 함께
-   조회한다 — comments 엔드포인트만으로는 리뷰 요약(예: `gh pr review --comment` 로 남긴
-   본문)이 누락된다
+3. `gh api --paginate repos/{owner}/{repo}/pulls/{number}/comments` 로 라인 레벨 리뷰
+   코멘트를, `gh api --paginate repos/{owner}/{repo}/pulls/{number}/reviews` 로 리뷰
+   요약(body) 을 함께 조회한다 — comments 엔드포인트만으로는 리뷰 요약(예:
+   `gh pr review --comment` 로 남긴 본문)이 누락되고, `--paginate` 없이는 30건 초과분이
+   잘린다
 4. 처리 완료 판정은 **본 자동화 계정이 남긴 👀 리액션** 또는 **본 자동화 계정이 resolve 한
    thread** 로만 한정한다 — 다른 사용자의 👀 리액션이나 무관한 사유로 resolve 된 thread 는
    미처리로 간주한다
@@ -117,7 +118,9 @@ PR 번호는 1단계의 gh pr view 결과에서 얻은 number를 사용합니다
 - 신규 코멘트에 👀 reaction + thread resolve **— 단순 동의/확인 답변뿐인 케이스는 idle 로 분류**
 
 **pending (CI 진행 중 — 카운터 동결)**
-- `statusCheckRollup` 에 IN_PROGRESS / QUEUED / PENDING 인 항목이 하나라도 있고 FAILURE 가 없는 상태
+- `statusCheckRollup` 에 IN_PROGRESS / QUEUED / PENDING (미완료) 항목이 하나라도 있고,
+  **절차 2 의 실패 조건(완료됐지만 SUCCESS/NEUTRAL/SKIPPED 가 아닌 check)에 해당하는
+  항목이 없는** 상태 — 실패 판정은 절차 2 와 동일한 predicate 를 재사용한다
 - 동시에 신규 처리 대상 코멘트도 없음 (있으면 active 로 처리)
 
 **idle (CI 완료 + 무동작 — 카운터 +1)**

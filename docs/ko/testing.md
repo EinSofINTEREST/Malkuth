@@ -53,6 +53,7 @@ make test          # pytest unit + 커버리지 ≥ 70% (미달 시 실패)
 make test-integration
 ```
 
-커버리지 목표: 전체 최소 70%, 핵심 경로(`core/`, `orchestrator/`, 프로토콜 boundary)
-90%+, 에러 변환 경로 100%.
+커버리지: **강제 게이트는 하나** — `src/malkuth` 전체 기준 70% 이상, `make test` 의
+pytest-cov `--cov-fail-under=70` 로 강제. 핵심 경로 90%+ 와 에러 변환 경로 100% 는
+리뷰 목표치이며 별도 CI 게이트가 아닙니다.
 체크 이름과 머지 게이트 연결: [ci/status-checks.md](ci/status-checks.md).

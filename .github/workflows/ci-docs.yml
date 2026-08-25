@@ -1,0 +1,47 @@
+# 문서 정책 검증 — en/ko 미러 구조 + 언어 선택자 (.claude/rules/07-code-style.md Documentation)
+# Required check 로 등록되므로 경로 필터 없이 항상 실행한다 (수 초 내 완료).
+name: ci-docs
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  docs-sync:
+    name: Docs Sync Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: en/ko structure mirror
+        run: |
+          if [ ! -d docs/en ] || [ ! -d docs/ko ]; then
+            echo "::error::docs/en 과 docs/ko 디렉토리가 모두 존재해야 합니다 (07-code-style.md Documentation)"
+            exit 1
+          fi
+          en=$(cd docs/en && find . -name '*.md' | sort)
+          ko=$(cd docs/ko && find . -name '*.md' | sort)
+          if [ "$en" != "$ko" ]; then
+            echo "::error::docs/en 과 docs/ko 의 파일 구조가 일치하지 않습니다 — 아래 diff 를 확인하세요"
+            diff <(echo "$en") <(echo "$ko") || true
+            exit 1
+          fi
+          echo "structure mirror ok ($(echo "$en" | wc -l) files)"
+      - name: language selector presence
+        run: |
+          fail=0
+          while IFS= read -r f; do
+            # 모든 문서 상단(5줄 내)에 언어 선택자 필요
+            if ! head -n 5 "$f" | grep -q '한국어'; then
+              echo "::error file=$f::언어 선택자 누락 — 문서 상단에 한국어/English 선택자를 추가하세요 (07-code-style.md)"
+              fail=1
+            fi
+          done < <(find docs/en docs/ko -name '*.md')
+          if ! head -n 5 README.md | grep -q '한국어'; then
+            echo "::error file=README.md::루트 README 에 언어 선택자가 필요합니다"
+            fail=1
+          fi
+          exit "$fail"

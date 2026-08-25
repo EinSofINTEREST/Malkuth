@@ -74,7 +74,8 @@ def extract_input(node: NodeSpec, state: dict[str, Any]) -> dict[str, Any]:
     """
     extracted: dict[str, Any] = {}
     for key, source in node.input_map.items():
-        if not source.startswith(_STATE_PREFIX):
+        # state 참조는 문자열 `state.<path>` 뿐 — 숫자/불리언/리스트 등은 리터럴
+        if not (isinstance(source, str) and source.startswith(_STATE_PREFIX)):
             extracted[key] = source
             continue
         path = source.removeprefix(_STATE_PREFIX)

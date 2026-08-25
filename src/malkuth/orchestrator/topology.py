@@ -63,10 +63,26 @@ class NodeSpec(BaseModel):
     id: str
     agent: str | None = None
     graph: str | None = None
-    input_map: dict[str, str] = Field(default_factory=dict)
+    input_map: dict[str, Any] = Field(default_factory=dict)
     output_map: dict[str, str] = Field(default_factory=dict)
     retry: int = 0
     timeout_s: float | None = None
+
+    @field_validator("retry")
+    @classmethod
+    def _non_negative_retry(cls, value: int) -> int:
+        """음수 재시도는 의미가 없다."""
+        if value < 0:
+            raise ValueError("retry must be >= 0")
+        return value
+
+    @field_validator("timeout_s")
+    @classmethod
+    def _positive_timeout(cls, value: float | None) -> float | None:
+        """0 이하 timeout 은 즉시 만료를 뜻해 노드를 실행할 수 없게 만든다."""
+        if value is not None and value <= 0:
+            raise ValueError("timeout_s must be > 0")
+        return value
 
     @field_validator("id")
     @classmethod
@@ -108,6 +124,14 @@ class EdgeSpec(BaseModel):
     target: str = Field(alias="to")
     condition: str | None = None
     max_iterations: int | None = None
+
+    @field_validator("max_iterations")
+    @classmethod
+    def _positive_iterations(cls, value: int | None) -> int | None:
+        """0 이하는 의미가 없고, 음수는 truthy 라 상한 검사를 조용히 통과시킨다."""
+        if value is not None and value < 1:
+            raise ValueError("max_iterations must be >= 1")
+        return value
 
 
 class ConnectionSpec(BaseModel):
@@ -234,8 +258,12 @@ class GraphSpec(BaseModel):
         """노드 id 중복 금지 — 라우팅이 모호해진다."""
         if not value:
             raise ValueError("graph must declare at least one node")
-        ids = [n.id for n in value]
-        duplicates = {i for i in ids if ids.count(i) > 1}
+        seen: set[str] = set()
+        duplicates: set[str] = set()
+        for node in value:
+            if node.id in seen:
+                duplicates.add(node.id)
+            seen.add(node.id)
         if duplicates:
             raise ValueError(f"duplicate node id: {sorted(duplicates)}")
         return value
@@ -317,7 +345,9 @@ def resolve_import_ref(ref: str) -> Any:
     module_path, _, attribute = ref.partition(_IMPORT_REF_SEPARATOR)
     try:
         module = importlib.import_module(module_path)
-    except ImportError as err:
+    except (ImportError, ValueError) as err:
+        # 빈 모듈명(":attr") 은 ValueError 를 내므로 함께 감싼다 —
+        # 토폴로지 검증 실패는 예외 종류와 무관하게 GRAPH_001 이어야 한다
         raise _topology_error(f"cannot import module for ref: {ref}", ref=ref) from err
 
     try:
@@ -386,6 +416,27 @@ def _check_reachability(topology: GraphTopology) -> None:
         )
 
 
+def _reaches(graph: dict[str, set[str]], source: str, target: str) -> bool:
+    """``source`` 에서 ``target`` 으로 도달 가능한지 (BFS)."""
+    seen: set[str] = set()
+    frontier = [source]
+    while frontier:
+        current = frontier.pop()
+        if current == target:
+            return True
+        if current in seen:
+            continue
+        seen.add(current)
+        frontier.extend(graph.get(current, set()) - seen)
+    return False
+
+
+def _cycle_edges(topology: GraphTopology) -> list[EdgeSpec]:
+    """순환에 놓인 edge 목록 — target 에서 source 로 되돌아올 수 있는 edge."""
+    graph = _adjacency(topology)
+    return [e for e in topology.spec.edges if _reaches(graph, e.target, e.source)]
+
+
 def _has_cycle(topology: GraphTopology) -> bool:
     """방향 순환 존재 여부 (self-loop 포함)."""
     graph = _adjacency(topology)
@@ -412,7 +463,10 @@ def _check_mode_topology(topology: GraphTopology) -> None:
     if spec.mode is GraphMode.MISSION:
         if END not in _reachable_from_start(topology):
             raise _topology_error("mission graph must be able to reach END", graph=topology.name)
-        if _has_cycle(topology) and not any(e.max_iterations for e in spec.edges):
+        # 상한은 순환에 놓인 edge 에 있어야 한다 — 무관한 edge 에 붙은 값은
+        # 실제 순환을 전혀 제한하지 못한 채 검사만 통과시킨다
+        cycle_edges = _cycle_edges(topology)
+        if cycle_edges and not any(e.max_iterations for e in cycle_edges):
             raise _topology_error(
                 "mission graph with a cycle requires 'max_iterations' on a cycle edge",
                 graph=topology.name,
@@ -441,7 +495,7 @@ def _check_input_maps(topology: GraphTopology, state_fields: frozenset[str]) -> 
     """input_map 이 참조하는 state 키가 schema 에 존재해야 한다."""
     for node in topology.spec.nodes:
         for target_key, source in node.input_map.items():
-            if not source.startswith("state."):
+            if not (isinstance(source, str) and source.startswith("state.")):
                 continue
             field = source.removeprefix("state.").split(".", 1)[0]
             if field not in state_fields:

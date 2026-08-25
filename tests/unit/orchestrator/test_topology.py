@@ -407,3 +407,127 @@ def test_subgraph_node_ref():
     review = topology.node("review")
     assert review.is_subgraph is True
     assert review.ref == "graphs/sub-review@1.0.0"
+
+
+def test_import_ref_with_empty_module_is_wrapped_as_graph_001():
+    """빈 모듈명은 ValueError 를 내지만, 계약상 GRAPH_001 로 보고돼야 한다."""
+    with pytest.raises(MalkuthError) as exc_info:
+        resolve_import_ref(":attr")
+
+    assert_graph_001(exc_info)
+
+
+@pytest.mark.parametrize("value", [0, -1, -5])
+def test_non_positive_max_iterations_is_rejected(value):
+    """음수는 truthy 라 상한 검사를 조용히 통과시킨다 — 스키마에서 막는다."""
+    with pytest.raises(ValidationError, match="max_iterations must be >= 1"):
+        GraphTopology.model_validate(
+            mission_dict(
+                edges=[
+                    {"from": "START", "to": "planner"},
+                    {"from": "planner", "to": "researcher"},
+                    {"from": "researcher", "to": "planner", "max_iterations": value},
+                    {"from": "researcher", "to": "END"},
+                ]
+            )
+        )
+
+
+def test_negative_retry_is_rejected():
+    with pytest.raises(ValidationError, match="retry must be >= 0"):
+        GraphTopology.model_validate(
+            mission_dict(
+                nodes=[
+                    {"id": "planner", "agent": "agents/planner@0.1.0", "retry": -1},
+                    {"id": "researcher", "agent": "agents/researcher@0.1.0"},
+                ]
+            )
+        )
+
+
+@pytest.mark.parametrize("value", [0, -1.5])
+def test_non_positive_node_timeout_is_rejected(value):
+    with pytest.raises(ValidationError, match="timeout_s must be > 0"):
+        GraphTopology.model_validate(
+            mission_dict(
+                nodes=[
+                    {"id": "planner", "agent": "agents/planner@0.1.0", "timeout_s": value},
+                    {"id": "researcher", "agent": "agents/researcher@0.1.0"},
+                ]
+            )
+        )
+
+
+def test_max_iterations_outside_the_cycle_does_not_satisfy_the_rule():
+    """무관한 edge 에 붙은 상한은 실제 순환을 제한하지 못한다."""
+    topology = make_mission(
+        edges=[
+            {"from": "START", "to": "planner", "max_iterations": 3},  # cycle 밖
+            {"from": "planner", "to": "researcher"},
+            {"from": "researcher", "to": "planner"},  # 실제 순환 — 상한 없음
+            {"from": "researcher", "to": "END"},
+        ]
+    )
+
+    with pytest.raises(MalkuthError) as exc_info:
+        validate_topology(topology)
+
+    assert_graph_001(exc_info)
+    assert "max_iterations" in exc_info.value.message
+
+
+def test_max_iterations_on_the_cycle_edge_satisfies_the_rule():
+    validate_topology(
+        make_mission(
+            edges=[
+                {"from": "START", "to": "planner"},
+                {"from": "planner", "to": "researcher"},
+                {"from": "researcher", "to": "planner", "max_iterations": 3},
+                {"from": "researcher", "to": "END"},
+            ]
+        )
+    )
+
+
+def test_self_loop_requires_max_iterations():
+    topology = make_mission(
+        edges=[
+            {"from": "START", "to": "planner"},
+            {"from": "planner", "to": "planner"},
+            {"from": "planner", "to": "researcher"},
+            {"from": "researcher", "to": "END"},
+        ]
+    )
+
+    with pytest.raises(MalkuthError):
+        validate_topology(topology)
+
+
+def test_input_map_preserves_non_string_literals():
+    """YAML 의 숫자/불리언 리터럴이 문자열로 강제되지 않아야 한다."""
+    topology = make_mission(
+        nodes=[
+            {
+                "id": "planner",
+                "agent": "agents/planner@0.1.0",
+                "input_map": {"depth": 2, "verbose": True, "q": "state.query"},
+            },
+            {"id": "researcher", "agent": "agents/researcher@0.1.0"},
+        ]
+    )
+
+    input_map = topology.node("planner").input_map
+    assert input_map["depth"] == 2
+    assert input_map["verbose"] is True
+
+
+def test_input_map_validation_ignores_non_string_literals():
+    """리터럴은 state 참조가 아니므로 schema 대조 대상이 아니다."""
+    topology = make_mission(
+        nodes=[
+            {"id": "planner", "agent": "agents/planner@0.1.0", "input_map": {"depth": 2}},
+            {"id": "researcher", "agent": "agents/researcher@0.1.0"},
+        ]
+    )
+
+    validate_topology(topology, state_fields=frozenset({"query"}))

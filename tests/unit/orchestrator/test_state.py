@@ -179,3 +179,9 @@ def test_validate_state_rejects_missing_required_field():
         validate_state(ResearchState, {})
 
     assert_graph_003(exc_info)
+
+
+def test_extract_input_passes_non_string_literals_through():
+    node = make_node(input_map={"depth": 2, "verbose": True, "tags": ["a"]})
+
+    assert extract_input(node, {}) == {"depth": 2, "verbose": True, "tags": ["a"]}

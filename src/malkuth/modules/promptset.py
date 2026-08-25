@@ -10,7 +10,14 @@ from pathlib import Path
 from typing import Any, Literal
 
 from jinja2 import Environment, StrictUndefined, TemplateError
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
 from malkuth.core.manifest import SemVer
@@ -39,6 +46,19 @@ class VariableSpec(BaseModel):
     type: Literal["string", "integer", "number", "boolean", "array", "object"]
     required: bool = False
     default: Any = None
+
+    @model_validator(mode="after")
+    def _check_default_matches_type(self) -> VariableSpec:
+        """default 가 선언 타입과 맞는지 로드 시점에 확인한다.
+
+        어긋난 default 는 렌더 시점에야 실패하거나, 조용히 잘못된 값으로
+        렌더된다 — 모듈 로드에서 즉시 잡는다.
+        """
+        if self.default is not None and not self.check(self.default):
+            raise ValueError(
+                f"default value does not match declared type '{self.type}': {self.default!r}"
+            )
+        return self
 
     def check(self, value: Any) -> bool:
         """값이 선언된 타입에 맞는지 확인한다."""

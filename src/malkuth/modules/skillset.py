@@ -7,11 +7,12 @@ import/실행되며, tool 스키마는 함수 시그니처에서 자동 생성�
 from __future__ import annotations
 
 import hashlib
-import importlib
+import importlib.machinery
 import importlib.util
 import sys
 from collections.abc import Callable
 from pathlib import Path
+from types import ModuleType
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
@@ -246,6 +247,35 @@ class SkillsetLoader:
         return LoadedSkill(declaration=declaration, spec=spec, fn=fn)
 
 
+def _register_packages(prefix: str, module_name: str, path: ModulePath) -> None:
+    """스킬셋 루트와 그 하위 패키지를 sys.modules 에 등록한다.
+
+    격리 import 로 로드된 모듈이 상대 import (``from .util import ...``) 와
+    패키지 내부 절대 import 를 쓸 수 있으려면, 중간 패키지가 ``__path__`` 를 갖고
+    등록돼 있어야 한다.
+    """
+    package = prefix
+    directory = path.root
+    if package not in sys.modules:
+        sys.modules[package] = _make_package(package, directory)
+
+    for part in module_name.split(".")[:-1]:
+        directory = directory / part
+        parent, package = package, f"{package}.{part}"
+        if package not in sys.modules:
+            sys.modules[package] = _make_package(package, directory)
+        setattr(sys.modules[parent], part, sys.modules[package])
+
+
+def _make_package(name: str, directory: Path) -> ModuleType:
+    """``__path__`` 를 가진 빈 패키지 모듈을 만든다."""
+    spec = importlib.machinery.ModuleSpec(name, loader=None, is_package=True)
+    spec.submodule_search_locations = [str(directory)]
+    module = importlib.util.module_from_spec(spec)
+    module.__path__ = [str(directory)]
+    return module
+
+
 def _import_module(module_name: str, path: ModulePath, ref: str) -> Any:
     """스킬셋 루트를 기준으로 모듈을 격리 import 한다."""
     file = path.root / Path(*module_name.split(".")).with_suffix(".py")
@@ -260,9 +290,14 @@ def _import_module(module_name: str, path: ModulePath, ref: str) -> Any:
     # 스킬셋 위치별 고유 이름으로 등록해 모듈 네임스페이스가 겹치지 않게 한다.
     # 같은 name@version 이라도 해석 루트가 다르면 다른 모듈이므로 경로를 키에 포함한다
     location = hashlib.sha256(str(path.root.resolve()).encode()).hexdigest()[:12]
-    qualified = f"_malkuth_skillset_{path.name}_{location}.{module_name}"
+    prefix = f"_malkuth_skillset_{path.name}_{location}"
+    qualified = f"{prefix}.{module_name}"
     if qualified in sys.modules:
         return sys.modules[qualified]
+
+    # 중간 패키지를 먼저 등록한다 — 없으면 스킬 코드의 `from .util import ...` 같은
+    # 정상적인 스킬셋 내부 import 가 전부 실패한다
+    _register_packages(prefix, module_name, path)
 
     spec = importlib.util.spec_from_file_location(qualified, file)
     if spec is None or spec.loader is None:

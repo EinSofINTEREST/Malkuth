@@ -6,7 +6,7 @@ import pytest
 
 from malkuth.core.errors import MalkuthError
 from malkuth.core.skill import SkillContext
-from malkuth.modules.registry import ModuleRegistry
+from malkuth.modules.registry import ModuleRegistry, RegistryRoots
 from malkuth.modules.skillset import SkillsetLoader
 from tests.fixtures.registry import fixture_registry
 
@@ -227,3 +227,45 @@ def test_malformed_entrypoint_raises_mod_003(tmp_path, entrypoint):
         loader.load("skillsets/custom@0.1.0")
 
     assert exc_info.value.code == "MOD_003"
+
+
+def test_skillset_supports_intra_package_imports(tmp_path):
+    """스킬셋 내부의 상대 import 가 동작해야 한다.
+
+    중간 패키지를 등록하지 않으면 `from .util import ...` 같은 평범한 구조의
+    스킬셋이 통째로 로드되지 않는다.
+    """
+    root = tmp_path / "web-search" / "0.1.0"
+    (root / "skills").mkdir(parents=True)
+    (root / "skillset.yaml").write_text(
+        "apiVersion: malkuth/v1\n"
+        "kind: Skillset\n"
+        "metadata: {name: web-search, version: 0.1.0}\n"
+        "spec:\n"
+        "  skills:\n"
+        "    - name: search\n"
+        "      entrypoint: skills.search:search\n"
+        "      description: d\n"
+    )
+    (root / "skills" / "__init__.py").write_text("")
+    (root / "skills" / "util.py").write_text("HELPER = 'ok'\n")
+    (root / "skills" / "search.py").write_text(
+        "from malkuth.core.skill import SkillContext, skill\n"
+        "from .util import HELPER\n"
+        "\n"
+        "@skill\n"
+        "async def search(ctx: SkillContext, q: str) -> str:\n"
+        '    """s."""\n'
+        "    return HELPER\n"
+    )
+    roots = RegistryRoots(
+        skillsets=tmp_path,
+        promptsets=tmp_path,
+        memorysets=tmp_path,
+        agents=tmp_path,
+        graphs=tmp_path,
+    )
+
+    loaded = SkillsetLoader(ModuleRegistry(roots)).load("skillsets/web-search@0.1.0")
+
+    assert [s.name for s in loaded.skills] == ["search"]

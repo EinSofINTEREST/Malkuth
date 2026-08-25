@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
 from malkuth.core.errors import MalkuthError
-from malkuth.modules.promptset import PromptsetLoader
+from malkuth.modules.promptset import PromptsetLoader, VariableSpec
 from malkuth.modules.registry import ModuleRegistry
 from tests.fixtures.registry import fixture_registry
 
@@ -161,3 +162,32 @@ def test_promptset_without_default_template(tmp_path):
     )
 
     assert loader.load("promptsets/custom@0.1.0").has_default is False
+
+
+@pytest.mark.parametrize(
+    ("declared", "default"),
+    [
+        ("integer", "not-an-int"),
+        ("string", 3),
+        ("boolean", "yes"),
+        ("array", {}),
+        ("object", []),
+        ("integer", True),
+    ],
+)
+def test_default_conflicting_with_declared_type_is_rejected(declared, default):
+    """어긋난 default 는 렌더 시점이 아니라 로드 시점에 잡혀야 한다."""
+    with pytest.raises(ValidationError, match="does not match declared type"):
+        VariableSpec(type=declared, default=default)
+
+
+@pytest.mark.parametrize(
+    ("declared", "default"),
+    [("integer", 3), ("string", "x"), ("boolean", True), ("array", []), ("object", {})],
+)
+def test_default_matching_declared_type_is_accepted(declared, default):
+    assert VariableSpec(type=declared, default=default).default == default
+
+
+def test_absent_default_is_always_valid():
+    assert VariableSpec(type="integer").default is None

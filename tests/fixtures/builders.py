@@ -11,6 +11,17 @@ from malkuth.core.agent import TaskConfig, TaskRequest, TraceContext
 from malkuth.core.manifest import AgentManifest
 
 
+def _merge_mapping(base: dict[str, Any], overrides: dict[str, Any]) -> dict[str, Any]:
+    """중첩 매핑을 재귀 병합한다 — 호출자가 필요한 필드만 override 하도록."""
+    merged = dict(base)
+    for key, value in overrides.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _merge_mapping(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
 def manifest_dict(**overrides: Any) -> dict[str, Any]:
     """Build a raw manifest mapping (as loaded from YAML).
 
@@ -26,12 +37,7 @@ def manifest_dict(**overrides: Any) -> dict[str, Any]:
             "promptset": {"ref": "promptsets/test@0.1.0"},
         },
     }
-    for key, value in overrides.items():
-        if isinstance(value, dict) and isinstance(base.get(key), dict):
-            base[key] = {**base[key], **value}
-        else:
-            base[key] = value
-    return base
+    return _merge_mapping(base, overrides)
 
 
 def make_manifest(**overrides: Any) -> AgentManifest:

@@ -104,13 +104,17 @@ def _schema_for_annotation(annotation: Any) -> dict[str, Any]:
     origin = get_origin(annotation)
 
     if origin in (Union, types.UnionType):
-        args = [a for a in get_args(annotation) if a is not type(None)]
-        if not args:
+        # None 을 버리면 str | None 이 string 전용 스키마가 되어, 모델이 null 을
+        # 보낼 수 없는데 default 는 None 인 모순된 계약이 만들어진다
+        schemas = [
+            {"type": "null"} if arg is type(None) else _schema_for_annotation(arg)
+            for arg in get_args(annotation)
+        ]
+        if not schemas:
             return {}
-        schema = _schema_for_annotation(args[0])
-        if len(args) > 1:
-            return {"anyOf": [_schema_for_annotation(a) for a in args]}
-        return schema
+        if len(schemas) == 1:
+            return schemas[0]
+        return {"anyOf": schemas}
 
     if origin in (list, Sequence, tuple):
         args = list(get_args(annotation))
@@ -118,6 +122,12 @@ def _schema_for_annotation(annotation: Any) -> dict[str, Any]:
         return {"type": "array", "items": items}
 
     if origin is dict:
+        dict_args = get_args(annotation)
+        if len(dict_args) == 2:
+            return {
+                "type": "object",
+                "additionalProperties": _schema_for_annotation(dict_args[1]),
+            }
         return {"type": "object"}
 
     if isinstance(annotation, type) and issubclass(annotation, BaseModel):

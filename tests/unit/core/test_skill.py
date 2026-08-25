@@ -122,8 +122,11 @@ def test_type_hint_mapping():
     assert props["ratio"] == {"type": "number"}
     assert props["flag"] == {"type": "boolean"}
     assert props["items"] == {"type": "array", "items": {"type": "string"}}
-    assert props["mapping"] == {"type": "object"}
-    assert props["optional"] == {"type": "string", "default": None}
+    assert props["mapping"] == {"type": "object", "additionalProperties": {"type": "integer"}}
+    assert props["optional"] == {
+        "anyOf": [{"type": "string"}, {"type": "null"}],
+        "default": None,
+    }
     assert spec.parameters["required"] == [
         "text",
         "count",
@@ -247,3 +250,32 @@ def test_unannotated_context_is_allowed():
         return q
 
     assert build_spec(dynamic).parameters["required"] == ["q"]
+
+
+def test_optional_union_keeps_null_member():
+    """str | None 은 null 을 허용해야 한다.
+
+    None 을 버리면 default 가 None 인데 스키마는 string 전용인 모순이 생기고,
+    모델이 값을 비울 방법이 없어진다.
+    """
+    props = build_spec(_typed).parameters["properties"]
+
+    assert props["optional"]["anyOf"] == [{"type": "string"}, {"type": "null"}]
+
+
+def test_typed_dict_preserves_value_constraint():
+    """dict[str, int] 의 값 제약이 스키마에 남아야 한다."""
+    props = build_spec(_typed).parameters["properties"]
+
+    assert props["mapping"]["additionalProperties"] == {"type": "integer"}
+
+
+async def _untyped_mapping(ctx: SkillContext, raw: dict[str, Any]) -> None:
+    """값 타입이 Any 인 매핑."""
+
+
+def test_any_valued_dict_stays_unconstrained():
+    """값이 Any 면 제약을 만들지 않는다 — 없는 계약을 지어내지 않기 위해."""
+    props = build_spec(_untyped_mapping).parameters["properties"]
+
+    assert props["raw"] == {"type": "object", "additionalProperties": {}}

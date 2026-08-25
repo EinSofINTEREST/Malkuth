@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 from enum import StrEnum
+from pathlib import PurePosixPath
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -22,6 +23,9 @@ _MODULE_REF_PATTERN = re.compile(
     r"(?P<name>[a-z0-9]+(?:-[a-z0-9]+)*)@(?P<version>\d+\.\d+\.\d+)$"
 )
 _RESOURCE_CPU_PATTERN = re.compile(r"^\d+(?:\.\d+)?$")
+_SHELL_BASENAMES = frozenset(
+    {"sh", "bash", "zsh", "dash", "ash", "ksh", "fish", "csh", "tcsh", "env"}
+)
 _RESOURCE_MEMORY_PATTERN = re.compile(r"^\d+(?:Ki|Mi|Gi|Ti)$")
 
 ModuleRefStr = Annotated[str, Field(pattern=_MODULE_REF_PATTERN.pattern)]
@@ -29,6 +33,37 @@ ModuleRefStr = Annotated[str, Field(pattern=_MODULE_REF_PATTERN.pattern)]
 
 AgentName = Annotated[str, Field(pattern=_NAME_PATTERN.pattern)]
 SemVer = Annotated[str, Field(pattern=_SEMVER_PATTERN.pattern)]
+
+
+def _require_pinned_image(value: str, subject: str) -> str:
+    """Reject images that are not pinned to an explicit tag or digest.
+
+    이미지가 태그 또는 digest 로 고정되었는지 검사합니다.
+
+    태그 판정은 **마지막 경로 세그먼트**에서만 수행합니다 — ``registry.local:5000/x``
+    처럼 레지스트리 포트가 있는 참조를 태그로 오인하면, 태그 없는 이미지가
+    검증을 통과해 pull 시점에 ``latest`` 로 해석됩니다.
+
+    Args:
+        value: The image reference.
+        subject: Subject name used in the error message (e.g. ``"agent"``).
+
+    Returns:
+        The validated image reference.
+
+    Raises:
+        ValueError: If the reference is not pinned.
+    """
+    if "@" in value:  # digest 고정 (예: image@sha256:...)
+        return value
+
+    last_segment = value.rsplit("/", 1)[-1]
+    tag = last_segment.partition(":")[2]
+    if not tag or tag == "latest":
+        raise ValueError(
+            f"{subject} image must be pinned to an explicit tag or digest (no 'latest')"
+        )
+    return value
 
 
 class McpTransport(StrEnum):
@@ -163,9 +198,7 @@ class McpSidecar(BaseModel):
     @classmethod
     def _reject_latest_tag(cls, value: str) -> str:
         """사이드카 이미지는 semver 태그 고정 — ``latest`` 금지."""
-        if value.endswith(":latest") or ":" not in value:
-            raise ValueError("sidecar image must be pinned to an explicit tag (no 'latest')")
-        return value
+        return _require_pinned_image(value, "sidecar")
 
 
 class McpServerSpec(BaseModel):
@@ -204,7 +237,7 @@ class McpServerSpec(BaseModel):
             if self.sidecar is not None or self.url is not None:
                 raise ValueError("stdio transport must not declare 'sidecar' or 'url'")
             # 셸 문자열 실행 금지 — 이미지에 설치된 실행 파일만 허용
-            if self.command[0] in {"sh", "bash", "zsh", "/bin/sh", "/bin/bash"}:
+            if PurePosixPath(self.command[0]).name in _SHELL_BASENAMES:
                 raise ValueError("stdio command must be an installed executable, not a shell")
             return self
 
@@ -345,9 +378,7 @@ class RuntimeSpec(BaseModel):
         """이미지 태그는 semver — ``latest`` 배포 금지."""
         if value is None:
             return None
-        if value.endswith(":latest") or ":" not in value:
-            raise ValueError("agent image must be pinned to an explicit tag (no 'latest')")
-        return value
+        return _require_pinned_image(value, "agent")
 
 
 class AgentSpec(BaseModel):
@@ -439,6 +470,22 @@ class GroupQuotas(BaseModel):
     cpu: str | None = None
     memory: str | None = None
     max_agents: int | None = None
+
+    @field_validator("cpu")
+    @classmethod
+    def _valid_cpu(cls, value: str | None) -> str | None:
+        """quota 오타를 집계 시점이 아니라 배포 검증에서 잡는다."""
+        if value is not None and not _RESOURCE_CPU_PATTERN.match(value):
+            raise ValueError("cpu must be a decimal core count string, e.g. '8.0'")
+        return value
+
+    @field_validator("memory")
+    @classmethod
+    def _valid_memory(cls, value: str | None) -> str | None:
+        """quota 오타를 집계 시점이 아니라 배포 검증에서 잡는다."""
+        if value is not None and not _RESOURCE_MEMORY_PATTERN.match(value):
+            raise ValueError("memory must be an integer with Ki/Mi/Gi/Ti suffix, e.g. '16Gi'")
+        return value
 
     @property
     def cpu_cores(self) -> float | None:

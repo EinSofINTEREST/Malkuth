@@ -9,6 +9,8 @@ from malkuth.core.manifest import (
     RESERVED_GLOBAL_GROUP,
     AgentManifest,
     GroupManifest,
+    GroupQuotas,
+    McpSidecar,
     ParsedModuleRef,
     ResourceSpec,
 )
@@ -378,3 +380,101 @@ def test_parse_module_ref_valid(ref, expected):
 def test_parse_module_ref_invalid(ref):
     with pytest.raises(ValueError, match="invalid module ref"):
         ParsedModuleRef.parse(ref)
+
+
+@pytest.mark.parametrize(
+    "image",
+    [
+        "registry.local:5000/mcp/foo",  # 레지스트리 포트를 태그로 오인하면 통과해버린다
+        "mcp/foo",
+        "mcp/foo:latest",
+        "registry.local:5000/mcp/foo:latest",
+    ],
+)
+def test_unpinned_sidecar_images_are_rejected(image):
+    with pytest.raises(ValidationError, match="pinned"):
+        McpSidecar(image=image)
+
+
+@pytest.mark.parametrize(
+    "image",
+    [
+        "mcp/playwright:1.2.0",
+        "registry.local:5000/mcp/foo:1.2.0",
+        "mcp/foo@sha256:" + "a" * 64,  # digest 고정도 유효한 pinning
+    ],
+)
+def test_pinned_sidecar_images_are_accepted(image):
+    assert McpSidecar(image=image).image == image
+
+
+def test_unpinned_agent_image_with_registry_port_is_rejected():
+    with pytest.raises(ValidationError, match="pinned"):
+        make_manifest(spec=_spec_with(runtime={"image": "registry.local:5000/malkuth/agent"}))
+
+
+def test_digest_pinned_agent_image_is_accepted():
+    image = "malkuth/agent-base@sha256:" + "b" * 64
+
+    manifest = make_manifest(spec=_spec_with(runtime={"image": image}))
+
+    assert manifest.spec.runtime.image == image
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        ["/usr/bin/bash", "-c", "x"],
+        ["/bin/zsh", "-c", "x"],
+        ["/usr/bin/env", "mcp-server"],
+        ["dash", "-c", "x"],
+        ["fish", "-c", "x"],
+    ],
+)
+def test_shell_commands_are_rejected_by_basename(command):
+    """경로를 붙여도 셸은 셸이다 — basename 으로 판정해야 우회되지 않는다."""
+    with pytest.raises(ValidationError, match="installed executable"):
+        make_manifest(
+            spec=_spec_with(
+                mcp={"servers": [{"name": "fs", "transport": "stdio", "command": command}]}
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("cpu", "not-a-number"), ("cpu", "1.0.0"), ("memory", "1GB"), ("memory", "1024")],
+)
+def test_invalid_group_quota_is_rejected_at_schema_time(field, value):
+    """quota 오타는 집계 시점이 아니라 배포 검증에서 잡혀야 한다."""
+    with pytest.raises(ValidationError):
+        GroupQuotas(**{field: value})
+
+
+def test_valid_group_quota_is_accepted():
+    quota = GroupQuotas(cpu="8.0", memory="16Gi", max_agents=10)
+
+    assert quota.cpu_cores == 8.0
+    assert quota.memory_bytes == 16 * 1024**3
+
+
+def test_empty_group_quota_has_no_limits():
+    quota = GroupQuotas()
+
+    assert quota.cpu_cores is None
+    assert quota.memory_bytes is None
+
+
+def test_builder_merges_nested_overrides_recursively():
+    """override 는 필요한 필드만 바꾸고 나머지 기본값을 보존해야 한다."""
+    raw = manifest_dict(spec={"model": {"name": "claude-opus-5"}})
+
+    assert raw["spec"]["model"]["name"] == "claude-opus-5"
+    assert raw["spec"]["model"]["provider"] == "anthropic"  # 기존 기본값 유지
+    assert raw["spec"]["promptset"]["ref"] == "promptsets/test@0.1.0"
+
+
+def test_builder_replaces_non_mapping_values():
+    raw = manifest_dict(spec={"skillsets": [{"ref": "skillsets/x@0.1.0"}]})
+
+    assert raw["spec"]["skillsets"] == [{"ref": "skillsets/x@0.1.0"}]

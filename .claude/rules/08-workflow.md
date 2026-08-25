@@ -98,6 +98,11 @@ mutation($issueId: ID!, $subIssueId: ID!) {
 | **외부 시스템 영향** | PR merge / issue close / 배포 트리거 / 외부 API 비용 결제 (실 LLM 대량 호출 포함) / 외부 DM 발송 |
 | **모호한 작업 범위** | 사용자 의도가 다중 해석 가능하거나 scope 가 불명확한 경우 — 진행 전 구체화 질문 |
 
+> **Automerge 예외**: `automerge` 라벨이 부여된 PR 에 한해, `pr-merge-gatekeeper` 루틴이
+> 3단계 검증(리뷰 완결 / required check / 연결 이슈 목표 달성) 후 squash merge 하는 것은
+> 허용된다 — **라벨 부착이 곧 사람의 명시적 merge 승인**이기 때문이다. 라벨 없는 PR 의
+> 무인 merge 금지는 그대로 유지된다. (상세: `docs/en/ci/conventions.md` 1.4)
+
 #### 자율 진행 영역 (승인 불필요 — 즉시 실행)
 
 - 코드 작성 / 수정 / 리팩토링 / 삭제

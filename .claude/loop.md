@@ -6,6 +6,9 @@
 > GitHub 리뷰 이벤트(webhook)로 발화되며 주간 안전망 스케줄(일 21:00 UTC)을 겸한다.
 > 본 문서의 폴링 루프는 **수동 보조 수단** — 로컬 세션에서 즉각적인 반복 처리가 필요할 때만
 > `/loop` 로 사용한다.
+> 머지는 별도 자동화: `automerge` 라벨 부착 시 `pr-merge-gatekeeper` 루틴
+> (`trig_013f65aaFS8kiSMUdG2FQk8b`) 이 리뷰 완결·게이트·이슈 목표를 검증한 뒤 squash
+> merge 한다 (`docs/en/ci/conventions.md` 1.4). 본 루프는 merge 를 수행하지 않는다.
 
 ## 대상
 현재 브랜치에 연결된 열린 PR의 CI 상태와 리뷰 코멘트를 처리한다.

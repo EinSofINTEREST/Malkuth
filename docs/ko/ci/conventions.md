@@ -31,6 +31,21 @@ Branch Protection 대신 **Repository Ruleset** 을 기본 수단으로 운영�
 - 인적 계정의 우회 금지 원칙 유지. 목록은 [부록 A](#부록-a-허용된-botapp) 에서 관리하며
   `.github/workflows/ci-convention.yml` 의 `bot allowlist` step 과 동기화합니다.
 
+### 1.4 라벨 게이트 Automerge
+
+PR 에 `automerge` 라벨을 붙이는 것은 **사람의 명시적 머지 승인**입니다. 라벨 부착 시
+`pr-merge-gatekeeper` 클라우드 루틴이 발화되어, 다음 세 가지를 모두 검증한 뒤에만
+squash merge 합니다:
+
+1. **리뷰 완결** — 미해결 리뷰 thread 0건, 리뷰어별 미해소 `changes_requested` 없음
+2. **게이트** — required status check 전부 SUCCESS 또는 SKIPPED
+   ([status-checks.md](status-checks.md) 기준)
+3. **목표 달성** — 연결 이슈의 작업 범위/완료 조건이 PR 의 실제 diff 로 충족됨
+
+하나라도 실패하면 merge 하지 않고 부족한 항목을 코멘트로 남긴 뒤 **라벨을 제거**합니다
+(보완 후 다시 라벨 부착). 라벨 없는 PR 은 절대 자동 머지되지 않으며, 루틴도 Ruleset
+게이트를 우회할 수 없습니다.
+
 ---
 
 ## 2. CODEOWNERS 전략

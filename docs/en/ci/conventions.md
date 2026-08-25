@@ -32,6 +32,23 @@ Use **Repository Rulesets** rather than legacy Branch Protection:
   [Appendix A](#appendix-a-allowed-botsapps) and must stay in sync with the
   `bot allowlist` step in `.github/workflows/ci-convention.yml`.
 
+### 1.4 Label-Gated Automerge
+
+Adding the `automerge` label to a PR is an **explicit human merge approval**. It fires
+the `pr-merge-gatekeeper` cloud routine, which merges (squash only) after verifying
+all of:
+
+1. **Review completion** — zero unresolved review threads, no outstanding
+   `changes_requested` review per reviewer
+2. **Gates** — every required status check SUCCESS or SKIPPED
+   (per [status-checks.md](status-checks.md))
+3. **Goal attainment** — the linked issue's scope/acceptance criteria are satisfied by
+   the PR's actual diff
+
+On any failure the routine comments the gaps and **removes the label** instead of
+merging (re-label after fixing). PRs without the label are never merged automatically,
+and the Ruleset gates still bind the routine — it cannot bypass required checks.
+
 ---
 
 ## 2. CODEOWNERS Strategy

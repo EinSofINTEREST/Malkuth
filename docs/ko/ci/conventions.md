@@ -19,7 +19,7 @@ Malkuth 의 Python/uv 툴체인과 문서 정책에 맞게 발전시켰습니다
 - **Conversation resolution**: 모든 리뷰 코멘트 해결 후에만 머지 가능.
 - **Merge commit 만 허용** (squash/rebase 비활성): per-TODO 커밋이 `main` 에 그대로 보존되고
   PR 마다 merge 노드 1개가 추가됨 — PR 단위 이력은 `git log --first-parent` 로 조회.
-  merge 커밋은 PR 제목/본문을 사용하므로 `main --first-parent` 가 곧 PR 목록이 된다.
+  merge 커밋은 PR 제목/본문을 사용하므로 `git log --first-parent main` 이 곧 PR 목록이 된다.
 
 ### 1.2 Ruleset 우선 원칙
 Branch Protection 대신 **Repository Ruleset** 을 기본 수단으로 운영합니다:

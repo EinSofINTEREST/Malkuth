@@ -19,7 +19,7 @@ Related: [Required Status Checks — Single Source](status-checks.md)
 - **Conversation resolution**: all review threads resolved before merge.
 - **Merge commits only** (squash/rebase disabled): every per-TODO commit survives on `main`
   and each PR adds one merge node — inspect PR-level history with `git log --first-parent`.
-  The merge commit takes the PR title/body, so `main --first-parent` reads as the PR list.
+  The merge commit takes the PR title/body, so `git log --first-parent main` reads as the PR list.
 
 ### 1.2 Ruleset-First Principle
 Use **Repository Rulesets** rather than legacy Branch Protection:

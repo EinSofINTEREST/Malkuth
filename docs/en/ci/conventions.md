@@ -17,7 +17,9 @@ Related: [Required Status Checks — Single Source](status-checks.md)
 - **Required reviews**: at least 1; enable `Require review from Code Owners` once
   CODEOWNERS is registered.
 - **Conversation resolution**: all review threads resolved before merge.
-- **Linear history** preferred; merge via Squash or Rebase.
+- **Merge commits only** (squash/rebase disabled): every per-TODO commit survives on `main`
+  and each PR adds one merge node — inspect PR-level history with `git log --first-parent`.
+  The merge commit takes the PR title/body, so `git log --first-parent main` reads as the PR list.
 
 ### 1.2 Ruleset-First Principle
 Use **Repository Rulesets** rather than legacy Branch Protection:
@@ -35,7 +37,7 @@ Use **Repository Rulesets** rather than legacy Branch Protection:
 ### 1.4 Label-Gated Automerge
 
 Adding the `automerge` label to a PR is an **explicit human merge approval**. It fires
-the `pr-merge-gatekeeper` cloud routine, which merges (squash only) after verifying
+the `pr-merge-gatekeeper` cloud routine, which merges (merge commit) after verifying
 all of:
 
 1. **Review completion** — zero unresolved review threads, no outstanding

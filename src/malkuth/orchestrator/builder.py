@@ -177,10 +177,10 @@ class GraphBuilder:
         ]
 
         def route(state: dict[str, Any]) -> str:
+            # 조건부 edge 를 선언 순서대로 먼저 평가한다 — 무조건 edge 를 만나는
+            # 즉시 반환하면 그 뒤에 선언된 조건이 영영 평가되지 않는다
             for edge, condition in conditions:
-                if condition is None:
-                    return edge.target
-                if not condition(state):
+                if condition is None or not condition(state):
                     continue
                 if edge.max_iterations is not None:
                     self._check_iterations(state, edge.source, edge.max_iterations)

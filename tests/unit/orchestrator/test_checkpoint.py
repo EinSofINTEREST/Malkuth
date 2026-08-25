@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from langgraph.checkpoint.memory import MemorySaver
 
@@ -39,9 +41,13 @@ def test_external_backend_requires_url(kind):
     assert "connection url" in exc_info.value.message
 
 
-def test_unknown_backend_is_rejected():
-    with pytest.raises(ValueError, match="not a valid CheckpointerKind"):
+def test_unknown_backend_is_rejected_with_cfg_001():
+    """설정 오류는 비구조화 ValueError 가 아니라 CFG_001 로 보고돼야 한다."""
+    with pytest.raises(MalkuthError) as exc_info:
         build_checkpointer("cassandra")
+
+    assert exc_info.value.code == "CFG_001"
+    assert exc_info.value.category is ErrorCategory.CONFIG
 
 
 async def test_guarded_save_converts_failure_to_stor_001():
@@ -88,3 +94,16 @@ async def test_guarded_helpers_do_not_rewrap_malkuth_errors():
         await guarded_save(failing, graph="g", run_id="r")
 
     assert exc_info.value is original
+
+
+async def test_guarded_helpers_do_not_swallow_cancellation():
+    """취소는 STOR_* 로 감싸지 않고 그대로 전파돼야 한다 (drain/shutdown 경로)."""
+
+    async def cancelled():
+        raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        await guarded_save(cancelled, graph="g", run_id="r")
+
+    with pytest.raises(asyncio.CancelledError):
+        await guarded_restore(cancelled, graph="g", run_id="r")

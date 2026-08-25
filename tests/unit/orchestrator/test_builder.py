@@ -345,3 +345,72 @@ async def test_unmatched_condition_without_fallback_raises_graph_001():
         await build_graph(topology, runtime).ainvoke({"query": "q", "_run_id": "r"})
 
     assert exc_info.value.code == ErrorCode.GRAPH_001
+
+
+async def test_conditions_declared_after_an_unconditional_edge_still_win():
+    """무조건 edge 는 폴백이지 조기 종료가 아니다.
+
+    선언 순서상 뒤에 있는 조건부 edge 가 평가되지 않으면, 폴백을 위에 적은
+    토폴로지가 조건 분기를 통째로 잃는다.
+    """
+    topology = make_mission(
+        nodes=[
+            {
+                "id": "planner",
+                "agent": "agents/planner@0.1.0",
+                "output_map": {"needs_research": "output.needs_research"},
+            },
+            {
+                "id": "researcher",
+                "agent": "agents/researcher@0.1.0",
+                "output_map": {"findings": "output.findings"},
+            },
+        ],
+        edges=[
+            {"from": "START", "to": "planner"},
+            {"from": "planner", "to": "END"},  # 폴백을 먼저 선언
+            {
+                "from": "planner",
+                "to": "researcher",
+                "condition": "malkuth.graphs.conditions:needs_research",
+            },
+            {"from": "researcher", "to": "END"},
+        ],
+    )
+    runtime = (
+        FakeRuntime()
+        .script("planner", output={"needs_research": True})
+        .script("researcher", output={"findings": ["f"]})
+    )
+
+    await build_graph(topology, runtime).ainvoke({"query": "q", "_run_id": "r"})
+
+    assert runtime.invoked == ["planner", "researcher"]
+
+
+async def test_unconditional_edge_is_used_when_no_condition_matches():
+    topology = make_mission(
+        nodes=[
+            {
+                "id": "planner",
+                "agent": "agents/planner@0.1.0",
+                "output_map": {"needs_research": "output.needs_research"},
+            },
+            {"id": "researcher", "agent": "agents/researcher@0.1.0"},
+        ],
+        edges=[
+            {"from": "START", "to": "planner"},
+            {"from": "planner", "to": "END"},
+            {
+                "from": "planner",
+                "to": "researcher",
+                "condition": "malkuth.graphs.conditions:needs_research",
+            },
+            {"from": "researcher", "to": "END"},
+        ],
+    )
+    runtime = FakeRuntime().script("planner", output={"needs_research": False})
+
+    await build_graph(topology, runtime).ainvoke({"query": "q", "_run_id": "r"})
+
+    assert runtime.invoked == ["planner"]

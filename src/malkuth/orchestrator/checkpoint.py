@@ -62,7 +62,15 @@ def build_checkpointer(
     Raises:
         MalkuthError: CONFIG/``CFG_001`` if the backend is unknown or misconfigured.
     """
-    resolved = DEFAULT_CHECKPOINTER if kind == "default" else CheckpointerKind(kind)
+    try:
+        resolved = DEFAULT_CHECKPOINTER if kind == "default" else CheckpointerKind(kind)
+    except ValueError as err:
+        raise MalkuthError(
+            category=ErrorCategory.CONFIG,
+            code=ErrorCode.CFG_001,
+            message=f"unknown checkpointer backend: {kind}",
+            details={"checkpointer": str(kind)},
+        ) from err
 
     if resolved is CheckpointerKind.MEMORY:
         from langgraph.checkpoint.memory import MemorySaver

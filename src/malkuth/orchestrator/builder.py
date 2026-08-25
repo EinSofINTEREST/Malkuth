@@ -1,0 +1,296 @@
+"""Graph config to LangGraph StateGraph.
+
+검증된 토폴로지를 LangGraph ``StateGraph`` 로 빌드한다. 노드는 runtime 호출
+래퍼이며, 오케스트레이터는 Docker/프로토콜을 직접 만지지 않는다.
+
+에이전트 실패가 graph state 를 오염시키지 않도록, 노드 실패는 ``GRAPH_002`` 로
+변환되어 state 병합 없이 전파된다.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import uuid
+from collections.abc import Hashable
+from typing import TYPE_CHECKING, Any, Protocol, TypedDict
+
+from langgraph.graph import END as LG_END
+from langgraph.graph import START as LG_START
+from langgraph.graph import StateGraph
+
+from malkuth.core.agent import TaskConfig, TaskRequest, TaskResult, TaskStatus, TraceContext
+from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
+from malkuth.orchestrator.state import extract_input, merge_output, resolve_state_schema
+from malkuth.orchestrator.topology import (
+    END,
+    START,
+    GraphTopology,
+    NodeSpec,
+    resolve_import_ref,
+)
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from langgraph.checkpoint.base import BaseCheckpointSaver
+    from pydantic import BaseModel
+
+_ITERATION_KEY = "_iterations"
+
+
+class _ReservedChannels(TypedDict, total=False):
+    """프레임워크 예약 채널 — 그래프 state 계약과 별개로 항상 존재한다."""
+
+    _iterations: dict[str, int]
+    _run_id: str
+    _trace_id: str
+
+
+def build_channel_schema(schema: type[BaseModel]) -> type:
+    """Build the LangGraph channel schema for a graph state model.
+
+    그래프 state 모델로부터 LangGraph 채널 스키마를 만듭니다.
+    LangGraph 는 선언된 채널만 보존하므로, state 스키마의 필드와 프레임워크
+    예약 채널을 합쳐 채널 집합을 구성합니다. 값 검증은 ``state.py`` 의 병합
+    규칙이 담당하므로 채널 타입 자체는 열어 둡니다.
+
+    Args:
+        schema: The graph state model declared by the topology.
+
+    Returns:
+        A TypedDict type usable as a LangGraph state schema.
+    """
+    annotations: dict[str, Any] = dict.fromkeys(schema.model_fields, Any)
+    annotations.update(_ReservedChannels.__annotations__)
+    return type(
+        "GraphState",
+        (dict,),
+        {"__annotations__": annotations, "__total__": False, "__required_keys__": frozenset()},
+    )
+
+
+class NodeRuntime(Protocol):
+    """Invokes an agent for a graph node.
+
+    그래프 노드에 대응하는 에이전트를 호출하는 계약. 구현은 runtime 레이어가
+    제공하며, 오케스트레이터는 이 계약 뒤의 컨테이너 사정을 알지 못한다.
+    """
+
+    async def invoke(self, node: NodeSpec, task: TaskRequest) -> TaskResult:
+        """노드의 에이전트에게 태스크를 실행시킨다."""
+        ...
+
+
+def _graph_error(
+    code: ErrorCode, message: str, *, retryable: bool = False, **details: Any
+) -> MalkuthError:
+    """그래프 실행 실패를 GRAPH 카테고리로 변환한다."""
+    return MalkuthError(
+        category=ErrorCategory.GRAPH,
+        code=code,
+        message=message,
+        retryable=retryable,
+        details=details,
+    )
+
+
+def _lg_endpoint(node_id: str) -> str:
+    """토폴로지의 START/END 를 LangGraph 예약 노드로 변환한다."""
+    if node_id == START:
+        return LG_START
+    if node_id == END:
+        return LG_END
+    return node_id
+
+
+class GraphBuilder:
+    """Builds a runnable graph from a validated topology.
+
+    검증된 토폴로지로부터 실행 가능한 그래프를 빌드한다.
+    """
+
+    def __init__(
+        self,
+        topology: GraphTopology,
+        runtime: NodeRuntime,
+        *,
+        state_schema: type[BaseModel] | None = None,
+        node_timeout_s: float = 300.0,
+    ) -> None:
+        self._topology = topology
+        self._runtime = runtime
+        self._schema = state_schema or resolve_state_schema(topology.spec.state.schema_ref)
+        self._node_timeout_s = node_timeout_s
+
+    @property
+    def state_schema(self) -> type[BaseModel]:
+        """그래프 state 스키마."""
+        return self._schema
+
+    def build(self, *, checkpointer: BaseCheckpointSaver[Any] | None = None) -> Any:
+        """Compile the topology into a runnable LangGraph graph.
+
+        토폴로지를 실행 가능한 LangGraph 그래프로 컴파일합니다.
+
+        Args:
+            checkpointer: Checkpointer attached to the compiled graph.
+
+        Returns:
+            The compiled graph.
+        """
+        graph: StateGraph[Any, Any, Any, Any] = StateGraph(build_channel_schema(self._schema))
+
+        for node in self._topology.spec.nodes:
+            graph.add_node(node.id, self._node_runner(node))
+
+        self._wire_edges(graph)
+        return graph.compile(checkpointer=checkpointer)
+
+    def _wire_edges(self, graph: StateGraph[Any, Any, Any, Any]) -> None:
+        """토폴로지 edge 를 LangGraph edge 로 옮긴다."""
+        conditional_sources = {e.source for e in self._topology.spec.edges if e.condition}
+
+        for edge in self._topology.spec.edges:
+            if edge.source in conditional_sources:
+                continue
+            graph.add_edge(_lg_endpoint(edge.source), _lg_endpoint(edge.target))
+
+        for source in conditional_sources:
+            graph.add_conditional_edges(
+                _lg_endpoint(source), self._router(source), self._route_map(source)
+            )
+
+    def _route_map(self, source: str) -> dict[Hashable, str]:
+        """조건부 분기의 목적지 맵 — 라우터 반환값을 LangGraph 노드로 잇는다."""
+        targets: dict[Hashable, str] = {
+            edge.target: _lg_endpoint(edge.target)
+            for edge in self._topology.spec.edges
+            if edge.source == source
+        }
+        return targets
+
+    def _router(self, source: str) -> Callable[[dict[str, Any]], str]:
+        """조건 함수들을 선언 순서대로 평가하는 라우터를 만든다."""
+        edges = [e for e in self._topology.spec.edges if e.source == source]
+        conditions = [
+            (edge, resolve_import_ref(edge.condition) if edge.condition else None) for edge in edges
+        ]
+
+        def route(state: dict[str, Any]) -> str:
+            for edge, condition in conditions:
+                if condition is None:
+                    return edge.target
+                if not condition(state):
+                    continue
+                if edge.max_iterations is not None:
+                    self._check_iterations(state, edge.source, edge.max_iterations)
+                return edge.target
+
+            # 어떤 조건도 참이 아니면 무조건 edge 로 폴백, 없으면 토폴로지 결함
+            for edge, condition in conditions:
+                if condition is None:
+                    return edge.target
+            raise _graph_error(
+                ErrorCode.GRAPH_001,
+                f"no edge condition matched at node: {source}",
+                graph=self._topology.name,
+                node_id=source,
+            )
+
+        return route
+
+    def _check_iterations(self, state: dict[str, Any], node_id: str, limit: int) -> None:
+        """cycle edge 의 반복 상한을 강제한다 (mission 무한 루프 방지)."""
+        counts = state.get(_ITERATION_KEY) or {}
+        if counts.get(node_id, 0) >= limit:
+            raise _graph_error(
+                ErrorCode.GRAPH_004,
+                f"max iterations exceeded at node: {node_id}",
+                graph=self._topology.name,
+                node_id=node_id,
+                max_iterations=limit,
+            )
+
+    def _node_runner(self, node: NodeSpec) -> Any:
+        """노드 실행 래퍼 — 입력 추출 → 호출 → 출력 투영."""
+
+        async def run(state: dict[str, Any]) -> dict[str, Any]:
+            task = self._make_task(node, state)
+            timeout = node.timeout_s or self._node_timeout_s
+
+            try:
+                result = await asyncio.wait_for(self._runtime.invoke(node, task), timeout=timeout)
+            except TimeoutError as err:
+                raise _graph_error(
+                    ErrorCode.TO_003,
+                    f"node timed out: {node.id}",
+                    retryable=True,
+                    graph=self._topology.name,
+                    node_id=node.id,
+                    task_id=task.task_id,
+                ) from err
+
+            if result.status is not TaskStatus.COMPLETED:
+                # 실패한 노드의 출력은 state 에 병합하지 않는다 — state 오염 방지
+                raise _graph_error(
+                    ErrorCode.GRAPH_002,
+                    f"node execution failed: {node.id}",
+                    graph=self._topology.name,
+                    node_id=node.id,
+                    task_id=task.task_id,
+                    error_code=result.error.code if result.error else None,
+                )
+
+            update = merge_output(node, result.output, schema=self._schema)
+            return self._with_iteration(state, node.id, update)
+
+        return run
+
+    def _with_iteration(
+        self, state: dict[str, Any], node_id: str, update: dict[str, Any]
+    ) -> dict[str, Any]:
+        """cycle 반복 횟수를 state 에 누적한다 (max_iterations 판정용)."""
+        counts = dict(state.get(_ITERATION_KEY) or {})
+        counts[node_id] = counts.get(node_id, 0) + 1
+        return {**update, _ITERATION_KEY: counts}
+
+    def _make_task(self, node: NodeSpec, state: dict[str, Any]) -> TaskRequest:
+        """state 로부터 노드 태스크를 구성한다."""
+        run_id = str(state.get("_run_id") or "run-unknown")
+        trace_id = str(state.get("_trace_id") or run_id)
+        return TaskRequest(
+            task_id=str(uuid.uuid4()),
+            run_id=run_id,
+            node_id=node.id,
+            input=extract_input(node, state),
+            config=TaskConfig(timeout_s=node.timeout_s or self._node_timeout_s),
+            trace=TraceContext(trace_id=trace_id),
+        )
+
+
+def build_graph(
+    topology: GraphTopology,
+    runtime: NodeRuntime,
+    *,
+    checkpointer: BaseCheckpointSaver[Any] | None = None,
+    state_schema: type[BaseModel] | None = None,
+    node_timeout_s: float = 300.0,
+) -> Any:
+    """Build a runnable graph from a topology.
+
+    토폴로지로부터 실행 가능한 그래프를 빌드합니다 (편의 함수).
+
+    Args:
+        topology: A validated topology.
+        runtime: Node runtime used to invoke agents.
+        checkpointer: Checkpointer attached to the compiled graph.
+        state_schema: Optional pre-resolved state schema.
+        node_timeout_s: Default per-node timeout.
+
+    Returns:
+        The compiled graph.
+    """
+    builder = GraphBuilder(
+        topology, runtime, state_schema=state_schema, node_timeout_s=node_timeout_s
+    )
+    return builder.build(checkpointer=checkpointer)

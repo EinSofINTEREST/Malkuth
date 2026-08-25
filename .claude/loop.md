@@ -1,5 +1,12 @@
 # PR 피드백 순환 처리
 
+> **ℹ️ 이벤트 드리븐 우선**: 리뷰 피드백 반영의 기본 경로는 클라우드 루틴
+> `pr-review-responder` (`trig_01BC2kmcyESPDeihNd1QebHo`,
+> https://claude.ai/code/routines/trig_01BC2kmcyESPDeihNd1QebHo) 이다 —
+> GitHub 리뷰 이벤트(webhook)로 발화되며 주간 안전망 스케줄(일 21:00 UTC)을 겸한다.
+> 본 문서의 폴링 루프는 **수동 보조 수단** — 로컬 세션에서 즉각적인 반복 처리가 필요할 때만
+> `/loop` 로 사용한다.
+
 ## 대상
 현재 브랜치에 연결된 열린 PR의 CI 상태와 리뷰 코멘트를 처리한다.
 

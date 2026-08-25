@@ -24,11 +24,15 @@ typecheck: ## mypy (malkuth.core 는 strict)
 test: ## unit 테스트 + 커버리지 게이트 (>= 70%)
 	$(RUN) pytest tests/unit
 
+# 레이어 구현 전에는 수집 대상이 없다 — pytest 의 "no tests collected"(5) 만 통과시키고
+# 실제 실패(1)는 그대로 게이트를 막는다
 test-integration: ## Docker 기반 통합 테스트
-	$(RUN) pytest tests/integration -m integration --no-cov
+	@$(RUN) pytest tests/integration -m integration --no-cov; \
+		status=$$?; [ $$status -eq 0 ] || [ $$status -eq 5 ]
 
 test-e2e: ## 전체 스택 E2E 테스트 (nightly)
-	$(RUN) pytest tests/e2e -m e2e --no-cov
+	@$(RUN) pytest tests/e2e -m e2e --no-cov; \
+		status=$$?; [ $$status -eq 0 ] || [ $$status -eq 5 ]
 
 check: lint typecheck test ## 머지 전 로컬 전체 검증
 

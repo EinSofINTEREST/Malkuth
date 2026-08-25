@@ -17,7 +17,9 @@ Malkuth 의 Python/uv 툴체인과 문서 정책에 맞게 발전시켰습니다
 - **Required reviews**: 최소 1명, CODEOWNERS 등록 후 `Require review from Code Owners`
   활성화.
 - **Conversation resolution**: 모든 리뷰 코멘트 해결 후에만 머지 가능.
-- **Linear history 권장**, Squash 또는 Rebase merge.
+- **Merge commit 만 허용** (squash/rebase 비활성): per-TODO 커밋이 `main` 에 그대로 보존되고
+  PR 마다 merge 노드 1개가 추가됨 — PR 단위 이력은 `git log --first-parent` 로 조회.
+  merge 커밋은 PR 제목/본문을 사용하므로 `main --first-parent` 가 곧 PR 목록이 된다.
 
 ### 1.2 Ruleset 우선 원칙
 Branch Protection 대신 **Repository Ruleset** 을 기본 수단으로 운영합니다:
@@ -35,7 +37,7 @@ Branch Protection 대신 **Repository Ruleset** 을 기본 수단으로 운영�
 
 PR 에 `automerge` 라벨을 붙이는 것은 **사람의 명시적 머지 승인**입니다. 라벨 부착 시
 `pr-merge-gatekeeper` 클라우드 루틴이 발화되어, 다음 세 가지를 모두 검증한 뒤에만
-squash merge 합니다:
+merge commit 방식으로 머지합니다:
 
 1. **리뷰 완결** — 미해결 리뷰 thread 0건, 리뷰어별 미해소 `changes_requested` 없음
 2. **게이트** — required status check 전부 SUCCESS / NEUTRAL / SKIPPED

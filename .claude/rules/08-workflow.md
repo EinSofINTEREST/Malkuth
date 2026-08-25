@@ -16,7 +16,7 @@
 > | `.github/PULL_REQUEST_TEMPLATE.md` | ✅ 이식 완료 | 규약 4 섹션 구성 반영 |
 > | PR 타이틀 lint / Commit lint CI | ✅ 구성 완료 | `.github/workflows/ci-convention.yml` (+ Linked Issue Check, Branch Name Lint) |
 > | 품질 CI (lint/typecheck/test) | ✅ 구성 완료 | `.github/workflows/ci-quality.yml` — 코드 부재 시 부트스트랩 가드로 skip |
-> | `refactor`/`hotfix` 라벨 | ✅ 생성 완료 | — |
+> | `refactor`/`hotfix`/`chore` 라벨 | ✅ 생성 완료 | — |
 > | Issue Type ID (본 repo) | ✅ 조회 완료 | 규약 6 의 ID 표 참조 |
 > | `scripts/gh-meta.sh` | 미이식 | `gh issue edit --add-label` / `gh api graphql` 직접 호출 |
 > | `scripts/pr-resolve-comments.sh` | 미이식 | 개별 `gh api` 호출 |
@@ -99,7 +99,7 @@ mutation($issueId: ID!, $subIssueId: ID!) {
 | **모호한 작업 범위** | 사용자 의도가 다중 해석 가능하거나 scope 가 불명확한 경우 — 진행 전 구체화 질문 |
 
 > **Automerge 예외**: `automerge` 라벨이 부여된 PR 에 한해, `pr-merge-gatekeeper` 루틴이
-> 3단계 검증(리뷰 완결 / required check / 연결 이슈 목표 달성) 후 squash merge 하는 것은
+> 3단계 검증(리뷰 완결 / required check / 연결 이슈 목표 달성) 후 merge commit 으로 머지하는 것은
 > 허용된다 — **라벨 부착이 곧 사람의 명시적 merge 승인**이기 때문이다. 라벨 없는 PR 의
 > 무인 merge 금지는 그대로 유지된다. (상세: `docs/en/ci/conventions.md` 1.4)
 

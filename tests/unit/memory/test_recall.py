@@ -147,13 +147,45 @@ def test_search_only_looks_at_named_spaces():
     assert [r.entry.entry_id for r in results] == [mine.entry_id]
 
 
-def test_search_respects_the_hybrid_weights():
-    index = index_with(entry("alpha beta"), entry("beta gamma"))
-    recall = Recall(
-        indexes={SPACE: index}, hybrid=HybridSpec(vector_weight=0.1, lexical_weight=0.9)
-    )
+def test_hybrid_weights_flip_the_winner():
+    """두 층이 서로 다른 항목을 1위로 올릴 때, 가중치가 최종 순위를 정해야 한다.
 
-    assert recall.search("beta", spaces=[SPACE], entries={}) == ()
+    같은 순위를 내는 문서로 시험하면 가중치를 무엇으로 줘도 결과가 같아
+    아무것도 검증하지 못한다.
+    """
+    vector_first = [Hit(entry_id="V", score=1.0, rank=1), Hit(entry_id="L", score=0.5, rank=2)]
+    lexical_first = [Hit(entry_id="L", score=1.0, rank=1), Hit(entry_id="V", score=0.5, rank=2)]
+
+    vector_heavy = reciprocal_rank_fusion([vector_first, lexical_first], weights=[0.99, 0.01])
+    lexical_heavy = reciprocal_rank_fusion([vector_first, lexical_first], weights=[0.01, 0.99])
+
+    assert max(vector_heavy, key=lambda k: vector_heavy[k]) == "V"
+    assert max(lexical_heavy, key=lambda k: lexical_heavy[k]) == "L"
+
+
+def test_search_applies_the_configured_weights():
+    """Recall 이 memoryset 의 가중치를 실제로 병합에 넘기는지."""
+    identifier = entry("오류 코드 MCP_004 정의")
+    semantic = entry("mcp transport 재연결 backoff 동작")
+    index = index_with(identifier, semantic)
+    lookup = {e.entry_id: e for e in (identifier, semantic)}
+
+    results = Recall(
+        indexes={SPACE: index}, hybrid=HybridSpec(vector_weight=0.5, lexical_weight=0.5)
+    ).search("MCP_004 재연결", spaces=[SPACE], entries=lookup)
+
+    # 두 항목 모두 materialise 되어야 한다 — entries 를 넘기지 않으면 항상 빈다
+    assert {r.entry.entry_id for r in results} == set(lookup)
+    assert all(0.0 < r.score <= 1.0 for r in results)
+
+
+def test_search_materialises_only_known_entries():
+    """entries 에 없는 항목은 결과에 실리지 않는다 — 이 동작 때문에 빈 dict 를
+    넘기면 검증이 조용히 무의미해진다."""
+    known = entry("검색 대상 문서")
+    index = index_with(known)
+
+    assert Recall(indexes={SPACE: index}).search("문서", spaces=[SPACE], entries={}) == ()
 
 
 def test_unknown_space_is_skipped():
@@ -313,3 +345,39 @@ def test_recent_entry_provenance_uses_its_own_date():
     result = scored("사실", 0.9, created_at=stamp)
 
     assert stamp.date().isoformat() in result.provenance()
+
+
+def test_mismatched_weights_are_rejected():
+    """조용히 자르면 일부 순위나 가중치가 빠진 채 점수가 나온다."""
+    ranking = [Hit(entry_id="a", score=1.0, rank=1)]
+
+    with pytest.raises(ValueError, match="does not match"):
+        reciprocal_rank_fusion([ranking, ranking], weights=[1.0])
+
+
+def test_token_estimate_never_undercounts():
+    """내림하면 항목마다 최대 1토큰씩 적게 세어 누적된 만큼 예산을 넘긴다."""
+    items = [scored("x" * 9, 0.9) for _ in range(100)]
+
+    estimated = sum(i.estimated_tokens() for i in items)
+    exact = sum(len(f"{i.provenance()} {i.entry.content}") for i in items) / 4
+
+    assert estimated >= exact
+
+
+def test_auto_recall_logs_the_standard_fields(monkeypatch):
+    """memory_space / op 가 없으면 감사·집계 쿼리가 이 경로를 놓친다."""
+    recorded: list[dict] = []
+
+    def capture(_event: str, **fields: object) -> None:
+        recorded.append(dict(fields))
+
+    from malkuth.memory import recall as recall_module
+
+    monkeypatch.setattr(recall_module.log, "debug", capture)
+
+    auto, lookup = make_auto()
+    auto.for_task("mcp", spaces=[SPACE], entries=lookup)
+
+    assert recorded[-1]["memory_space"] == SPACE
+    assert recorded[-1]["op"] == "recall"

@@ -6,6 +6,7 @@ RRF 병합과 컨텍스트 주입 예산. 관련 없는 기억은 노이즈이�
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -45,9 +46,13 @@ class ScoredEntry:
         return f"[memory:{self.space} {stamp}]"
 
     def estimated_tokens(self) -> int:
-        """주입 시 소비할 토큰 추정치 — 출처 표시를 포함한다."""
+        """주입 시 소비할 토큰 추정치 — 출처 표시를 포함한다.
+
+        올림한다: 내림하면 항목마다 최대 1토큰씩 적게 세어 누적된 오차만큼
+        예산을 넘긴다. 추정은 넘치는 쪽이 아니라 남는 쪽으로 틀려야 한다.
+        """
         text = f"{self.provenance()} {self.entry.content}"
-        return max(1, len(text) // CHARS_PER_TOKEN)
+        return max(1, math.ceil(len(text) / CHARS_PER_TOKEN))
 
 
 def reciprocal_rank_fusion(
@@ -68,11 +73,17 @@ def reciprocal_rank_fusion(
 
     Returns:
         Entry id to fused score.
+
+    Raises:
+        ValueError: If ``weights`` does not match the number of rankings.
     """
     scale = list(weights) if weights is not None else [1.0] * len(rankings)
+    if len(scale) != len(rankings):
+        # 조용히 자르면 일부 순위나 가중치가 병합에서 빠진 채 점수가 나온다
+        raise ValueError(f"weights length {len(scale)} does not match rankings {len(rankings)}")
     fused: dict[str, float] = {}
 
-    for ranking, weight in zip(rankings, scale, strict=False):
+    for ranking, weight in zip(rankings, scale, strict=True):
         for hit in ranking:
             fused[hit.entry_id] = fused.get(hit.entry_id, 0.0) + weight / (k + hit.rank)
 
@@ -183,7 +194,11 @@ def apply_budget(
     관련성 문턱과 토큰 예산에 맞춰 결과를 자릅니다.
 
     ``min_score`` 미달은 주입하지 않습니다 — 관련 없는 기억은 노이즈이자
-    비용입니다. 예산 초과분은 score 순으로 잘립니다.
+    비용입니다.
+
+    결과는 score 순으로 훑되, **예산을 넘기는 항목만 건너뛰고 뒤의 작은 항목은
+    계속 봅니다** — 큰 항목 하나가 남은 예산 전부를 막아버리지 않게 하기
+    위해서입니다.
 
     Args:
         results: Scored results, best-first.
@@ -269,6 +284,8 @@ class AutoRecall:
         )
         log.debug(
             "memory auto-recall",
+            memory_space=",".join(spaces),
+            op="recall",
             k=self.policy.k,
             min_score=self.policy.min_score,
             found=len(found),

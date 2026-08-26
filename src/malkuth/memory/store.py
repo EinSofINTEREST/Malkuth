@@ -180,7 +180,11 @@ class SqliteMemoryStore:
         """
         query = "SELECT * FROM memory_entries WHERE space = ?"
         params: list[Any] = [space]
-        if kinds:
+        # kinds=[] 는 "아무 종류도 원하지 않는다" 지 "필터 없음" 이 아니다.
+        # 빈 목록을 falsy 로 흘려보내면 필터링 결과가 전체 조회로 뒤집힌다
+        if kinds is not None:
+            if not kinds:
+                return ()
             placeholders = ", ".join("?" for _ in kinds)
             query += f" AND kind IN ({placeholders})"
             params.extend(str(k) for k in kinds)

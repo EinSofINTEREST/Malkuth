@@ -95,7 +95,8 @@ class AccessToken:
     def resolve(self, alias: str) -> MemorySpace | None:
         """Resolve an alias by scope precedence.
 
-        별칭을 스코프 우선순위로 해석합니다 — **local > group > global**.
+        별칭을 스코프 우선순위로 해석합니다 —
+        **local > run > group > global** (``SCOPE_PRECEDENCE`` 순).
         같은 별칭이 여러 스코프에 있으면 가까운 쪽이 이깁니다.
 
         Args:
@@ -231,9 +232,41 @@ class MemoryService:
         """Follow a correction chain to its newest entry.
 
         정정 체인의 최신 항목을 찾습니다 — 대체된 기억은 주입 대상이 아닙니다.
+
+        조회 결과가 요청한 space 에 속하는지 반드시 확인합니다. entry_id 만으로
+        체인을 따라가면, id 를 아는 것만으로 다른 space 의 기억을 읽을 수 있어
+        ACL 이 무의미해집니다.
+
+        Args:
+            token: The agent's access token.
+            alias: The space alias the entry must belong to.
+            entry_id: Any entry id in the chain.
+
+        Returns:
+            The newest entry in the chain, or None if the id is unknown or
+            belongs to another space.
+
+        Raises:
+            MalkuthError: MEMORY/``MEM_001`` if the space is not declared.
         """
-        self._authorize(token, alias, write=False)
-        return self.store.latest_of_chain(entry_id)
+        try:
+            space = self._authorize(token, alias, write=False)
+        except MalkuthError:
+            self._record(
+                agent=token.agent, group=token.group, space=alias, op="latest", status="denied"
+            )
+            raise
+
+        entry = self.store.latest_of_chain(entry_id)
+        if entry is not None and entry.space != space.space_id:
+            # 다른 space 의 항목은 존재조차 알리지 않는다
+            self._record(
+                agent=token.agent, group=token.group, space=alias, op="latest", status="denied"
+            )
+            return None
+
+        self._record(agent=token.agent, group=token.group, space=alias, op="latest", status="ok")
+        return entry
 
 
 def build_token(

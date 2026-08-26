@@ -227,3 +227,21 @@ def test_purge_removes_entries(store):
 
 def test_purge_of_nothing_is_a_noop(store):
     assert store.purge([]) == 0
+
+
+def test_empty_kind_filter_returns_nothing(store):
+    """kinds=[] 는 '아무 종류도 원하지 않는다' 지 '필터 없음' 이 아니다.
+
+    빈 목록을 falsy 로 흘려보내면 필터링 결과가 전체 조회로 뒤집힌다.
+    """
+    store.append(make_entry(kind=MemoryKind.FACT))
+    store.append(make_entry(kind=MemoryKind.OBSERVATION))
+
+    assert store.list_space("local:researcher:longterm", kinds=[]) == ()
+
+
+def test_none_kind_filter_returns_everything(store):
+    store.append(make_entry(kind=MemoryKind.FACT))
+    store.append(make_entry(kind=MemoryKind.OBSERVATION))
+
+    assert len(store.list_space("local:researcher:longterm", kinds=None)) == 2

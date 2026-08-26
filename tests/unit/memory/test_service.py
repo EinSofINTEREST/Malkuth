@@ -314,3 +314,52 @@ def test_global_space_defaults_to_read_only():
     space = MemorySpace(alias="org", scope=MemoryScope.GLOBAL, owner="global")
 
     assert space.may_write("anyone") is False
+
+
+# --- latest() 의 space 경계 --------------------------------------------------
+
+
+def test_latest_does_not_cross_space_boundaries(service):
+    """entry_id 만으로 체인을 따라가면 id 를 아는 것만으로 남의 기억을 읽는다."""
+    victim = build_token(agent="writer", group=None, local=[("longterm", "writer")])
+    secret = service.append(
+        victim, "longterm", entry(content="기밀", source=MemorySource(agent="writer"))
+    )
+    attacker = build_token(agent="researcher", group=None, local=[("longterm", "researcher")])
+
+    assert service.latest(attacker, "longterm", secret.entry_id) is None
+
+
+def test_cross_space_latest_is_audited_as_denied(service):
+    victim = build_token(agent="writer", group=None, local=[("longterm", "writer")])
+    secret = service.append(
+        victim, "longterm", entry(content="기밀", source=MemorySource(agent="writer"))
+    )
+    attacker = build_token(agent="researcher", group=None, local=[("longterm", "researcher")])
+
+    service.latest(attacker, "longterm", secret.entry_id)
+
+    assert service.audit_log[-1] == {
+        "agent": "researcher",
+        "group": "",
+        "memory_space": "longterm",
+        "op": "latest",
+        "status": "denied",
+    }
+
+
+def test_latest_within_the_space_is_audited_as_ok(service):
+    original = service.append(token(), "longterm", entry(content="v1"))
+
+    service.latest(token(), "longterm", original.entry_id)
+
+    assert service.audit_log[-1]["op"] == "latest"
+    assert service.audit_log[-1]["status"] == "ok"
+
+
+def test_latest_on_an_undeclared_space_is_denied(service):
+    with pytest.raises(MalkuthError) as exc_info:
+        service.latest(token(), "secret", "any")
+
+    assert exc_info.value.code == "MEM_001"
+    assert service.audit_log[-1]["status"] == "denied"

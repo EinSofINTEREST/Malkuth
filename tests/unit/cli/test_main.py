@@ -290,3 +290,33 @@ def test_global_secrets_resolve_for_every_command():
     ]
 
     assert validate_root(REPO_ROOT, topologies).ok
+
+
+# --- stdout / stderr 분리 -------------------------------------------------------
+
+
+def test_json_output_is_parseable(workspace, capsys):
+    """로그가 stdout 에 섞이면 스크립트가 --json 을 파싱할 수 없다."""
+    import json
+
+    run_cli(["--root", str(workspace), "--json", "validate"])
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)  # 섞여 있으면 여기서 터진다
+    assert payload["status"] == "ok"
+
+
+def test_logs_do_not_pollute_stdout(workspace, capsys):
+    """검증 실패 로그가 나가는 경로에서도 stdout 은 순수해야 한다."""
+    import json
+
+    manifest = workspace / "agents" / "solo" / "manifest.yaml"
+    document = yaml.safe_load(manifest.read_text())
+    document["spec"]["promptset"]["ref"] = "promptsets/absent@9.9.9"
+    manifest.write_text(yaml.safe_dump(document), encoding="utf-8")
+
+    run_cli(["--root", str(workspace), "--json", "validate"])
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["status"] == "failed"

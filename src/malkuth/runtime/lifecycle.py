@@ -142,7 +142,7 @@ class AgentLifecycle:
         if target not in _ALLOWED[self.state]:
             raise MalkuthError(
                 category=ErrorCategory.RUNTIME,
-                code=ErrorCode.RT_002,
+                code=ErrorCode.RT_007,
                 message=f"illegal lifecycle transition: {self.state} -> {target}",
                 agent=self.agent,
                 details={"from": str(self.state), "to": str(target)},
@@ -180,7 +180,12 @@ class AgentLifecycle:
             return self.state
 
         self.consecutive_health_failures += 1
-        if self.consecutive_health_failures >= threshold and self.state is AgentState.READY:
+        # 기동 중(STARTING) 실패도 Unhealthy 로 — READY 만 보면 initialize 가
+        # 끝내 성공하지 못한 컨테이너가 계속 STARTING 에 머문다
+        if self.consecutive_health_failures >= threshold and self.state in (
+            AgentState.READY,
+            AgentState.STARTING,
+        ):
             self.transition(AgentState.UNHEALTHY)
         return self.state
 
@@ -201,7 +206,7 @@ class AgentLifecycle:
             self.state = AgentState.FAILED
             raise MalkuthError(
                 category=ErrorCategory.RUNTIME,
-                code=ErrorCode.RT_002,
+                code=ErrorCode.RT_008,
                 message="restart limit exceeded — agent marked failed",
                 agent=self.agent,
                 details={
@@ -240,7 +245,7 @@ class ReplicaRouter:
         if not candidates:
             raise MalkuthError(
                 category=ErrorCategory.RUNTIME,
-                code=ErrorCode.RT_002,
+                code=ErrorCode.RT_009,
                 message="no ready replica available",
                 agent=self._replicas[0].agent,
                 retryable=True,

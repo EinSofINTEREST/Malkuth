@@ -92,6 +92,9 @@ class ErrorCode(StrEnum):
     RT_004 = "RT_004"  # 이미지 빌드/풀 실패
     RT_005 = "RT_005"  # Drain timeout
     RT_006 = "RT_006"  # 그룹 리소스 quota 초과 — 기동 거부
+    RT_007 = "RT_007"  # 불법 lifecycle 상태 전이 (프로그래밍 오류)
+    RT_008 = "RT_008"  # 재시작 상한 초과 — Failed 전환
+    RT_009 = "RT_009"  # 라우팅 가능한 레플리카 없음
 
     # Graph
     GRAPH_001 = "GRAPH_001"  # 토폴로지 검증 실패

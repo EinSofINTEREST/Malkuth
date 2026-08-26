@@ -71,7 +71,7 @@ def test_illegal_transitions_are_rejected(start, target):
     with pytest.raises(MalkuthError) as exc_info:
         agent.transition(target)
 
-    assert exc_info.value.code == "RT_002"
+    assert exc_info.value.code == "RT_007"
     assert exc_info.value.category is ErrorCategory.RUNTIME
     assert agent.state is start  # 실패해도 상태는 유지된다
 
@@ -201,7 +201,7 @@ def test_crash_loop_marks_the_agent_failed():
     with pytest.raises(MalkuthError) as exc_info:
         agent.plan_restart()
 
-    assert exc_info.value.code == "RT_002"
+    assert exc_info.value.code == "RT_008"
     assert "restart limit exceeded" in exc_info.value.message
     assert agent.state is AgentState.FAILED
 
@@ -254,3 +254,47 @@ def test_no_ready_replica_is_a_retryable_error():
 
     assert exc_info.value.retryable is True
     assert "no ready replica" in exc_info.value.message
+
+
+def test_lifecycle_errors_use_distinct_codes():
+    """RT_002 는 "컨테이너 unhealthy" 다 — lifecycle 위반과 섞으면 라우팅이 흐려진다."""
+    illegal = AgentLifecycle(agent="a", state=AgentState.DECLARED)
+    with pytest.raises(MalkuthError) as transition_err:
+        illegal.transition(AgentState.READY)
+
+    looping = ready_agent(clock=FakeClock())
+    for _ in range(5):
+        looping.plan_restart()
+    with pytest.raises(MalkuthError) as restart_err:
+        looping.plan_restart()
+
+    drained = ready_agent("a0")
+    drained.transition(AgentState.DRAINING)
+    with pytest.raises(MalkuthError) as router_err:
+        ReplicaRouter([drained]).next_replica()
+
+    codes = {transition_err.value.code, restart_err.value.code, router_err.value.code}
+    assert codes == {"RT_007", "RT_008", "RT_009"}
+
+
+def test_failing_startup_health_becomes_unhealthy():
+    """initialize 가 끝내 성공하지 못하면 STARTING 에 머물지 않아야 한다."""
+    agent = AgentLifecycle(agent="a", state=AgentState.DECLARED)
+    agent.transition(AgentState.BUILT)
+    agent.transition(AgentState.STARTING)
+
+    for _ in range(3):
+        agent.record_health(healthy=False)
+
+    assert agent.state is AgentState.UNHEALTHY
+
+
+def test_startup_health_success_leaves_state_for_the_caller():
+    """기동 성공 판정은 runtime 이 한다 — health 성공만으로 READY 로 올리지 않는다."""
+    agent = AgentLifecycle(agent="a", state=AgentState.DECLARED)
+    agent.transition(AgentState.BUILT)
+    agent.transition(AgentState.STARTING)
+
+    agent.record_health(healthy=True)
+
+    assert agent.state is AgentState.STARTING

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import pytest
 
+from malkuth.core.errors import MalkuthError
 from malkuth.runtime.spec import (
     DEFAULT_CONTROL_PORT,
     DEFAULT_NETWORK,
@@ -187,3 +188,65 @@ def test_spec_name_matches_the_replica():
 
     assert spec.name.endswith("-1")
     assert spec.labels["malkuth.replica"] == "1"
+
+
+# --- 격리 강제 --------------------------------------------------------------
+
+
+@pytest.mark.parametrize("network", ["host", "bridge", "none", "container"])
+def test_shared_networks_are_rejected(network):
+    """호스트/공유 네트워크를 쓰면 컨테이너 격리가 무너진다."""
+    with pytest.raises(MalkuthError) as exc_info:
+        build_container_spec(agent_manifest(), network=network)
+
+    assert exc_info.value.code == "RT_001"
+
+
+def test_dedicated_bridge_network_is_accepted():
+    assert build_container_spec(agent_manifest(), network="malkuth-net").network == "malkuth-net"
+
+
+def test_ports_bind_to_loopback_only():
+    """호스트 IP 를 지정하지 않으면 0.0.0.0 에 바인딩되어 외부에 노출된다."""
+    ports = build_container_spec(agent_manifest()).to_docker_kwargs()["ports"]
+
+    assert all(binding[0] == "127.0.0.1" for binding in ports.values())
+
+
+# --- Docker 인자 렌더링 -----------------------------------------------------
+
+
+def test_declared_volumes_reach_docker_kwargs():
+    """스펙이 볼륨을 들고 있어도 렌더링에서 빠지면 마운트가 무시된다."""
+    kwargs = build_container_spec(
+        agent_manifest(runtime={"volumes": [{"name": "work", "mount_path": "/workspace"}]})
+    ).to_docker_kwargs()
+
+    assert kwargs["volumes"] == {"work": {"bind": "/workspace", "mode": "rw"}}
+
+
+def test_read_only_volume_mode_is_carried():
+    kwargs = build_container_spec(
+        agent_manifest(
+            runtime={"volumes": [{"name": "ref", "mount_path": "/ref", "read_only": True}]}
+        )
+    ).to_docker_kwargs()
+
+    assert kwargs["volumes"]["ref"]["mode"] == "ro"
+
+
+def test_no_volumes_renders_an_empty_mapping():
+    assert build_container_spec(agent_manifest()).to_docker_kwargs()["volumes"] == {}
+
+
+@pytest.mark.parametrize(
+    ("cpu", "expected"),
+    [("0.1", 100_000_000), ("0.5", 500_000_000), ("1.0", 1_000_000_000), ("2.5", 2_500_000_000)],
+)
+def test_nano_cpus_rounds_without_loss(cpu, expected):
+    """int() 절삭은 부동소수 표현에 따라 CPU 를 덜 할당할 수 있다."""
+    kwargs = build_container_spec(
+        agent_manifest(runtime={"resources": {"cpu": cpu}})
+    ).to_docker_kwargs()
+
+    assert kwargs["nano_cpus"] == expected

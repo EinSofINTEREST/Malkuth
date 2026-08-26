@@ -225,6 +225,7 @@ def test_all_documented_error_codes_exist():
         "MCP_001", "MCP_002", "MCP_003", "MCP_004",
         "SKILL_001",
         "RT_001", "RT_002", "RT_003", "RT_004", "RT_005", "RT_006",
+        "RT_007", "RT_008", "RT_009",
         "GRAPH_001", "GRAPH_002", "GRAPH_003", "GRAPH_004", "GRAPH_005",
         "MOD_001", "MOD_002", "MOD_003", "MOD_004",
         "MEM_001", "MEM_002", "MEM_003", "MEM_004",

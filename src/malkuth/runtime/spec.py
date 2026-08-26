@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Final
 
+from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
 from malkuth.core.manifest import AgentManifest
 
 if TYPE_CHECKING:
@@ -22,6 +23,12 @@ DEFAULT_BASE_IMAGE: Final = "malkuth/agent-base:0.1.0"
 
 # 컨테이너가 쓸 수 있어야 하는 임시 경로 — read-only rootfs 위의 tmpfs
 _WRITABLE_TMPFS: Final = ("/tmp", "/workspace")  # noqa: S108 - 컨테이너 내부 경로
+
+# 컨테이너가 호스트 네트워크/PID/IPC 를 공유하면 격리가 무너진다
+_FORBIDDEN_NETWORKS: Final = frozenset({"host", "none", "bridge", "container"})
+
+# 노출 포트는 루프백에만 바인딩한다 — 0.0.0.0 이면 컨테이너 밖 누구나 접근한다
+LOOPBACK: Final = "127.0.0.1"
 
 
 @dataclass(frozen=True)
@@ -67,14 +74,22 @@ class ContainerSpec:
             "image": self.image,
             "environment": dict(self.env),
             "network": self.network,
-            "ports": {f"{p.container_port}/tcp": None for p in self.ports},
-            "nano_cpus": int(self.cpu_cores * 1_000_000_000),
+            # (host_ip, None) 로 루프백 바인딩 — 포트를 외부에 노출하지 않는다
+            "ports": {f"{p.container_port}/tcp": (LOOPBACK, None) for p in self.ports},
+            "nano_cpus": round(self.cpu_cores * 1_000_000_000),
             "mem_limit": self.memory_bytes,
             "pids_limit": self.pids_limit,
             "user": self.user,
             "read_only": self.read_only_rootfs,
             "cap_drop": list(self.cap_drop),
             "tmpfs": dict.fromkeys(self.tmpfs, ""),
+            "volumes": {
+                volume["name"]: {
+                    "bind": volume["mount_path"],
+                    "mode": "ro" if volume["read_only"] else "rw",
+                }
+                for volume in self.volumes
+            },
             "labels": dict(self.labels),
             # 호스트 네트워크 금지, 임의 포트 publish 금지 (02 Network 규칙)
             "network_mode": None,
@@ -100,13 +115,25 @@ def build_container_spec(
         manifest: The validated agent manifest.
         env: Resolved secret values to inject (scope resolution happens earlier).
         replica: Replica index, used to make container names unique.
-        network: Bridge network to attach.
+        network: Dedicated bridge network to attach; shared/host networks are rejected.
         a2a_port: A2A port assigned by the runtime, when A2A is enabled.
         base_image: Image used when the manifest declares none.
 
     Returns:
         The container specification.
+
+    Raises:
+        MalkuthError: RUNTIME/``RT_001`` if a shared or host network is requested.
     """
+    if network in _FORBIDDEN_NETWORKS:
+        raise MalkuthError(
+            category=ErrorCategory.RUNTIME,
+            code=ErrorCode.RT_001,
+            message=f"agent containers must not use the '{network}' network",
+            agent=manifest.name,
+            details={"network": network},
+        )
+
     runtime = manifest.spec.runtime
 
     ports = [PortBinding("control", DEFAULT_CONTROL_PORT)]

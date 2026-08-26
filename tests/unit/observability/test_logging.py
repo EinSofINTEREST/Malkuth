@@ -306,3 +306,70 @@ def test_bound_fields_appear_in_output(capsys):
     payload = json.loads(capsys.readouterr().out)
     assert payload[LogField.GRAPH] == "g"
     assert payload[LogField.RUN_ID] == "r"
+
+
+# --- 자유 문자열 안의 secret ------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "auth failed with token=sk-super-secret-value",
+        "api_key: sk-super-secret-value",
+        'config {"password": "sk-super-secret-value"}',
+        "client_secret=sk-super-secret-value;retry",
+        "private_key = sk-super-secret-value",
+    ],
+)
+def test_secrets_embedded_in_strings_are_redacted(text):
+    """키-값 구조가 아닌 문자열 안의 secret 도 가려야 한다."""
+    masked = apply_mask({"event": "x", "detail": text})
+
+    assert "sk-super-secret-value" not in masked["detail"]
+    assert REDACTED in masked["detail"]
+
+
+@pytest.mark.parametrize("scheme", ["Bearer", "bearer", "Basic"])
+def test_authorization_schemes_are_redacted(scheme):
+    masked = apply_mask({"header": f"{scheme} sk-super-secret-value"})
+
+    assert "sk-super-secret-value" not in masked["header"]
+
+
+def test_ordinary_strings_are_left_intact():
+    """무해한 문자열까지 훼손하면 로그가 못 쓰게 된다."""
+    masked = apply_mask({"event": "agent ready", "detail": "node=planner status=completed"})
+
+    assert masked["event"] == "agent ready"
+    assert masked["detail"] == "node=planner status=completed"
+
+
+def test_exception_traceback_is_masked(capsys):
+    """log.exception() 한 번으로 secret 이 새면 안 된다 (#30 완료 조건).
+
+    트레이스백은 키 이름이 없는 자유 문자열이라, 이름 기반 판정만으로는
+    예외 메시지에 리터럴로 섞인 토큰이 그대로 렌더링된다.
+    """
+    configure(level="INFO", json_output=True)
+
+    try:
+        raise ValueError(f"auth failed with token={SECRET}")
+    except ValueError:
+        get_logger("test").exception("model call failed", agent="researcher")
+
+    out = capsys.readouterr().out
+    assert SECRET not in out
+    assert "Traceback" in json.loads(out)["exception"]
+
+
+def test_secret_inside_nested_string_is_masked():
+    masked = apply_mask({"env": {"detail": f"token={SECRET}"}})
+
+    assert SECRET not in masked["env"]["detail"]
+
+
+def test_secret_inside_list_of_strings_is_masked():
+    masked = apply_mask({"lines": [f"api_key={SECRET}", "ok"]})
+
+    assert SECRET not in masked["lines"][0]
+    assert masked["lines"][1] == "ok"

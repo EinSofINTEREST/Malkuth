@@ -80,16 +80,48 @@ _SECRET_KEY_PATTERN: Final = re.compile(
 
 _MAX_REDACT_DEPTH: Final = 6
 
+# 문자열 안에 섞여 들어온 secret — `token=sk-...`, `"api_key": "..."`, `Bearer ...`
+# 형태를 값째로 가린다. 예외 메시지/트레이스백은 키 이름이 없는 자유 문자열이라
+# 이름 기반 판정만으로는 잡히지 않는다.
+_SECRET_VALUE_PATTERN: Final = re.compile(
+    r"""
+    (?P<prefix>
+        (?:secret|token|password|passwd|api[_-]?key|credential|private[_-]?key)
+        ["']?            # JSON 형태의 닫는 따옴표: "password":
+        \s* [=:] \s*
+        ["']?            # 값을 여는 따옴표
+    )
+    (?P<value>[^\s"',;)}\]]+)
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+_BEARER_PATTERN: Final = re.compile(
+    r"\b(?P<scheme>bearer|basic)\s+(?P<value>[A-Za-z0-9._\-+/=]+)",
+    re.IGNORECASE,
+)
+
 
 def _looks_secret(key: str) -> bool:
     """키 이름이 secret 을 담는 것으로 보이는지."""
     return bool(_SECRET_KEY_PATTERN.search(key))
 
 
+def _redact_text(text: str) -> str:
+    """자유 문자열 안에 섞인 secret 을 가린다.
+
+    예외 메시지와 트레이스백은 키-값 구조가 아니므로 이름 기반 판정으로는
+    잡히지 않는다 — 값 패턴으로 한 번 더 훑는다.
+    """
+    redacted = _SECRET_VALUE_PATTERN.sub(lambda m: f"{m.group('prefix')}{REDACTED}", text)
+    return _BEARER_PATTERN.sub(lambda m: f"{m.group('scheme')} {REDACTED}", redacted)
+
+
 def _redact(value: Any, depth: int = 0) -> Any:
     """중첩 구조를 따라가며 secret 키의 값을 가린다."""
     if depth >= _MAX_REDACT_DEPTH:
         return value
+    if isinstance(value, str):
+        return _redact_text(value)
     if isinstance(value, dict):
         return {
             key: REDACTED if _looks_secret(str(key)) else _redact(item, depth + 1)
@@ -109,8 +141,12 @@ def mask_secrets(
 
     Secret 으로 보이는 키의 값을 가립니다 — 중첩 dict/list 까지 따라갑니다.
 
-    이름 기반 판정이므로 값의 형태에 의존하지 않으며, 새로운 secret 키가
-    추가돼도 패턴에 걸리면 자동으로 가려집니다.
+    두 층으로 판정합니다:
+
+    1. **키 이름** — ``api_key`` 같은 키의 값을 통째로 가린다
+    2. **문자열 값** — ``token=...`` / ``Bearer ...`` 처럼 자유 문자열 안에 섞인
+       secret 을 가린다. 예외 메시지와 트레이스백은 키-값 구조가 아니므로
+       이 층이 없으면 ``log.exception()`` 한 번으로 값이 그대로 새어나간다
     """
     for key in list(event_dict):
         if _looks_secret(str(key)):

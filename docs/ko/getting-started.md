@@ -128,6 +128,7 @@ malkuth check observed-state.yaml
 ```bash
 malkuth run graphs/research-pipeline.yaml \
   --input '{"query": "..."}' \
+  --agent-token "${MALKUTH_AGENT_TOKEN:-e2e-token}" \
   --agent planner=http://127.0.0.1:18082 \
   --agent researcher=http://127.0.0.1:18083 \
   --agent writer=http://127.0.0.1:18084

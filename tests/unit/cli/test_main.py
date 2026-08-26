@@ -353,3 +353,74 @@ def test_package_entry_point_runs_without_warnings():
     # -W error::RuntimeWarning 이 경고를 예외로 승격하므로 종료 코드가 곧 판정이다.
     # 문자열 매칭을 더하면 새로운 경고 종류를 놓치는 검사로 되돌아간다
     assert result.returncode == 0, result.stderr
+
+
+# --- CLI 가 Control API 토큰을 싣는가 -------------------------------------------
+
+
+def clients_for(argv: list[str], monkeypatch, env: str | None = None):
+    """`malkuth run` 인자로 만들어지는 Control API 클라이언트."""
+    from malkuth.cli.main import _control_clients
+    from malkuth.runtime.tokens import AGENT_TOKEN_ENV
+
+    if env is None:
+        monkeypatch.delenv(AGENT_TOKEN_ENV, raising=False)
+    else:
+        monkeypatch.setenv(AGENT_TOKEN_ENV, env)
+    return _control_clients(build_parser().parse_args(argv))
+
+
+def test_run_carries_the_agent_token(monkeypatch):
+    """토큰을 빠뜨리면 인증이 켜진 스택에서 모든 노드 호출이 401 이 된다."""
+    clients = clients_for(
+        ["run", "g.yaml", "--agent", "planner=http://a:8080", "--agent-token", "TOK"],
+        monkeypatch,
+    )
+
+    assert clients["planner"]._token == "TOK"
+
+
+def test_agent_token_falls_back_to_the_environment(monkeypatch):
+    """compose 가 주입하는 것과 같은 키를 본다."""
+    clients = clients_for(
+        ["run", "g.yaml", "--agent", "planner=http://a:8080"], monkeypatch, env="FROM-ENV"
+    )
+
+    assert clients["planner"]._token == "FROM-ENV"
+
+
+def test_explicit_token_wins_over_the_environment(monkeypatch):
+    clients = clients_for(
+        ["run", "g.yaml", "--agent", "planner=http://a:8080", "--agent-token", "EXPLICIT"],
+        monkeypatch,
+        env="FROM-ENV",
+    )
+
+    assert clients["planner"]._token == "EXPLICIT"
+
+
+def test_empty_environment_token_is_treated_as_unset(monkeypatch):
+    """compose 의 ${VAR:-default} 와 같은 규칙 — 빈 값은 미설정이다."""
+    clients = clients_for(
+        ["run", "g.yaml", "--agent", "planner=http://a:8080"], monkeypatch, env=""
+    )
+
+    assert clients["planner"]._token is None
+
+
+def test_every_agent_shares_the_run_token(monkeypatch):
+    clients = clients_for(
+        [
+            "run",
+            "g.yaml",
+            "--agent",
+            "planner=http://a:8080",
+            "--agent",
+            "writer=http://b:8080",
+            "--agent-token",
+            "SHARED",
+        ],
+        monkeypatch,
+    )
+
+    assert {c._token for c in clients.values()} == {"SHARED"}

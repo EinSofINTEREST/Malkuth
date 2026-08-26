@@ -139,10 +139,16 @@ Direct requests reach any agent's Control API without a graph run:
 
 ```bash
 curl -X POST http://127.0.0.1:18081/v1/invoke \
+  -H "authorization: Bearer ${MALKUTH_AGENT_TOKEN:-e2e-token}" \
   -H 'content-type: application/json' \
   -d '{"task_id":"t1","run_id":"direct-1","node_id":null,
        "input":{"msg":"hello"},"trace":{"trace_id":"tr-1"}}'
 ```
+
+The Control API requires a per-agent token; `/v1/health` is the only unauthenticated
+endpoint (Docker's healthcheck calls it directly). In production the runtime mints a
+random token per agent and injects it — the dev stack uses a fixed placeholder so the
+same code path stays exercised.
 
 Still on the roadmap *(not implemented yet)*: `malkuth run trace`, `agent invoke`,
 `agent logs`, `replay`, `memory reindex`.

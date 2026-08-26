@@ -139,10 +139,16 @@ Direct 요청은 그래프 run 없이 어느 에이전트의 Control API 에나 
 
 ```bash
 curl -X POST http://127.0.0.1:18081/v1/invoke \
+  -H "authorization: Bearer ${MALKUTH_AGENT_TOKEN:-e2e-token}" \
   -H 'content-type: application/json' \
   -d '{"task_id":"t1","run_id":"direct-1","node_id":null,
        "input":{"msg":"hello"},"trace":{"trace_id":"tr-1"}}'
 ```
+
+Control API 는 에이전트별 토큰을 요구합니다. `/v1/health` 만 무인증입니다
+(Docker healthcheck 가 직접 호출하므로). 운영에서는 runtime 이 에이전트마다
+난수 토큰을 발급해 주입하며, 개발 스택은 같은 코드 경로를 유지하려고 고정
+placeholder 를 씁니다.
 
 아직 로드맵에 있는 것 *(미구현)*: `malkuth run trace`, `agent invoke`,
 `agent logs`, `replay`, `memory reindex`.

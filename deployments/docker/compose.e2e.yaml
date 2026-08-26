@@ -49,6 +49,8 @@ services:
     environment:
       # E2E 는 모델 비결정성을 배제한다 — echo 대역으로 프로토콜 경로만 검증
       MALKUTH_EXECUTOR: echo
+      # 인증을 켠 채 검증한다 — 무인증 E2E 는 인증 회귀를 통과시킨다
+      MALKUTH_AGENT_TOKEN: ${MALKUTH_AGENT_TOKEN:-e2e-token}
 
   # 레퍼런스 그래프의 세 노드를 담당한다. 전부 echo 대역을 쓴다 —
   # graph run 의 검증 대상은 라우팅과 state 병합이지 모델 출력이 아니다
@@ -59,6 +61,7 @@ services:
       - "18082:8080"
     environment:
       MALKUTH_EXECUTOR: echo
+      MALKUTH_AGENT_TOKEN: ${MALKUTH_AGENT_TOKEN:-e2e-token}
 
   agent-researcher:
     <<: *agent-defaults
@@ -67,6 +70,7 @@ services:
       - "18083:8080"
     environment:
       MALKUTH_EXECUTOR: echo
+      MALKUTH_AGENT_TOKEN: ${MALKUTH_AGENT_TOKEN:-e2e-token}
 
   agent-writer:
     <<: *agent-defaults
@@ -75,6 +79,7 @@ services:
       - "18084:8080"
     environment:
       MALKUTH_EXECUTOR: echo
+      MALKUTH_AGENT_TOKEN: ${MALKUTH_AGENT_TOKEN:-e2e-token}
 
 networks:
   malkuth-e2e-net:

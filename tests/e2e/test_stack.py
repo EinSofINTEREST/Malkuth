@@ -9,6 +9,7 @@ Docker 가 없으면 skip 한다. nightly CI 에서만 실행된다 (PR gate 아
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import time
@@ -26,6 +27,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 COMPOSE_FILE = REPO_ROOT / "deployments" / "docker" / "compose.e2e.yaml"
 ECHO_URL = "http://127.0.0.1:18081"
 READY_TIMEOUT_S = 120.0
+# compose 가 주입하는 값과 같아야 한다 — 어긋나면 전부 401 이다
+AGENT_TOKEN = os.environ.get("MALKUTH_AGENT_TOKEN", "e2e-token")
 DOCKER_BIN = shutil.which("docker")
 
 
@@ -61,12 +64,22 @@ def docker_available() -> bool:
 requires_docker = pytest.mark.skipif(not docker_available(), reason="docker daemon unavailable")
 
 
-def fetch(url: str, body: dict[str, Any] | None = None, *, timeout: float = 10.0) -> dict:
-    """Control API 호출."""
+def fetch(
+    url: str,
+    body: dict[str, Any] | None = None,
+    *,
+    timeout: float = 10.0,
+    token: str | None = AGENT_TOKEN,
+) -> dict:
+    """Control API 호출 — 인증이 필요한 엔드포인트에 토큰을 싣는다.
+
+    ``token=None`` 으로 무인증 요청을 만들어 401 을 검증할 수 있다.
+    """
     data = json.dumps(body).encode() if body is not None else None
-    request = urllib.request.Request(  # noqa: S310 — 루프백 고정 URL
-        url, data=data, headers={"content-type": "application/json"}
-    )
+    headers = {"content-type": "application/json"}
+    if token is not None:
+        headers["authorization"] = f"Bearer {token}"
+    request = urllib.request.Request(url, data=data, headers=headers)  # noqa: S310
     with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
         result: dict = json.loads(response.read())
         return result
@@ -77,7 +90,7 @@ def wait_healthy(url: str, *, timeout: float = READY_TIMEOUT_S) -> bool:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
-            if fetch(f"{url}/v1/health", timeout=3.0)["status"] == "healthy":
+            if fetch(f"{url}/v1/health", timeout=3.0, token=None)["status"] == "healthy":
                 return True
         except (urllib.error.URLError, OSError, KeyError):
             pass
@@ -198,3 +211,30 @@ def test_card_is_served(stack):
     card = fetch(f"{ECHO_URL}/v1/card")
 
     assert card["name"] == "echo"
+
+
+@requires_docker
+def test_control_api_requires_a_token(stack):
+    """무인증 스택은 인증 회귀를 통과시킨다 — E2E 도 인증을 켠 채 검증한다."""
+    assert wait_healthy(ECHO_URL)
+
+    with pytest.raises(urllib.error.HTTPError) as exc_info:
+        fetch(f"{ECHO_URL}/v1/invoke", direct_task({"msg": "no-token"}), token=None)
+
+    assert exc_info.value.code == 401
+
+
+@requires_docker
+def test_wrong_token_is_rejected(stack):
+    assert wait_healthy(ECHO_URL)
+
+    with pytest.raises(urllib.error.HTTPError) as exc_info:
+        fetch(f"{ECHO_URL}/v1/invoke", direct_task({"msg": "x"}), token="not-the-token")
+
+    assert exc_info.value.code == 401
+
+
+@requires_docker
+def test_health_stays_unauthenticated(stack):
+    """Docker healthcheck 가 토큰 없이 호출하므로 열려 있어야 한다."""
+    assert fetch(f"{ECHO_URL}/v1/health", token=None)["status"] == "healthy"

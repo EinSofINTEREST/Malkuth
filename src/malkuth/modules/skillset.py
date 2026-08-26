@@ -156,6 +156,30 @@ class LoadedSkillset(BaseModel):
         """
         return tuple(s.spec for s in self.skills)
 
+    def untyped_parameters(self) -> dict[str, tuple[str, ...]]:
+        """Report tool parameters the model would see without a type.
+
+        타입 없이 노출되는 파라미터를 보고합니다 — 모델은 그 자리에 어떤 값을
+        넣어야 할지 알 수 없습니다.
+
+        흔한 원인은 ``SkillContext`` 를 ``TYPE_CHECKING`` 뒤에 두어 런타임에
+        이름이 해석되지 않는 경우입니다. 배포 검증이 이 리포트를 쓰면
+        모델에게 도달하기 전에 드러납니다.
+
+        Returns:
+            Tool name to its untyped parameter names; empty when all are typed.
+        """
+        report: dict[str, tuple[str, ...]] = {}
+        for spec in self.tools():
+            loose = tuple(
+                name
+                for name, schema in spec.parameters.get("properties", {}).items()
+                if not schema.get("type") and "anyOf" not in schema
+            )
+            if loose:
+                report[spec.name] = loose
+        return report
+
     def get(self, name: str) -> LoadedSkill:
         """Look up a loaded skill by tool name.
 

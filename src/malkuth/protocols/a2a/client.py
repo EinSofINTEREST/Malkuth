@@ -1,0 +1,238 @@
+"""A2A client — peer delegation and queries.
+
+에이전트가 선언된 peer 에게 위임/질의하는 경로. 파이프라인 데이터 흐름을 A2A 로
+구현하는 것은 안티패턴이다 — checkpoint/재개가 불가능해진다 (03 When to Use).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import time
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
+
+import structlog
+
+from malkuth.core.agent import TaskStatus
+from malkuth.core.errors import CircuitBreaker, ErrorCategory, ErrorCode, MalkuthError
+from malkuth.protocols.a2a.errors import submit_failed, task_rejected, unreachable
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from malkuth.core.agent import TaskRequest, TaskResult
+    from malkuth.protocols.a2a.allowlist import Allowlist
+
+DEFAULT_CALL_TIMEOUT_S = 120.0
+
+A2A_TERMINAL_STATES = {
+    "completed": TaskStatus.COMPLETED,
+    "failed": TaskStatus.FAILED,
+    "canceled": TaskStatus.CANCELED,
+}
+"""A2A 종료 상태 → 내부 TaskStatus."""
+
+A2A_INFLIGHT_STATES = frozenset({"submitted", "working"})
+"""아직 끝나지 않은 A2A 상태 — TaskStatus 는 종료 상태만 표현하므로 매핑하지 않는다."""
+
+
+log = structlog.get_logger(__name__)
+
+
+def map_status(a2a_status: str) -> TaskStatus | None:
+    """Map an A2A task state to the internal status.
+
+    A2A task 상태를 내부 상태로 매핑합니다. ``TaskStatus`` 는 **종료 상태만**
+    표현하므로 진행 중(``submitted``/``working``)은 ``None`` 을 돌려줍니다 —
+    진행 중을 임의의 종료 상태로 뭉개면 호출자가 완료로 오해합니다.
+
+    Args:
+        a2a_status: The A2A-side state name.
+
+    Returns:
+        The terminal status, or None while the peer task is still in flight.
+
+    Raises:
+        ValueError: If the state is neither in-flight nor a known terminal state
+            — 미지의 상태를 조용히 성공/실패로 해석하지 않습니다.
+    """
+    if a2a_status in A2A_INFLIGHT_STATES:
+        return None
+    try:
+        return A2A_TERMINAL_STATES[a2a_status]
+    except KeyError as err:
+        raise ValueError(f"unknown a2a task state: {a2a_status}") from err
+
+
+@runtime_checkable
+class PeerTransport(Protocol):
+    """Sends one task to a peer agent.
+
+    peer 호출 전송 계약. 실제 A2A SDK 는 이 뒤에 감춰진다.
+    """
+
+    async def send(
+        self, *, callee: str, task: TaskRequest, token: str, headers: Mapping[str, str]
+    ) -> TaskResult:
+        """peer 에게 태스크를 보내고 결과를 받는다."""
+        ...
+
+
+@dataclass
+class A2AClient:
+    """One agent's outbound A2A calls.
+
+    에이전트 하나의 A2A 호출. allowlist 와 depth limit 이 caller 측 방어다.
+    """
+
+    agent: str
+    allowlist: Allowlist
+    transport: PeerTransport
+    timeout_s: float = DEFAULT_CALL_TIMEOUT_S
+    breakers: dict[str, CircuitBreaker] = field(default_factory=dict)
+
+    def peers(self) -> tuple[str, ...]:
+        """Peers this agent may call.
+
+        부를 수 있는 peer 목록 — 에이전트는 주소를 직접 알지 못합니다.
+        """
+        return self.allowlist.peers_of(self.agent)
+
+    def _breaker(self, callee: str) -> CircuitBreaker:
+        """peer 별 circuit breaker — 죽은 peer 를 계속 두드리지 않는다."""
+        if callee not in self.breakers:
+            self.breakers[callee] = CircuitBreaker(
+                target=f"a2a:{callee}",
+                open_category=ErrorCategory.A2A,
+                open_code=ErrorCode.A2A_002,
+            )
+        return self.breakers[callee]
+
+    async def call(self, callee: str, task: TaskRequest) -> TaskResult:
+        """Delegate a task to a declared peer.
+
+        선언된 peer 에게 태스크를 위임합니다. 호출 방향은 배선의 문제이며,
+        같은 그룹이라도 선언이 없으면 거부됩니다 (group neutrality).
+
+        Args:
+            callee: The peer agent name.
+            task: The task to delegate — its trace carries the delegation depth.
+
+        Returns:
+            The peer's result.
+
+        Raises:
+            MalkuthError: A2A/``A2A_004`` if the direction is not declared,
+                ``A2A_005`` if the chain is too deep, ``A2A_002`` if the peer is
+                unreachable, ``A2A_003`` if the peer rejected the task.
+        """
+        # caller 측 방어 — 선언과 깊이를 먼저 본다
+        self.allowlist.check_call(self.agent, callee, task.trace)
+
+        breaker = self._breaker(callee)
+        if not breaker.can_attempt():
+            raise unreachable(self.agent, callee, reason="circuit open")
+
+        token = self.allowlist.token_for(self.agent, callee)
+        # 위임 체인이 이어지도록 trace 를 자식으로 넘긴다 — run 전체가 단일 trace
+        delegated = task.model_copy(update={"trace": task.trace.child(span_id=task.task_id)})
+
+        started = time.monotonic()
+        try:
+            result = await self._send(callee, delegated, token)
+        except MalkuthError as err:
+            # A2A_003 은 peer 가 살아서 "그 태스크는 못 한다" 고 답한 것이다.
+            # 이를 실패로 세면 멀쩡한 peer 가 도달 불가(A2A_002)로 차단된다
+            if err.code != ErrorCode.A2A_003:
+                breaker.record_failure()
+            log.error(
+                "a2a call failed",
+                a2a_caller=self.agent,
+                a2a_callee=callee,
+                a2a_task_id=task.task_id,
+                error_code=err.code,
+                duration_ms=int((time.monotonic() - started) * 1000),
+            )
+            raise
+        except Exception:
+            breaker.record_failure()
+            log.error(
+                "a2a call failed",
+                a2a_caller=self.agent,
+                a2a_callee=callee,
+                a2a_task_id=task.task_id,
+                duration_ms=int((time.monotonic() - started) * 1000),
+            )
+            raise
+
+        breaker.record_success()
+        log.info(
+            "a2a call completed",
+            a2a_caller=self.agent,
+            a2a_callee=callee,
+            a2a_task_id=task.task_id,
+            status=result.status,
+            duration_ms=int((time.monotonic() - started) * 1000),
+        )
+        return result
+
+    async def _send(self, callee: str, task: TaskRequest, token: str) -> TaskResult:
+        """전송 예외를 A2A 코드로 변환한다."""
+        try:
+            result = await asyncio.wait_for(
+                self.transport.send(callee=callee, task=task, token=token, headers={}),
+                timeout=self.timeout_s,
+            )
+        except TimeoutError as err:
+            raise unreachable(
+                self.agent, callee, reason="call timeout", timeout_s=self.timeout_s
+            ) from err
+        except (ConnectionError, OSError) as err:
+            raise unreachable(self.agent, callee, reason=type(err).__name__) from err
+        except Exception as err:
+            raise submit_failed(self.agent, callee, reason=type(err).__name__) from err
+
+        if result.status is TaskStatus.FAILED:
+            raise task_rejected(
+                self.agent, callee, a2a_task_id=task.task_id, peer_error=result.error
+            )
+        return result
+
+
+@dataclass
+class A2AServer:
+    """The callee-side guard for inbound peer calls.
+
+    수신 측 방어. caller 가 자기 이름을 주장하는 것만으로는 부족하므로
+    runtime 이 발급한 per-edge token 을 검증한다.
+    """
+
+    agent: str
+    allowlist: Allowlist
+
+    def authorize(self, caller: str, token: str) -> None:
+        """Verify an inbound call.
+
+        수신 호출을 검증합니다.
+
+        Args:
+            caller: The claimed calling agent.
+            token: The presented per-edge token.
+
+        Raises:
+            MalkuthError: A2A/``A2A_004`` if the direction is undeclared or the
+                token does not match.
+        """
+        self.allowlist.verify(caller, self.agent, token)
+        log.debug("a2a call authorized", a2a_caller=caller, a2a_callee=self.agent)
+
+
+__all__ = [
+    "A2A_INFLIGHT_STATES",
+    "A2A_TERMINAL_STATES",
+    "DEFAULT_CALL_TIMEOUT_S",
+    "A2AClient",
+    "A2AServer",
+    "PeerTransport",
+    "map_status",
+]

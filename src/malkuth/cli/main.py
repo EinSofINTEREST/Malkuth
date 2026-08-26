@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -301,15 +302,23 @@ def _control_clients(args: argparse.Namespace) -> dict[str, Any]:
 
     ``--agent`` 로 받은 주소로 Control API 클라이언트를 만듭니다 —
     CLI 가 컨테이너 포트를 추측하지 않고 호출자가 명시합니다.
+
+    Control API 는 per-agent 토큰을 요구하므로 **토큰도 함께 실어야** 합니다 —
+    빠뜨리면 모든 노드 호출이 401 이 됩니다. ``--agent-token`` 이 우선하고,
+    없으면 ``MALKUTH_AGENT_TOKEN`` 을 봅니다 (compose 와 같은 키).
     """
     from malkuth.runtime.control import ControlClient
+    from malkuth.runtime.tokens import AGENT_TOKEN_ENV
+
+    # 빈 문자열은 미설정과 같게 다룬다 — compose 의 ${VAR:-default} 와 같은 규칙
+    token = getattr(args, "agent_token", None) or os.environ.get(AGENT_TOKEN_ENV) or None
 
     clients: dict[str, Any] = {}
     for entry in args.agent or ():
         name, _, url = entry.partition("=")
         if not name or not url:
             continue
-        clients[name] = ControlClient(url, agent=name)
+        clients[name] = ControlClient(url, agent=name, token=token)
     return clients
 
 
@@ -356,6 +365,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         metavar="NAME=URL",
         help="agent control api address (repeatable)",
+    )
+    run.add_argument(
+        "--agent-token",
+        default=None,
+        dest="agent_token",
+        help="control api token (defaults to $MALKUTH_AGENT_TOKEN)",
     )
     run.set_defaults(handler=cmd_run)
 

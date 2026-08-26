@@ -2,9 +2,9 @@
 
 한국어 | **[English](../en/getting-started.md)**
 
-> **부트스트랩 안내**: Malkuth 는 v0.1.0 이전 부트스트랩 단계입니다 — 룰셋과 문서는
-> 갖춰졌지만 프레임워크 코드는 아직 없습니다. *(planned)* 표시는 구현이 충족할 계약을
-> 설명합니다.
+> **상태**: 프레임워크 레이어가 구현되었고 레퍼런스 솔루션이 전 구간 검증을
+> 통과합니다. *(스택 기동 필요)* 표시된 명령은 배포된 컨테이너를 전제로 하며,
+> 이는 남은 통합 작업입니다.
 
 ## 사전 요구사항
 
@@ -18,7 +18,7 @@
 ```bash
 git clone https://github.com/EinSofINTEREST/Malkuth.git
 cd Malkuth
-uv sync                 # (planned) 고정된 의존성 설치
+uv sync                 # 고정된 의존성 설치
 ```
 
 로컬/CI 공통 품질 게이트:
@@ -97,19 +97,34 @@ spec:
       - {ref: memorysets/domain-knowledge@0.1.0, as: knowledge, mode: rw}
 ```
 
-### 4. 배포와 실행 *(planned)*
+### 4. 배포 전 검증
+
+계약 검증은 기동 전에 수행됩니다 — **8항목 중 하나라도 실패하면 컨테이너를
+기동하지 않습니다**:
 
 ```bash
-malkuth deploy graphs/research-pipeline.yaml   # 계약 검증 → 컨테이너 기동
-malkuth run research-pipeline --input '{"query": "..."}'
-malkuth status                                  # 에이전트 healthy 확인
-malkuth run trace <run_id>                      # node 실행 타임라인
+malkuth validate                                # 저장소의 모든 그래프
+malkuth deploy graphs/research-pipeline.yaml    # 그래프 하나
+malkuth status                                  # 여기 선언된 것
+malkuth config dev                              # 환경별 해석된 설정
 ```
 
-그래프 run 없이도 어느 에이전트든 직접 호출할 수 있습니다:
+`validate` 와 `deploy` 는 검증 실패 시 0이 아닌 코드로 종료하므로 스크립트와
+조합할 수 있습니다. `--json` 을 붙이면 기계 판독 가능한 출력이 나옵니다.
+
+무결성 점검은 기록과 실체를 대조합니다 — 고아 checkpoint, 끊어진 모듈 ref,
+유령 컨테이너:
 
 ```bash
-malkuth agent invoke researcher --input '{"query": "..."}'   # (planned)
+malkuth check observed-state.yaml
+```
+
+### 5. 그래프 실행 *(스택 기동 필요)*
+
+```bash
+malkuth run research-pipeline --input '{"query": "..."}'
+malkuth run trace <run_id>                      # node 타임라인
+malkuth agent invoke researcher --input '{"query": "..."}'   # direct 요청
 ```
 
 ## 다음 단계

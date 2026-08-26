@@ -1,0 +1,19 @@
+apiVersion: malkuth/v1
+kind: Promptset
+metadata:
+  name: echo
+  version: 0.1.0
+  description: 테스트용 echo 에이전트 프롬프트 — 모델을 호출하지 않지만 계약상 필요하다
+
+spec:
+  engine: jinja2
+  default_locale: en
+  templates:
+    system:
+      file: templates/system.j2
+    # echo 이미지는 EchoExecutor 를 쓰므로 렌더 결과가 모델에 가지 않는다.
+    # 그래도 선언은 필요하다 — manifest 의 promptset ref 는 배포 검증 대상이다
+    default:
+      file: templates/default.j2
+      variables:
+        msg: {type: string, required: false}

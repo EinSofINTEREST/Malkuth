@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -346,3 +347,70 @@ async def test_injected_transport_is_not_closed_by_the_client():
 
     assert shared.is_closed is False
     await shared.aclose()
+
+
+# --- cancellation ----------------------------------------------------------
+
+
+async def test_invoke_cancellation_propagates_and_releases_the_request():
+    """취소는 그대로 전파되고 진행 중 요청은 정리돼야 한다."""
+    started = asyncio.Event()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        started.set()
+        await asyncio.sleep(3600)  # 취소될 때까지 매달린다
+        return httpx.Response(200, json={})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as transport:
+        client = ControlClient(BASE_URL, agent="researcher", client=transport)
+        task = asyncio.create_task(client.invoke(make_task()))
+        await started.wait()
+        task.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        # transport 가 정리됐다면 후속 요청이 정상 동작한다
+        assert transport.is_closed is False
+
+
+async def test_stream_cancellation_closes_the_response():
+    """스트림 취소 시 응답 컨텍스트가 닫혀야 한다 — 연결이 새면 안 된다."""
+    entered = asyncio.Event()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        entered.set()
+        await asyncio.sleep(3600)
+        return httpx.Response(200, content=b"")
+
+    async def consume(client: ControlClient) -> None:
+        async for _ in client.stream(make_task()):
+            pass
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as transport:
+        client = ControlClient(BASE_URL, agent="researcher", client=transport)
+        task = asyncio.create_task(consume(client))
+        await entered.wait()
+        task.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+
+async def test_cancellation_is_not_converted_to_a_malkuth_error():
+    """취소를 NET_* 로 감싸면 협조적 종료가 실패로 오인된다."""
+    started = asyncio.Event()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        started.set()
+        await asyncio.sleep(3600)
+        return httpx.Response(200, json={})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as transport:
+        client = ControlClient(BASE_URL, agent="researcher", client=transport)
+        task = asyncio.create_task(client.invoke(make_task()))
+        await started.wait()
+        task.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await task

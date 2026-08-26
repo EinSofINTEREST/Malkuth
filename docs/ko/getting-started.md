@@ -3,8 +3,8 @@
 한국어 | **[English](../en/getting-started.md)**
 
 > **상태**: 프레임워크 레이어가 구현되었고 레퍼런스 솔루션이 전 구간 검증을
-> 통과합니다. *(스택 기동 필요)* 표시된 명령은 배포된 컨테이너를 전제로 하며,
-> 이는 남은 통합 작업입니다.
+> 통과합니다. `malkuth run` 은 에이전트 컨테이너가 떠 있어야 하며,
+> *(미구현)* 표시된 명령은 로드맵에 있습니다.
 
 ## 사전 요구사항
 
@@ -119,13 +119,33 @@ malkuth config dev                              # 환경별 해석된 설정
 malkuth check observed-state.yaml
 ```
 
-### 5. 그래프 실행 *(스택 기동 필요)*
+### 5. 그래프 실행
+
+`run` 은 mission 그래프를 제출하고 END 도달까지 기다립니다. 제출 전에 계약을
+검증하며, 에이전트 주소는 명시적으로 넘깁니다 — CLI 가 컨테이너 포트를
+추측하지 않습니다:
 
 ```bash
-malkuth run research-pipeline --input '{"query": "..."}'
-malkuth run trace <run_id>                      # node 타임라인
-malkuth agent invoke researcher --input '{"query": "..."}'   # direct 요청
+malkuth run graphs/research-pipeline.yaml \
+  --input '{"query": "..."}' \
+  --agent planner=http://127.0.0.1:18082 \
+  --agent researcher=http://127.0.0.1:18083 \
+  --agent writer=http://127.0.0.1:18084
 ```
+
+에이전트는 `make e2e-up` 으로 먼저 띄웁니다 (fake 모델 provider — 실 LLM 미호출).
+
+Direct 요청은 그래프 run 없이 어느 에이전트의 Control API 에나 닿습니다:
+
+```bash
+curl -X POST http://127.0.0.1:18081/v1/invoke \
+  -H 'content-type: application/json' \
+  -d '{"task_id":"t1","run_id":"direct-1","node_id":null,
+       "input":{"msg":"hello"},"trace":{"trace_id":"tr-1"}}'
+```
+
+아직 로드맵에 있는 것 *(미구현)*: `malkuth run trace`, `agent invoke`,
+`agent logs`, `replay`, `memory reindex`.
 
 ## 다음 단계
 

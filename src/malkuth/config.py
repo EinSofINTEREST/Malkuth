@@ -38,7 +38,7 @@ def config_error(message: str, **details: Any) -> MalkuthError:
 class ResourceDefaults(BaseModel):
     """Default container resources."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     cpu: str = "1.0"
     memory: str = "1Gi"
@@ -47,7 +47,7 @@ class ResourceDefaults(BaseModel):
 class HealthCheckConfig(BaseModel):
     """Agent health polling."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     interval_s: float = Field(default=10.0, gt=0)
     timeout_s: float = Field(default=3.0, gt=0)
@@ -64,7 +64,7 @@ class HealthCheckConfig(BaseModel):
 class RuntimeConfig(BaseModel):
     """Agent runtime settings."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     backend: Literal["docker"] = "docker"
     network: str = "malkuth-net"
@@ -83,7 +83,7 @@ class RuntimeConfig(BaseModel):
 class ServiceDefaults(BaseModel):
     """Service run idle policy."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     idle_min_delay_s: float = Field(default=30.0, gt=0)
     idle_max_delay_s: float = Field(default=600.0, gt=0)
@@ -100,7 +100,7 @@ class ServiceDefaults(BaseModel):
 class OrchestratorConfig(BaseModel):
     """Graph orchestration settings."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     checkpointer: Literal["memory", "redis", "postgres"] = "memory"
     max_concurrent_runs: int = Field(default=10, gt=0)
@@ -112,7 +112,7 @@ class OrchestratorConfig(BaseModel):
 class A2AConfig(BaseModel):
     """A2A port allocation."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     port_range: tuple[int, int] = (9100, 9199)
 
@@ -130,7 +130,7 @@ class A2AConfig(BaseModel):
 class McpConfig(BaseModel):
     """MCP startup budget."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     startup_timeout_s: float = Field(default=15.0, gt=0)
 
@@ -138,7 +138,7 @@ class McpConfig(BaseModel):
 class ProtocolsConfig(BaseModel):
     """Protocol layer settings."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     a2a: A2AConfig = Field(default_factory=A2AConfig)
     mcp: McpConfig = Field(default_factory=McpConfig)
@@ -147,7 +147,7 @@ class ProtocolsConfig(BaseModel):
 class RegistryRoots(BaseModel):
     """Module resolution roots — every ref type must be covered."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     skillsets: str = "./modules/skillsets"
     promptsets: str = "./modules/promptsets"
@@ -159,7 +159,7 @@ class RegistryRoots(BaseModel):
 class RegistryConfig(BaseModel):
     """Module registry settings."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     backend: Literal["filesystem"] = "filesystem"
     roots: RegistryRoots = Field(default_factory=RegistryRoots)
@@ -168,7 +168,7 @@ class RegistryConfig(BaseModel):
 class MemoryConfig(BaseModel):
     """Memory service settings."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     backend: Literal["sqlite", "postgres"] = "sqlite"
     index_lag_target_s: float = Field(default=5.0, gt=0)
@@ -178,7 +178,7 @@ class MemoryConfig(BaseModel):
 class ObservabilityConfig(BaseModel):
     """Logging and metrics settings."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     log_format: Literal["pretty", "json"] = "json"
@@ -192,7 +192,7 @@ class MalkuthConfig(BaseModel):
     운영자가 바꾸고 싶은 것만 적는다.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
     orchestrator: OrchestratorConfig = Field(default_factory=OrchestratorConfig)
@@ -225,12 +225,18 @@ def env_overrides(environ: Mapping[str, str] | None = None) -> dict[str, Any]:
     source = os.environ if environ is None else environ
     overrides: dict[str, Any] = {}
 
+    # 깊은 키를 나중에 적용해 얕은 키가 자식을 덮어쓰지 못하게 한다.
+    # 정렬하지 않으면 결과가 dict 순회 순서에 좌우돼 비결정적이 된다
+    paths: list[tuple[list[str], str]] = []
     for key, value in source.items():
         if not key.startswith(ENV_PREFIX):
             continue
         path = key[len(ENV_PREFIX) :].lower().split(NESTED_SEPARATOR)
         if not all(path):
             continue
+        paths.append((path, value))
+
+    for path, value in sorted(paths, key=lambda item: len(item[0])):
         cursor = overrides
         for part in path[:-1]:
             existing = cursor.get(part)
@@ -238,7 +244,11 @@ def env_overrides(environ: Mapping[str, str] | None = None) -> dict[str, Any]:
                 existing = {}
                 cursor[part] = existing
             cursor = existing
-        cursor[path[-1]] = _coerce(value)
+        leaf = path[-1]
+        # 이미 하위 키가 채워졌으면 스칼라로 덮어쓰지 않는다
+        if isinstance(cursor.get(leaf), dict):
+            continue
+        cursor[leaf] = _coerce(value)
 
     return overrides
 

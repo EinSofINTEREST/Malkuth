@@ -256,11 +256,38 @@ def test_invalid_override_still_fails_validation(tmp_path):
     assert exc_info.value.code == "CFG_001"
 
 
-def test_scalar_over_mapping_override_replaces_cleanly():
-    """중간 경로가 스칼라였어도 하위 키를 만들 수 있어야 한다."""
-    overrides = env_overrides({f"{ENV_PREFIX}RUNTIME": "x", f"{ENV_PREFIX}RUNTIME__NETWORK": "net"})
+@pytest.mark.parametrize(
+    "environ",
+    [
+        {f"{ENV_PREFIX}RUNTIME": "x", f"{ENV_PREFIX}RUNTIME__NETWORK": "net"},
+        {f"{ENV_PREFIX}RUNTIME__NETWORK": "net", f"{ENV_PREFIX}RUNTIME": "x"},
+    ],
+    ids=["parent-first", "child-first"],
+)
+def test_deep_key_wins_regardless_of_iteration_order(environ):
+    """순회 순서에 좌우되면 같은 환경에서 결과가 달라진다."""
+    assert env_overrides(environ) == {"runtime": {"network": "net"}}
 
-    assert overrides == {"runtime": {"network": "net"}}
+
+def test_unknown_config_key_is_rejected(tmp_path):
+    """오타를 조용히 무시하면 운영자는 설정이 반영된 줄 안다."""
+    directory = write(tmp_path, "runtime:\n  netwrok: typo-net\n")
+
+    with pytest.raises(MalkuthError) as exc_info:
+        load_config("dev", config_dir=directory, environ={})
+
+    assert exc_info.value.code == "CFG_001"
+    assert any("netwrok" in e["field"] for e in exc_info.value.details["errors"])
+
+
+def test_unknown_env_override_key_is_rejected(tmp_path):
+    """환경변수 오타도 마찬가지로 잡혀야 한다."""
+    directory = write(tmp_path, "")
+
+    with pytest.raises(MalkuthError) as exc_info:
+        load_config("dev", config_dir=directory, environ={f"{ENV_PREFIX}RUNTIME__NETWROK": "typo"})
+
+    assert exc_info.value.code == "CFG_001"
 
 
 # --- merge --------------------------------------------------------------------

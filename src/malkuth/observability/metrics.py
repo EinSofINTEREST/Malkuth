@@ -190,6 +190,21 @@ class Metrics:
         """
         return self._metrics[name]
 
+    def gauge(self, name: str) -> Gauge:
+        """Look up a gauge by name.
+
+        게이지를 이름으로 조회합니다 — ``__getitem__`` 은 union 을 돌려주므로
+        ``.set()`` 을 쓰는 호출부가 매번 캐스팅해야 합니다.
+
+        Raises:
+            KeyError: If the metric is not part of the standard contract.
+            TypeError: If the metric exists but is not a gauge.
+        """
+        metric = self._metrics[name]
+        if not isinstance(metric, Gauge):
+            raise TypeError(f"metric is not a gauge: {name}")
+        return metric
+
     def names(self) -> frozenset[str]:
         """등록된 메트릭 이름 집합."""
         return frozenset(self._metrics)

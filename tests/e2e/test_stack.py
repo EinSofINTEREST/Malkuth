@@ -46,12 +46,16 @@ def docker(*args: str, check: bool = True, timeout: int = 600) -> str:
 def docker_available() -> bool:
     if DOCKER_BIN is None:
         return False
-    return (
-        subprocess.run(  # noqa: S603
-            [DOCKER_BIN, "info"], capture_output=True, check=False
-        ).returncode
-        == 0
-    )
+    try:
+        # timeout 이 없으면 응답 없는 daemon 에 무한 대기해 수집 자체가 멈춘다
+        return (
+            subprocess.run(  # noqa: S603
+                [DOCKER_BIN, "info"], capture_output=True, check=False, timeout=15
+            ).returncode
+            == 0
+        )
+    except subprocess.TimeoutExpired:
+        return False
 
 
 requires_docker = pytest.mark.skipif(not docker_available(), reason="docker daemon unavailable")
@@ -110,12 +114,19 @@ def test_stack_becomes_healthy(stack):
 
 @requires_docker
 def test_fake_provider_is_healthy(stack):
-    """모델은 결정적 fake — 실 LLM 을 호출하지 않는다."""
+    """모델은 결정적 fake — 실 LLM 을 호출하지 않는다.
+
+    `assert state` 처럼 출력 존재만 확인하면 컨테이너가 죽어 있어도 통과한다.
+    실제 health state 를 파싱한다.
+    """
     assert wait_healthy(ECHO_URL)
 
-    state = docker("compose", "-f", str(COMPOSE_FILE), "ps", "--format", "json", "fake-provider")
+    raw = docker("compose", "-f", str(COMPOSE_FILE), "ps", "--format", "json", "fake-provider")
+    # compose 버전에 따라 JSON 객체 하나 또는 줄 단위 스트림으로 나온다
+    entries = [json.loads(line) for line in raw.splitlines() if line.strip()]
 
-    assert state
+    assert entries, "fake-provider is not running"
+    assert any("healthy" in str(entry.get("Health", "")).lower() for entry in entries)
 
 
 @requires_docker

@@ -29,7 +29,12 @@ services:
     read_only: true
     user: "1000:1000"
     cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
     pids_limit: 64
+    # read_only rootfs 에서도 파이썬이 임시 파일을 쓸 수 있어야 한다
+    tmpfs:
+      - /tmp:size=16m
 
   agent-echo:
     <<: *agent-defaults

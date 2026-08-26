@@ -15,8 +15,12 @@ say "1/3 declared contracts validate"
 # entry point 가 없으면 모듈 경로로 떨어진다
 if command -v malkuth >/dev/null 2>&1; then
   malkuth --root "$ROOT" validate
-else
+elif command -v uv >/dev/null 2>&1; then
   uv run python -m malkuth.cli.main --root "$ROOT" validate
+else
+  # uv 도 없으면 현재 인터프리터로 — CLI 미설치 환경을 가정하면서
+  # uv 를 전제하는 것은 모순이다
+  python3 -m malkuth.cli.main --root "$ROOT" validate
 fi
 
 say "2/3 agent reports healthy"

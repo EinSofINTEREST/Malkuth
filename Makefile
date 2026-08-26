@@ -1,4 +1,5 @@
-.PHONY: help install lint fmt typecheck test test-integration test-e2e check build up down clean
+.PHONY: help install lint fmt typecheck test test-integration test-e2e check build up down \
+	e2e-up e2e-down clean
 
 UV ?= uv
 RUN := $(UV) run

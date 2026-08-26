@@ -7,6 +7,7 @@
 from malkuth.observability.logging import (
     REDACTED,
     STANDARD_FIELDS,
+    TRUNCATED,
     LogField,
     bind_a2a,
     bind_agent,
@@ -31,6 +32,7 @@ __all__ = [
     "DEFAULT_METRICS_PORT",
     "METRIC_SPECS",
     "REDACTED",
+    "TRUNCATED",
     "STANDARD_FIELDS",
     "LogField",
     "MetricSpec",

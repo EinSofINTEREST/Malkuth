@@ -12,6 +12,7 @@ import structlog
 from malkuth.observability.logging import (
     REDACTED,
     STANDARD_FIELDS,
+    TRUNCATED,
     LogField,
     bind_a2a,
     bind_agent,
@@ -24,7 +25,8 @@ from malkuth.observability.logging import (
     mask_secrets,
 )
 
-RULES_DOC = Path(".claude/rules/05-error-handling.md")
+REPO_ROOT = Path(__file__).resolve().parents[3]
+RULES_DOC = REPO_ROOT / ".claude" / "rules" / "05-error-handling.md"
 
 SECRET = "super-secret-value"  # noqa: S105 - 마스킹 검증용 리터럴
 
@@ -141,13 +143,19 @@ def test_masking_survives_json_rendering():
 
 
 def test_masking_does_not_recurse_forever():
-    """자기 참조 구조에서도 멈춘다 — 로깅이 프로세스를 죽이면 안 된다."""
+    """자기 참조 구조에서도 멈춘다 — 로깅이 프로세스를 죽이면 안 된다.
+
+    깊이 상한에서 원본을 그대로 돌려주면 순환 참조가 살아남아 JSON 렌더링이
+    ``Circular reference detected`` 로 죽는다. 마스킹만이 아니라 **렌더까지**
+    통과하는지 확인해야 이 경로가 실제로 막힌다.
+    """
     cyclic: dict = {"token": SECRET}
     cyclic["self"] = cyclic
 
     masked = apply_mask(dict(cyclic))
 
     assert masked["token"] == REDACTED
+    assert json.dumps(masked)  # 순환 참조가 남아 있으면 ValueError 로 실패한다
 
 
 # --- 렌더링 파이프라인 ------------------------------------------------------
@@ -373,3 +381,46 @@ def test_secret_inside_list_of_strings_is_masked():
 
     assert SECRET not in masked["lines"][0]
     assert masked["lines"][1] == "ok"
+
+
+def test_cyclic_structure_renders_through_the_logger(capsys):
+    """순환 참조가 섞여도 로거가 죽지 않아야 한다."""
+    configure(level="INFO", json_output=True)
+    cyclic: dict = {"token": SECRET}
+    cyclic["self"] = cyclic
+
+    get_logger("test").info("cyclic payload", payload=cyclic)
+
+    out = capsys.readouterr().out
+    assert SECRET not in out
+    assert json.loads(out)["event"] == "cyclic payload"
+
+
+def test_deeply_nested_structure_is_truncated_not_dropped():
+    """상한 너머는 자리표시자로 대체된다 — 원본을 흘리지 않는다."""
+    deep: dict = {"v": "leaf"}
+    for _ in range(12):
+        deep = {"nested": deep}
+
+    masked = apply_mask(deep)
+
+    assert TRUNCATED in json.dumps(masked)
+
+
+@pytest.mark.parametrize("level", ["TRACE", "verbose", ""])
+def test_unknown_log_level_reports_the_valid_choices(level):
+    """오타난 레벨이 KeyError 로 새어나가면 원인을 알기 어렵다."""
+    with pytest.raises(ValueError, match="unknown log level"):
+        configure(level=level)
+
+
+def test_known_levels_are_accepted():
+    for level in ("DEBUG", "info", "Warning", "ERROR", "CRITICAL"):
+        configure(level=level)
+
+
+def test_rules_doc_is_found_regardless_of_cwd(tmp_path, monkeypatch):
+    """테스트 실행 디렉터리가 바뀌어도 룰셋을 찾아야 한다."""
+    monkeypatch.chdir(tmp_path)
+
+    assert documented_fields() == STANDARD_FIELDS

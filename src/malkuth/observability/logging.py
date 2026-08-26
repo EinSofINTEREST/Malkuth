@@ -21,6 +21,7 @@ if TYPE_CHECKING:
 DEFAULT_LOG_LEVEL = "INFO"
 
 REDACTED: Final = "***"
+TRUNCATED: Final = "<truncated>"
 
 
 class LogField:
@@ -117,9 +118,14 @@ def _redact_text(text: str) -> str:
 
 
 def _redact(value: Any, depth: int = 0) -> Any:
-    """중첩 구조를 따라가며 secret 키의 값을 가린다."""
+    """중첩 구조를 따라가며 secret 키의 값을 가린다.
+
+    깊이 상한에 닿으면 원본이 아니라 **자리표시자 문자열**을 돌려준다 —
+    원본을 그대로 넘기면 순환 참조가 살아남아 JSON 렌더링이
+    ``Circular reference detected`` 로 죽는다 (로그 한 줄이 프로세스를 죽인다).
+    """
     if depth >= _MAX_REDACT_DEPTH:
-        return value
+        return TRUNCATED
     if isinstance(value, str):
         return _redact_text(value)
     if isinstance(value, dict):
@@ -171,6 +177,11 @@ def configure(
         json_output: JSON renderer for production; pretty console when False.
         extra_processors: Processors inserted before rendering.
     """
+    levels = logging.getLevelNamesMapping()
+    resolved_level = levels.get(level.upper())
+    if resolved_level is None:
+        raise ValueError(f"unknown log level: {level!r} (expected one of {sorted(levels)})")
+
     renderer: Any = (
         structlog.processors.JSONRenderer()
         if json_output
@@ -191,9 +202,7 @@ def configure(
 
     structlog.configure(
         processors=processors,
-        wrapper_class=structlog.make_filtering_bound_logger(
-            logging.getLevelNamesMapping()[level.upper()]
-        ),
+        wrapper_class=structlog.make_filtering_bound_logger(resolved_level),
         logger_factory=structlog.PrintLoggerFactory(),
         cache_logger_on_first_use=True,
     )

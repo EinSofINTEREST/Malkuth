@@ -11,6 +11,6 @@ spec:
 
   memory:
     spaces:
-      - ref: memorysets/domain-knowledge@0.1.0
+      - ref: memorysets/org-facts@0.1.0
         as: org
         # writers 미지정 = 전 에이전트 read-only. 전사 지식은 아무나 쓰면 오염된다

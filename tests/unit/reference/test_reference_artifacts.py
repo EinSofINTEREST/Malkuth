@@ -105,15 +105,22 @@ def test_promptset_has_a_default_template(registry, agent):
     assert "default" in promptset.manifest.spec.templates
 
 
-def test_promptset_templates_cover_the_graph_node_ids(registry):
-    """agentd 가 task.node_id 로 템플릿을 고른다 — 없으면 노드 실행이 실패한다."""
-    loader = PromptsetLoader(registry)
-    topology = topology_of("research-pipeline")
+@pytest.mark.parametrize("graph", GRAPHS)
+def test_promptset_templates_cover_the_graph_node_ids(registry, graph):
+    """agentd 가 task.node_id 로 템플릿을 고른다 — 없으면 노드 실행이 MOD_004 로 실패한다.
 
-    for node in topology.spec.nodes:
+    **모든** 그래프를 검사한다: 하나만 보면 나머지의 불일치가 통과한다.
+    """
+    loader = PromptsetLoader(registry)
+
+    for node in topology_of(graph).spec.nodes:
+        if node.agent is None:
+            continue
         agent = node.agent.split("/")[1].split("@")[0]
         promptset = loader.load(f"promptsets/{agent}@0.1.0")
-        assert node.id in promptset.manifest.spec.templates
+        assert node.id in promptset.manifest.spec.templates, (
+            f"{graph}: node '{node.id}' has no template in promptsets/{agent}"
+        )
 
 
 def test_promptset_render_is_stable(registry):
@@ -317,3 +324,37 @@ def test_reverse_direction_is_not_declared():
 
     assert ("researcher", "planner") in declared
     assert ("planner", "researcher") not in declared
+
+
+# --- memoryset 부착 스코프 ------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("group_file", "expected"),
+    [("groups/global.yaml", MemoryScope.GLOBAL), ("groups/research.yaml", MemoryScope.GROUP)],
+)
+def test_group_memory_attachment_matches_the_declared_scope(registry, group_file, expected):
+    """memoryset 의 spec.scope 와 부착 위치가 어긋나면 배포 검증이 MOD_003 으로 막는다."""
+    loader = MemorysetLoader(registry)
+    document = load_yaml(group_file)
+
+    for space in document["spec"]["memory"]["spaces"]:
+        assert loader.load(space["ref"]).scope is expected
+
+
+@pytest.mark.parametrize("agent", AGENTS)
+def test_agent_memory_attachment_is_local_scope(registry, agent):
+    """manifest 부착은 local scope 만 허용된다."""
+    loader = MemorysetLoader(registry)
+
+    for space in manifest_of(agent).spec.memory.spaces:
+        assert loader.load(space.ref).scope is MemoryScope.LOCAL
+
+
+@pytest.mark.parametrize("graph", GRAPHS)
+def test_graph_memory_attachment_is_run_scope(registry, graph):
+    """그래프 부착은 run scope 만 허용된다."""
+    loader = MemorysetLoader(registry)
+
+    for space in topology_of(graph).spec.memory.spaces:
+        assert loader.load(space.ref).scope is MemoryScope.RUN

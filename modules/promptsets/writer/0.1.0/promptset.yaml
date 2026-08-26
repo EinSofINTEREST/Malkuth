@@ -15,6 +15,14 @@ spec:
       file: templates/writer.j2
       variables:
         findings: {type: string, required: true}
+    notifier:
+      file: templates/notifier.j2
+      variables:
+        new_items: {type: string, required: true}
+    compactor:
+      file: templates/compactor.j2
+      variables:
+        pending_spaces: {type: string, required: true}
     default:
       file: templates/default.j2
       variables:

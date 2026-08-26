@@ -18,6 +18,14 @@ spec:
         query: {type: string, required: true}
         depth: {type: integer, default: 2}
     # direct 요청은 node_id 가 없어 default 를 쓴다 — 없으면 단독 호출이 불가능하다
+    classifier:
+      file: templates/classifier.j2
+      variables:
+        new_items: {type: string, required: true}
+    scanner:
+      file: templates/scanner.j2
+      variables:
+        spaces: {type: string, required: true}
     default:
       file: templates/default.j2
       variables:

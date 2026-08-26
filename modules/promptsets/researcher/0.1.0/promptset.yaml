@@ -15,6 +15,10 @@ spec:
       file: templates/researcher.j2
       variables:
         plan: {type: string, required: true}
+    watcher:
+      file: templates/watcher.j2
+      variables:
+        feeds: {type: string, required: true}
     default:
       file: templates/default.j2
       variables:

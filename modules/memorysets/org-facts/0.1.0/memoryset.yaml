@@ -1,0 +1,35 @@
+apiVersion: malkuth/v1
+kind: Memoryset
+metadata:
+  name: org-facts
+  version: 0.1.0
+  description: 전사 공통 지식 — 전 에이전트 read, 지정된 writer 만 write
+
+spec:
+  scope: global
+
+  index:
+    embedding:
+      provider: openai-compatible
+      model: text-embedding-3-small
+      dimensions: 1536
+    chunk:
+      max_tokens: 500
+      overlap_tokens: 50
+    hybrid:
+      vector_weight: 0.5
+      lexical_weight: 0.5
+
+  retention:
+    ttl_days: 1095
+    compaction:
+      trigger_entries: 20000
+      strategy: summarize
+      keep_kinds: [fact, summary]
+
+  recall:
+    # 전역 지식은 문턱을 가장 높게 — 노이즈가 전 에이전트에게 퍼진다
+    auto: true
+    k: 3
+    min_score: 0.5
+    budget_tokens: 1000

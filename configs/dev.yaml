@@ -1,0 +1,47 @@
+# 개발 환경 — 로컬 Docker, in-memory checkpoint, 사람이 읽는 로그
+runtime:
+  backend: docker
+  network: malkuth-net
+  agent_base_image: malkuth/agent-base:0.1.0
+  default_resources:
+    cpu: "1.0"
+    memory: 1Gi
+  health_check:
+    interval_s: 10          # agentd /health 폴링 주기
+    timeout_s: 3
+    unhealthy_threshold: 3
+
+orchestrator:
+  checkpointer: memory
+  max_concurrent_runs: 10
+  max_service_runs: 5       # 상주 run 은 슬롯을 오래 점유하므로 별도 상한
+  node_timeout_s: 300
+  service_defaults:
+    idle_min_delay_s: 30
+    idle_max_delay_s: 600
+    max_failure_streak: 5
+
+protocols:
+  a2a:
+    port_range: [9100, 9199]
+  mcp:
+    startup_timeout_s: 15
+
+registry:
+  backend: filesystem
+  roots:
+    skillsets: ./modules/skillsets
+    promptsets: ./modules/promptsets
+    memorysets: ./modules/memorysets
+    agents: ./agents
+    graphs: ./graphs
+
+memory:
+  backend: sqlite
+  index_lag_target_s: 5
+  run_scope_retention_days: 30
+
+observability:
+  log_level: DEBUG
+  log_format: pretty
+  metrics_port: 9090

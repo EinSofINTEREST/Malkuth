@@ -1,0 +1,16 @@
+# 빌드 컨텍스트 최소화 — .venv 가 이미지에 섞이면 호스트 경로가 박힌 채로 실려 나간다
+.git
+.github
+.venv
+.claude
+htmlcov
+dist
+docs
+tests
+deployments/monitoring
+**/__pycache__
+**/*.pyc
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.coverage

@@ -1,0 +1,36 @@
+# 개발 스택 — 에이전트 컨테이너의 격리 계약을 로컬에서 그대로 재현한다.
+#
+# 운영 배포용이 아니다. 실제 에이전트 기동은 runtime layer 가 Docker API 로
+# 수행하며, 여기서는 base image 와 네트워크가 계약대로 동작하는지 확인한다.
+name: malkuth
+
+services:
+  agent-echo:
+    image: malkuth/agent-echo:0.1.0
+    build:
+      context: ../..
+      dockerfile: deployments/docker/agent-echo.Dockerfile
+    networks: [malkuth-net]
+    ports:
+      # 개발 편의를 위한 control port 노출 — 운영에서는 runtime 만 접근한다
+      - "18080:8080"
+    read_only: true
+    user: "1000:1000"
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    tmpfs:
+      - /tmp:size=64m
+      - /workspace:size=64m
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+
+networks:
+  # 전용 bridge — 에이전트는 이 네트워크에만 붙는다. host 네트워크 모드 금지
+  malkuth-net:
+    name: malkuth-net
+    driver: bridge

@@ -37,21 +37,18 @@ test-e2e: ## 전체 스택 E2E 테스트 (nightly)
 check: lint typecheck test ## 머지 전 로컬 전체 검증
 
 DOCKER_DIR := deployments/docker
+# latest 태그 배포 금지 — 이미지 태그는 semver (02 Base Image 2)
+IMAGE_TAG ?= 0.1.0
 
-build: ## 에이전트 base image 빌드
-	@test -f $(DOCKER_DIR)/agent-base.Dockerfile \
-		|| { echo "missing $(DOCKER_DIR)/agent-base.Dockerfile — agent base image is not implemented yet"; exit 1; }
-	docker build -t malkuth/agent-base:0.1.0 -f $(DOCKER_DIR)/agent-base.Dockerfile .
+build: ## 에이전트 base image + 테스트 echo image 빌드
+	docker build -t malkuth/agent-base:$(IMAGE_TAG) -f $(DOCKER_DIR)/agent-base.Dockerfile .
+	docker build -t malkuth/agent-echo:$(IMAGE_TAG) -f $(DOCKER_DIR)/agent-echo.Dockerfile .
 
 up: ## 개발 스택 기동
-	@test -f $(DOCKER_DIR)/compose.yaml \
-		|| { echo "missing $(DOCKER_DIR)/compose.yaml — dev stack is not implemented yet"; exit 1; }
 	docker compose -f $(DOCKER_DIR)/compose.yaml up -d
 
 down: ## 개발 스택 정지
-	@test -f $(DOCKER_DIR)/compose.yaml \
-		|| { echo "missing $(DOCKER_DIR)/compose.yaml — dev stack is not implemented yet"; exit 1; }
-	docker compose -f $(DOCKER_DIR)/compose.yaml down
+	docker compose -f $(DOCKER_DIR)/compose.yaml down -v
 
 clean: ## 빌드/캐시 산출물 정리
 	rm -rf .pytest_cache .mypy_cache .ruff_cache .coverage htmlcov dist

@@ -320,3 +320,23 @@ def test_logs_do_not_pollute_stdout(workspace, capsys):
     captured = capsys.readouterr()
     payload = json.loads(captured.out)
     assert payload["status"] == "failed"
+
+
+def test_package_entry_point_runs_without_warnings():
+    """`python -m malkuth.cli` 가 runpy 이중 import 경고를 내지 않아야 한다.
+
+    CLI 가 설치되지 않은 환경(smoke.sh fallback)에서 그 경고가 그대로 노출된다.
+    """
+    import subprocess
+    import sys
+
+    result = subprocess.run(  # noqa: S603
+        [sys.executable, "-W", "error::RuntimeWarning", "-m", "malkuth.cli", "status"],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=REPO_ROOT,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "RuntimeWarning" not in result.stderr

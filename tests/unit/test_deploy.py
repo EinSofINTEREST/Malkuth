@@ -18,6 +18,16 @@ from tests.fixtures.builders import make_manifest
 from tests.fixtures.topologies import mission_dict
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+# 이 테스트가 읽는 파일 전부 — 하나만 확인하면 나머지 부재 시 skip 대신
+# FileNotFoundError 로 실패한다
+REFERENCE_FILES = (
+    *(f"agents/{name}/manifest.yaml" for name in ("planner", "researcher", "writer")),
+    *(
+        f"graphs/{name}.yaml"
+        for name in ("research-pipeline", "feed-monitor", "memory-maintenance")
+    ),
+    "groups/research.yaml",
+)
 REFS = frozenset({"promptsets/test@0.1.0"})
 
 
@@ -411,7 +421,7 @@ def test_raise_if_failed_is_silent_when_valid():
 
 
 @pytest.mark.skipif(
-    not (REPO_ROOT / "graphs" / "research-pipeline.yaml").exists(),
+    not all((REPO_ROOT / relative).exists() for relative in REFERENCE_FILES),
     reason="reference artifacts are not present on this branch",
 )
 def test_reference_deployment_passes_every_check():
@@ -448,3 +458,36 @@ def test_reference_deployment_passes_every_check():
     )
 
     assert report.ok, [f"{f.check}: {f.message}" for f in report.findings]
+
+
+def test_unaffiliated_agent_cannot_use_global_group_secrets():
+    """미소속 에이전트를 예약 그룹 멤버로 취급하면 배포 검증만 통과하고
+    기동에서 CFG_002 로 실패한다 — 런타임 해석과 어긋나면 안 된다."""
+    manifests = {"solo": agent("solo", runtime={"env_allowlist": ["GROUP_ONLY_KEY"]})}
+    reserved = group("global", secrets=["GROUP_ONLY_KEY"])
+
+    report = run([], manifests=manifests, groups={"global": reserved})
+
+    assert "env_allowlist" in report.checks()
+
+
+def test_deploy_validation_agrees_with_runtime_resolution():
+    """같은 manifest 를 두 경로가 다르게 판정하면 검증의 의미가 없다."""
+    from malkuth.runtime.scope import ScopedSecrets
+
+    manifest = agent("solo", runtime={"env_allowlist": ["GROUP_ONLY_KEY"]})
+    reserved = group("global", secrets=["GROUP_ONLY_KEY"])
+
+    report = run([], manifests={"solo": manifest}, groups={"global": reserved})
+    scoped = ScopedSecrets.for_agent(
+        manifest, groups={"global": reserved}, group_values={"GROUP_ONLY_KEY": "v"}
+    )
+
+    assert not report.ok
+    with pytest.raises(MalkuthError):
+        scoped.resolve("GROUP_ONLY_KEY")
+
+
+def test_reference_guard_lists_every_file_the_test_reads():
+    """가드가 일부만 확인하면 나머지 부재 시 skip 대신 FileNotFoundError 로 실패한다."""
+    assert len(REFERENCE_FILES) == 7

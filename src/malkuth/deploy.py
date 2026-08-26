@@ -235,7 +235,13 @@ class DeployValidator:
         findings = []
         for name, manifest in self.manifests.items():
             local = self.local_secrets.get(name, frozenset())
-            group = self.groups.get(manifest.group)
+            # metadata.group 을 쓴다 — manifest.group 은 미선언 시 예약 그룹
+            # 'global' 로 기본값 처리되므로, 그걸 쓰면 미소속 에이전트가
+            # groups['global'] 의 secrets 로 통과한다. 런타임 해석
+            # (ScopedSecrets.for_agent) 은 미소속을 어떤 그룹 멤버로도 보지
+            # 않으므로 배포 검증만 통과하고 기동에서 CFG_002 로 실패한다
+            declared_group = manifest.metadata.group
+            group = self.groups.get(declared_group) if declared_group else None
             group_keys = frozenset(group.spec.secrets) if group else frozenset()
 
             for key in manifest.spec.runtime.env_allowlist:
@@ -246,7 +252,7 @@ class DeployValidator:
                         check="env_allowlist",
                         code=ErrorCode.CFG_002,
                         message=f"env key cannot be resolved in any scope: {key}",
-                        details={"agent": name, "env_key": key, "group": manifest.group},
+                        details={"agent": name, "env_key": key, "group": declared_group},
                     )
                 )
         return findings

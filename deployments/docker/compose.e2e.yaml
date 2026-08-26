@@ -1,0 +1,56 @@
+# E2E 스택 — 전체 경로를 실제 컨테이너로 검증한다.
+#
+# 모델은 결정적 fake provider 를 쓴다 (06 Testing 3): 실 LLM 은 비결정적이고
+# 비용이 들며, CI 에서 API key 부재로 실패해야 정상이다.
+name: malkuth-e2e
+
+x-agent-defaults: &agent-defaults
+  read_only: true
+  user: "1000:1000"
+  cap_drop: [ALL]
+  security_opt:
+    - no-new-privileges:true
+  pids_limit: 256
+  tmpfs:
+    - /tmp:size=64m
+    - /workspace:size=64m
+  networks: [malkuth-e2e-net]
+  depends_on:
+    fake-provider:
+      condition: service_healthy
+
+services:
+  fake-provider:
+    image: malkuth/fake-provider:${IMAGE_TAG:-0.1.0}
+    build:
+      context: ../..
+      dockerfile: deployments/docker/fake-provider.Dockerfile
+    networks: [malkuth-e2e-net]
+    read_only: true
+    user: "1000:1000"
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    # read_only rootfs 에서도 파이썬이 임시 파일을 쓸 수 있어야 한다
+    tmpfs:
+      - /tmp:size=16m
+
+  agent-echo:
+    <<: *agent-defaults
+    image: malkuth/agent-echo:${IMAGE_TAG:-0.1.0}
+    build:
+      context: ../..
+      dockerfile: deployments/docker/agent-echo.Dockerfile
+      args:
+        BASE_TAG: ${IMAGE_TAG:-0.1.0}
+    ports:
+      - "18081:8080"
+    environment:
+      # E2E 는 모델 비결정성을 배제한다 — echo 대역으로 프로토콜 경로만 검증
+      MALKUTH_EXECUTOR: echo
+
+networks:
+  malkuth-e2e-net:
+    name: malkuth-e2e-net
+    driver: bridge

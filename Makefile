@@ -1,4 +1,5 @@
-.PHONY: help install lint fmt typecheck test test-integration test-e2e check build up down clean
+.PHONY: help install lint fmt typecheck test test-integration test-e2e check build up down \
+	e2e-up e2e-down clean
 
 UV ?= uv
 RUN := $(UV) run
@@ -33,6 +34,12 @@ test-integration: ## Docker 기반 통합 테스트
 test-e2e: ## 전체 스택 E2E 테스트 (nightly)
 	@$(RUN) pytest tests/e2e -m e2e --no-cov; \
 		status=$$?; [ $$status -eq 0 ] || [ $$status -eq 5 ]
+
+e2e-up: ## E2E 스택 기동 (fake provider + 에이전트)
+	IMAGE_TAG=$(IMAGE_TAG) docker compose -f $(DOCKER_DIR)/compose.e2e.yaml up -d --build
+
+e2e-down: ## E2E 스택 정지
+	IMAGE_TAG=$(IMAGE_TAG) docker compose -f $(DOCKER_DIR)/compose.e2e.yaml down -v
 
 check: lint typecheck test ## 머지 전 로컬 전체 검증
 

@@ -57,3 +57,25 @@ Coverage: a **single enforced gate** — ≥ 70% across `src/malkuth`, enforced 
 `make test` via pytest-cov `--cov-fail-under=70`. The 90%+ (critical paths) and 100%
 (error-conversion paths) figures are review targets, not separate CI gates.
 Check names and merge-gate wiring: [ci/status-checks.md](ci/status-checks.md).
+
+## Known Limitations
+
+What the suite does **not** prove, so nobody mistakes green for complete:
+
+- **No real model is ever called.** Unit tests use `FakeModel`, E2E uses a
+  deterministic fake provider container. Behaviour that only appears with a real
+  provider — token limits, streaming quirks, provider-side rate limiting — is not
+  covered here.
+- **No real embedding API.** Memory tests use `HashEmbedder`, which is deterministic
+  but does not model semantic similarity. Recall *ranking quality* is therefore not
+  measured; only the merge, threshold, and budget mechanics are.
+- **Protocol SDKs are behind Protocols.** MCP and A2A tests exercise our contracts and
+  error conversion, not the `mcp` / `a2a-sdk` bindings themselves. Integration tests
+  spawn a reference server process, which crosses a real process boundary but is not
+  the official SDK.
+- **Docker-dependent tests skip without a daemon.** Integration and E2E tests report
+  as skipped on machines without Docker. A green local run is not evidence that the
+  container paths work — check the CI job.
+- **Graph runs are not driven end to end yet.** E2E covers direct requests against a
+  live agent; mission and service runs over the orchestrator require the run-submission
+  path, which is not wired to the CLI yet.

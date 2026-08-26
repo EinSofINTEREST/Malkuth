@@ -15,13 +15,17 @@ import structlog
 
 from malkuth.core.agent import TaskStatus
 from malkuth.core.errors import CircuitBreaker, ErrorCategory, ErrorCode, MalkuthError
+from malkuth.observability.circuit import CircuitTelemetry
 from malkuth.protocols.a2a.errors import submit_failed, task_rejected, unreachable
+from malkuth.protocols.telemetry import STATUS_COMPLETED, STATUS_FAILED
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from malkuth.core.agent import TaskRequest, TaskResult
+    from malkuth.observability.metrics import Metrics
     from malkuth.protocols.a2a.allowlist import Allowlist
+    from malkuth.protocols.telemetry import A2aTelemetry
 
 DEFAULT_CALL_TIMEOUT_S = 120.0
 
@@ -90,6 +94,8 @@ class A2AClient:
     transport: PeerTransport
     timeout_s: float = DEFAULT_CALL_TIMEOUT_S
     breakers: dict[str, CircuitBreaker] = field(default_factory=dict)
+    telemetry: A2aTelemetry | None = None
+    metrics: Metrics | None = None
 
     def peers(self) -> tuple[str, ...]:
         """Peers this agent may call.
@@ -101,10 +107,13 @@ class A2AClient:
     def _breaker(self, callee: str) -> CircuitBreaker:
         """peer 별 circuit breaker — 죽은 peer 를 계속 두드리지 않는다."""
         if callee not in self.breakers:
+            target = f"a2a:{callee}"
+            observer = CircuitTelemetry(self.metrics, target=target) if self.metrics else None
             self.breakers[callee] = CircuitBreaker(
-                target=f"a2a:{callee}",
+                target=target,
                 open_category=ErrorCategory.A2A,
                 open_code=ErrorCode.A2A_002,
+                on_transition=observer.observe if observer else None,
             )
         return self.breakers[callee]
 
@@ -126,11 +135,17 @@ class A2AClient:
                 ``A2A_005`` if the chain is too deep, ``A2A_002`` if the peer is
                 unreachable, ``A2A_003`` if the peer rejected the task.
         """
-        # caller 측 방어 — 선언과 깊이를 먼저 본다
-        self.allowlist.check_call(self.agent, callee, task.trace)
+        # caller 측 방어 — 선언과 깊이를 먼저 본다.
+        # 거부도 호출 시도다: 카운터에서 빼면 allowlist 위반이 관측되지 않는다
+        try:
+            self.allowlist.check_call(self.agent, callee, task.trace)
+        except MalkuthError:
+            self._record(callee, status=STATUS_FAILED)
+            raise
 
         breaker = self._breaker(callee)
         if not breaker.can_attempt():
+            self._record(callee, status=STATUS_FAILED)
             raise unreachable(self.agent, callee, reason="circuit open")
 
         token = self.allowlist.token_for(self.agent, callee)
@@ -153,6 +168,7 @@ class A2AClient:
                 error_code=err.code,
                 duration_ms=int((time.monotonic() - started) * 1000),
             )
+            self._record(callee, status=STATUS_FAILED)
             raise
         except Exception:
             breaker.record_failure()
@@ -163,6 +179,7 @@ class A2AClient:
                 a2a_task_id=task.task_id,
                 duration_ms=int((time.monotonic() - started) * 1000),
             )
+            self._record(callee, status=STATUS_FAILED)
             raise
 
         breaker.record_success()
@@ -174,7 +191,13 @@ class A2AClient:
             status=result.status,
             duration_ms=int((time.monotonic() - started) * 1000),
         )
+        self._record(callee, status=STATUS_COMPLETED)
         return result
+
+    def _record(self, callee: str, *, status: str) -> None:
+        """peer 호출을 메트릭에 남긴다 — telemetry 미주입 시 무동작."""
+        if self.telemetry is not None:
+            self.telemetry.call_finished(callee=callee, status=status)
 
     async def _send(self, callee: str, task: TaskRequest, token: str) -> TaskResult:
         """전송 예외를 A2A 코드로 변환한다."""

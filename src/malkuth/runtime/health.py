@@ -15,6 +15,7 @@ import structlog
 
 from malkuth.core.agent import HealthState
 from malkuth.core.errors import CircuitBreaker, ErrorCategory, ErrorCode
+from malkuth.observability.circuit import CircuitTelemetry
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -65,10 +66,13 @@ class HealthMonitor:
 
     def __post_init__(self) -> None:
         if self.breaker is None:
+            target = f"control:{self.agent}"
+            observer = CircuitTelemetry(self.metrics, target=target) if self.metrics else None
             self.breaker = CircuitBreaker(
-                target=f"control:{self.agent}",
+                target=target,
                 open_category=ErrorCategory.RUNTIME,
                 open_code=ErrorCode.RT_002,
+                on_transition=observer.observe if observer else None,
             )
 
     async def check_once(self) -> AgentState:

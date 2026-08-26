@@ -14,6 +14,7 @@ import structlog
 
 from malkuth.core.agent import ComponentHealth, HealthState
 from malkuth.core.errors import CircuitBreaker, ErrorCategory, ErrorCode, MalkuthError
+from malkuth.observability.circuit import CircuitTelemetry
 from malkuth.protocols.mcp.errors import (
     startup_failed,
     tool_failed,
@@ -25,6 +26,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
 
     from malkuth.core.manifest import McpServerSpec
+    from malkuth.observability.metrics import Metrics
 
 DEFAULT_STARTUP_TIMEOUT_S = 15.0
 DEFAULT_TOOL_TIMEOUT_S = 60.0
@@ -110,16 +112,20 @@ class McpSession:
     max_reconnects: int = DEFAULT_MAX_RECONNECTS
     sleep: Callable[[float], Any] = _sleep
     breaker: CircuitBreaker | None = None
+    metrics: Metrics | None = None
 
     _connection: Connection | None = field(default=None, init=False)
     _reconnect_failures: int = field(default=0, init=False)
 
     def __post_init__(self) -> None:
         if self.breaker is None:
+            target = f"mcp:{self.spec.name}"
+            observer = CircuitTelemetry(self.metrics, target=target) if self.metrics else None
             self.breaker = CircuitBreaker(
-                target=f"mcp:{self.spec.name}",
+                target=target,
                 open_category=ErrorCategory.MCP,
                 open_code=ErrorCode.MCP_004,
+                on_transition=observer.observe if observer else None,
             )
 
     @property

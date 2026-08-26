@@ -9,9 +9,25 @@ from malkuth.runtime.control import (
     ControlClient,
     control_url,
 )
+from malkuth.runtime.quota import (
+    ResourceTotals,
+    check_group_quota,
+    check_host_capacity,
+    demand_of,
+    total_demand,
+)
+from malkuth.runtime.scope import ResolvedSecret, ScopedSecrets, SecretScope
 
 __all__ = [
     "DEFAULT_CONTROL_PORT",
     "ControlClient",
+    "ResolvedSecret",
+    "ResourceTotals",
+    "ScopedSecrets",
+    "SecretScope",
+    "check_group_quota",
+    "check_host_capacity",
     "control_url",
+    "demand_of",
+    "total_demand",
 ]

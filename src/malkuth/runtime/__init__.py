@@ -4,6 +4,11 @@
 오케스트레이터에게는 에이전트를 async callable 로 노출한다.
 """
 
+from malkuth.runtime.control import (
+    DEFAULT_CONTROL_PORT,
+    ControlClient,
+    control_url,
+)
 from malkuth.runtime.quota import (
     ResourceTotals,
     check_group_quota,
@@ -14,12 +19,15 @@ from malkuth.runtime.quota import (
 from malkuth.runtime.scope import ResolvedSecret, ScopedSecrets, SecretScope
 
 __all__ = [
+    "DEFAULT_CONTROL_PORT",
+    "ControlClient",
     "ResolvedSecret",
     "ResourceTotals",
     "ScopedSecrets",
     "SecretScope",
     "check_group_quota",
     "check_host_capacity",
+    "control_url",
     "demand_of",
     "total_demand",
 ]

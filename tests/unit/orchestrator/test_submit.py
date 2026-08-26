@@ -321,3 +321,21 @@ async def test_reserved_channels_survive_pre_validation():
     await submitter(runtime).submit(make_mission(), {"query": "q"}, run_id="rid-kept")
 
     assert all(run_id == "rid-kept" for _, run_id, _ in runtime.tasks)
+
+
+async def test_mode_violation_wins_over_state_problems():
+    """service 그래프에 state 문제가 겹치면 진짜 원인(mode 위반)이 가려진다.
+
+    운영자는 "state 를 채우면 되겠구나" 로 오해하고 시간을 버린다.
+    """
+    from malkuth.orchestrator.topology import GraphTopology
+    from tests.fixtures.topologies import service_dict
+
+    topology = GraphTopology.model_validate(
+        service_dict(state={"schema": "malkuth.graphs.schemas:ResearchState"})
+    )
+
+    with pytest.raises(MalkuthError) as exc_info:
+        await submitter().submit(topology, {})
+
+    assert exc_info.value.code == "GRAPH_001"

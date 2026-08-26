@@ -122,8 +122,8 @@ class RunSubmitter:
             MalkuthError: GRAPH/``GRAPH_001`` when a service graph is submitted
                 here — 상주 그래프는 완주 개념이 없으므로 ``resume`` 로 이어갑니다.
         """
-        self._reject_invalid_state(topology, initial_state)
-
+        # mode 검사가 먼저다 — service 그래프에 state 문제까지 겹치면
+        # GRAPH_003 이 앞서 나와 운영자가 진짜 원인(mode 위반)을 놓친다
         if topology.spec.mode is not GraphMode.MISSION:
             raise MalkuthError(
                 category=ErrorCategory.GRAPH,
@@ -131,6 +131,8 @@ class RunSubmitter:
                 message="only mission graphs can be submitted for completion",
                 details={"graph": topology.metadata.name, "mode": str(topology.spec.mode)},
             )
+
+        self._reject_invalid_state(topology, initial_state)
 
         handle = self.manager.acquire(topology, run_id=run_id or f"run-{uuid4().hex[:12]}")
         return await self._drive(topology, handle, initial_state)
@@ -150,13 +152,15 @@ class RunSubmitter:
         예약 채널(``_run_id``/``_trace_id``)이 빠져 있어, 그걸 쓰면 추적 정보가
         사라집니다.
 
+        호출 순서상 **mode 검사 이후**입니다 — service 그래프에 state 문제가
+        겹치면 진짜 원인(mode 위반)이 가려집니다.
+
         Raises:
             MalkuthError: GRAPH/``GRAPH_003`` if the state fails the schema.
         """
-        schema = resolve_state_schema(topology.spec.state.schema_ref)
-        if schema is None:
-            return
-        validate_state(schema, dict(initial_state))
+        # resolve_state_schema 는 실패 시 예외를 던지고 성공 시 항상 모델을
+        # 준다 — None 분기를 두면 "schema 가 없을 수도 있다" 는 잘못된 신호가 된다
+        validate_state(resolve_state_schema(topology.spec.state.schema_ref), dict(initial_state))
 
     async def resume(
         self, topology: GraphTopology, run_id: str, initial_state: Mapping[str, Any] | None = None

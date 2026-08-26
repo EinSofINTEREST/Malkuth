@@ -336,7 +336,10 @@ def test_package_entry_point_runs_without_warnings():
         text=True,
         check=False,
         cwd=REPO_ROOT,
+        # timeout 이 없으면 status 의 회귀나 I/O 대기가 테스트 실행 전체를 멈춘다
+        timeout=60,
     )
 
+    # -W error::RuntimeWarning 이 경고를 예외로 승격하므로 종료 코드가 곧 판정이다.
+    # 문자열 매칭을 더하면 새로운 경고 종류를 놓치는 검사로 되돌아간다
     assert result.returncode == 0, result.stderr
-    assert "RuntimeWarning" not in result.stderr

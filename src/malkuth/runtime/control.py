@@ -95,7 +95,7 @@ class ControlClient:
 
         Args:
             task: The task to run.
-            timeout_s: Per-call timeout; falls back to the client default.
+            timeout_s: Per-call timeout; falls back to ``task.config.timeout_s``.
 
         Returns:
             The task result.

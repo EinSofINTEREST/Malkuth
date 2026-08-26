@@ -7,6 +7,8 @@
 from __future__ import annotations
 
 import json
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 import httpx
 import pytest
@@ -20,15 +22,17 @@ from tests.fixtures.builders import make_task
 BASE_URL = "http://agent-researcher:8080"
 
 
-def client_with(handler, *, token: str | None = "agent-token") -> ControlClient:
-    """MockTransport 로 응답을 스크립트한 클라이언트."""
-    transport = httpx.MockTransport(handler)
-    return ControlClient(
-        BASE_URL,
-        agent="researcher",
-        token=token,
-        client=httpx.AsyncClient(transport=transport),
-    )
+@asynccontextmanager
+async def client_with(
+    handler, *, token: str | None = "agent-token"
+) -> AsyncIterator[ControlClient]:
+    """MockTransport 로 응답을 스크립트한 클라이언트.
+
+    ControlClient 는 주입받은 transport 를 닫지 않으므로, 여기서 소유권을 갖고
+    정리한다 — 그러지 않으면 테스트마다 AsyncClient 가 샌다.
+    """
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as transport:
+        yield ControlClient(BASE_URL, agent="researcher", token=token, client=transport)
 
 
 def json_response(payload: dict, status: int = 200):
@@ -59,12 +63,8 @@ async def test_base_url_trailing_slash_is_normalized():
         captured.append(str(request.url))
         return httpx.Response(200, content=b"")
 
-    client = ControlClient(
-        f"{BASE_URL}/",
-        agent="researcher",
-        client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
-    )
-    async with client:
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as transport:
+        client = ControlClient(f"{BASE_URL}/", agent="researcher", client=transport)
         await client.drain()
 
     assert captured == [f"{BASE_URL}/v1/drain"]

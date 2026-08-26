@@ -56,22 +56,47 @@ def state_fields(schema: type[BaseModel]) -> frozenset[str]:
     return frozenset(schema.model_fields)
 
 
-def extract_input(node: NodeSpec, state: dict[str, Any]) -> dict[str, Any]:
+def schema_defaults(schema: type[BaseModel] | None) -> dict[str, Any]:
+    """Collect the schema's declared default values.
+
+    state schema 가 선언한 기본값을 모읍니다 — LangGraph 채널은 값이 설정되기
+    전까지 키를 만들지 않으므로, 기본값이 있는 필드도 state dict 에는 없습니다.
+    """
+    if schema is None:
+        return {}
+    return {
+        name: field.get_default(call_default_factory=True)
+        for name, field in schema.model_fields.items()
+        if not field.is_required()
+    }
+
+
+def extract_input(
+    node: NodeSpec, state: dict[str, Any], *, schema: type[BaseModel] | None = None
+) -> dict[str, Any]:
     """Build a task input mapping from graph state.
 
     ``input_map`` 선언에 따라 state 에서 태스크 입력을 추출합니다.
     ``state.<field>`` 형식만 state 를 참조하며, 그 외 값은 리터럴로 취급합니다.
 
+    ``schema`` 를 주면 **선언된 기본값을 사용**합니다. LangGraph 채널은 값이
+    설정되기 전까지 키를 만들지 않으므로, 기본값이 있는 필드를 읽는 노드가
+    첫 실행에서 ``GRAPH_003`` 으로 막히는 것을 방지합니다 — 04 규칙은
+    "``input_map`` 의 키가 **schema 에 존재**" 만 요구합니다.
+
     Args:
         node: The node whose ``input_map`` drives extraction.
         state: Current graph state.
+        schema: State schema supplying declared defaults.
 
     Returns:
         The task input mapping.
 
     Raises:
-        MalkuthError: GRAPH/``GRAPH_003`` if a referenced field is absent from state.
+        MalkuthError: GRAPH/``GRAPH_003`` if a referenced field is absent from
+            state and the schema declares no default for it.
     """
+    defaults = schema_defaults(schema)
     extracted: dict[str, Any] = {}
     for key, source in node.input_map.items():
         # state 참조는 문자열 `state.<path>` 뿐 — 숫자/불리언/리스트 등은 리터럴
@@ -79,16 +104,28 @@ def extract_input(node: NodeSpec, state: dict[str, Any]) -> dict[str, Any]:
             extracted[key] = source
             continue
         path = source.removeprefix(_STATE_PREFIX)
-        extracted[key] = _read_path(state, path, node_id=node.id, source=source)
+        extracted[key] = _read_path(state, path, node_id=node.id, source=source, defaults=defaults)
     return extracted
 
 
-def _read_path(state: dict[str, Any], path: str, *, node_id: str, source: str) -> Any:
-    """점 표기 경로로 state 값을 읽는다."""
+def _read_path(
+    state: dict[str, Any],
+    path: str,
+    *,
+    node_id: str,
+    source: str,
+    defaults: dict[str, Any] | None = None,
+) -> Any:
+    """점 표기 경로로 state 값을 읽는다 — 없으면 schema 기본값으로 떨어진다."""
+    parts = path.split(".")
     current: Any = state
-    for part in path.split("."):
+    for index, part in enumerate(parts):
         if isinstance(current, dict) and part in current:
             current = current[part]
+            continue
+        # 최상위 필드이고 schema 가 기본값을 선언했으면 그것을 쓴다
+        if index == 0 and defaults is not None and part in defaults:
+            current = defaults[part]
             continue
         raise _state_error(
             f"state field not found: {source}",

@@ -10,6 +10,7 @@ from malkuth.orchestrator.state import (
     extract_input,
     merge_output,
     resolve_state_schema,
+    schema_defaults,
     state_fields,
     validate_state,
 )
@@ -185,3 +186,80 @@ def test_extract_input_passes_non_string_literals_through():
     node = make_node(input_map={"depth": 2, "verbose": True, "tags": ["a"]})
 
     assert extract_input(node, {}) == {"depth": 2, "verbose": True, "tags": ["a"]}
+
+
+# --- schema 기본값 (검증과 런타임의 기준 일치) ---------------------------------
+
+
+def test_schema_default_is_used_when_state_lacks_the_key():
+    """LangGraph 채널은 값이 설정되기 전까지 키를 만들지 않는다.
+
+    04 규칙은 input_map 이 "schema 에 존재" 하기만 하면 통과시키므로, 런타임이
+    기본값을 무시하면 검증은 통과하고 실행만 실패한다.
+    """
+    node = NodeSpec.model_validate(
+        {"id": "writer", "agent": "agents/writer@0.1.0", "input_map": {"plan": "state.plan"}}
+    )
+
+    extracted = extract_input(node, {"query": "q"}, schema=ResearchState)
+
+    assert extracted == {"plan": None}
+
+
+def test_schema_default_factory_is_evaluated():
+    """default_factory 필드도 채워져야 한다 — 리스트/딕트가 흔하다."""
+    node = NodeSpec.model_validate(
+        {
+            "id": "writer",
+            "agent": "agents/writer@0.1.0",
+            "input_map": {"findings": "state.findings"},
+        }
+    )
+
+    extracted = extract_input(node, {"query": "q"}, schema=ResearchState)
+
+    assert extracted == {"findings": []}
+
+
+def test_state_value_wins_over_the_schema_default():
+    """실제 값이 있으면 기본값으로 덮어쓰지 않는다."""
+    node = NodeSpec.model_validate(
+        {"id": "writer", "agent": "agents/writer@0.1.0", "input_map": {"plan": "state.plan"}}
+    )
+
+    extracted = extract_input(node, {"plan": "실제 계획"}, schema=ResearchState)
+
+    assert extracted == {"plan": "실제 계획"}
+
+
+def test_required_field_without_a_value_still_fails():
+    """기본값이 없는 필수 필드는 여전히 GRAPH_003 이어야 한다 —
+    없는 값을 조용히 만들어내면 노드가 빈 입력으로 실행된다."""
+    node = NodeSpec.model_validate(
+        {"id": "planner", "agent": "agents/planner@0.1.0", "input_map": {"query": "state.query"}}
+    )
+
+    with pytest.raises(MalkuthError) as exc_info:
+        extract_input(node, {}, schema=ResearchState)
+
+    assert exc_info.value.code == "GRAPH_003"
+
+
+def test_missing_field_without_a_schema_still_fails():
+    """schema 를 주지 않으면 기존 동작(엄격)을 유지한다."""
+    node = NodeSpec.model_validate(
+        {"id": "writer", "agent": "agents/writer@0.1.0", "input_map": {"plan": "state.plan"}}
+    )
+
+    with pytest.raises(MalkuthError) as exc_info:
+        extract_input(node, {})
+
+    assert exc_info.value.code == "GRAPH_003"
+
+
+def test_schema_defaults_lists_only_optional_fields():
+    defaults = schema_defaults(ResearchState)
+
+    assert "query" not in defaults  # 필수 필드
+    assert defaults["plan"] is None
+    assert defaults["findings"] == []

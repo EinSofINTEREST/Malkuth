@@ -24,6 +24,7 @@ from malkuth.orchestrator.state import (
     extract_input,
     merge_output,
     resolve_state_schema,
+    schema_defaults,
     state_fields,
     validate_state,
 )
@@ -72,6 +73,7 @@ __all__ = [
     "build_checkpointer",
     "build_graph",
     "extract_input",
+    "schema_defaults",
     "guarded_restore",
     "guarded_save",
     "merge_output",

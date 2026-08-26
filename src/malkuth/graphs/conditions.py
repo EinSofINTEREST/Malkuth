@@ -27,3 +27,13 @@ def has_new_items(state: dict[str, Any]) -> bool:
 def idle(state: dict[str, Any]) -> bool:
     """처리할 작업이 없는지 — service 그래프의 idle 분기 조건."""
     return not has_new_items(state)
+
+
+def needs_compaction(state: dict[str, Any]) -> bool:
+    """compaction 이 필요한 space 가 남아있는지 — 유지보수 그래프의 분기 조건."""
+    return bool(state.get("pending_spaces"))
+
+
+def maintenance_idle(state: dict[str, Any]) -> bool:
+    """압축할 space 가 없는지 — ``needs_compaction`` 의 여집합."""
+    return not needs_compaction(state)

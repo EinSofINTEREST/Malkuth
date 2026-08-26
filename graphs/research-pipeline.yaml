@@ -1,0 +1,51 @@
+apiVersion: malkuth/v1
+kind: Graph
+metadata:
+  name: research-pipeline
+  version: 1.0.0
+  description: 질의 → 계획 → 리서치 → 작성 파이프라인
+
+spec:
+  mode: mission
+  goal: 질의를 받아 계획 → 리서치 → 보고서 작성을 완료한다
+
+  state:
+    schema: malkuth.graphs.schemas:ResearchState
+    checkpointer: default
+
+  memory:
+    spaces:
+      - ref: memorysets/run-scratch@0.1.0
+        as: scratch
+
+  nodes:
+    - id: planner
+      agent: agents/planner@0.1.0
+      input_map: {query: state.query}
+      output_map: {plan: output.plan, needs_research: output.needs_research}
+
+    - id: researcher
+      agent: agents/researcher@0.1.0
+      input_map: {plan: state.plan}
+      output_map: {findings: output.findings}
+
+    - id: writer
+      agent: agents/writer@0.1.0
+      input_map: {findings: state.findings}
+      output_map: {report: output.report}
+
+  edges:
+    - {from: START, to: planner}
+    - from: planner
+      to: researcher
+      condition: malkuth.graphs.conditions:needs_research
+    - from: planner
+      to: END
+      condition: malkuth.graphs.conditions:plan_only
+    - {from: researcher, to: writer}
+    - {from: writer, to: END}
+
+  connections:
+    # researcher 가 실행 중 계획을 되물을 수 있다. 역방향은 선언하지 않았으므로
+    # planner → researcher 호출은 A2A_004 로 거부된다
+    - {caller: researcher, callee: planner}

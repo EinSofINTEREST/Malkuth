@@ -1,0 +1,21 @@
+apiVersion: malkuth/v1
+kind: Promptset
+metadata:
+  name: researcher
+  version: 0.1.0
+  description: 계획을 근거 수집으로 옮기는 에이전트 프롬프트
+
+spec:
+  engine: jinja2
+  default_locale: en
+  templates:
+    system:
+      file: templates/system.j2
+    researcher:
+      file: templates/researcher.j2
+      variables:
+        plan: {type: string, required: true}
+    default:
+      file: templates/default.j2
+      variables:
+        query: {type: string, required: true}

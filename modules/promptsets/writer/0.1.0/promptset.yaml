@@ -1,0 +1,21 @@
+apiVersion: malkuth/v1
+kind: Promptset
+metadata:
+  name: writer
+  version: 0.1.0
+  description: 수집된 근거를 보고서로 정리하는 에이전트 프롬프트
+
+spec:
+  engine: jinja2
+  default_locale: en
+  templates:
+    system:
+      file: templates/system.j2
+    writer:
+      file: templates/writer.j2
+      variables:
+        findings: {type: string, required: true}
+    default:
+      file: templates/default.j2
+      variables:
+        query: {type: string, required: true}

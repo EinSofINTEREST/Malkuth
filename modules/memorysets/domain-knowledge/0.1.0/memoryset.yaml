@@ -1,0 +1,34 @@
+apiVersion: malkuth/v1
+kind: Memoryset
+metadata:
+  name: domain-knowledge
+  version: 0.1.0
+  description: 그룹 공용 도메인 지식 베이스
+
+spec:
+  scope: group
+
+  index:
+    embedding:
+      provider: openai-compatible
+      model: text-embedding-3-small
+      dimensions: 1536
+    chunk:
+      max_tokens: 500
+      overlap_tokens: 50
+    hybrid:
+      vector_weight: 0.5
+      lexical_weight: 0.5   # 도메인 식별자 매칭 비중이 높다
+
+  retention:
+    ttl_days: 730
+    compaction:
+      trigger_entries: 10000
+      strategy: summarize
+      keep_kinds: [fact, summary]
+
+  recall:
+    auto: true
+    k: 5
+    min_score: 0.45   # 공용 지식은 관련성 문턱을 높게 — 노이즈가 전 멤버에게 퍼진다
+    budget_tokens: 1500

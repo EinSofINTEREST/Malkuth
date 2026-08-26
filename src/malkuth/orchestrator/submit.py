@@ -59,6 +59,28 @@ def _thread_config(run_id: str) -> dict[str, Any]:
     return {"configurable": {"thread_id": run_id}}
 
 
+def seed_state(
+    initial_state: Mapping[str, Any], *, run_id: str, trace_id: str | None = None
+) -> dict[str, Any]:
+    """Inject the reserved run channels into the initial state.
+
+    예약 채널(``_run_id`` / ``_trace_id``)을 초기 state 에 주입합니다.
+
+    이걸 빠뜨리면 각 노드 태스크가 ``run-unknown`` 으로 실행되어, 슬롯이 쥔
+    실제 run_id 와 로그·trace 가 어긋납니다 — run_id 하나로 전 계층 로그를
+    잇는다는 05 의 추적 전제가 깨집니다.
+
+    Args:
+        initial_state: The caller's starting state.
+        run_id: The run this graph execution belongs to.
+        trace_id: Distributed trace id; defaults to the run id.
+
+    Returns:
+        The state with reserved channels populated.
+    """
+    return {**dict(initial_state), "_run_id": run_id, "_trace_id": trace_id or run_id}
+
+
 @dataclass
 class RunSubmitter:
     """Submits graph runs and tracks their slots.
@@ -150,7 +172,10 @@ class RunSubmitter:
         outcome = RunStatus.FAILED
 
         try:
-            final = await graph.ainvoke(dict(initial_state), config=_thread_config(handle.run_id))
+            final = await graph.ainvoke(
+                seed_state(initial_state, run_id=handle.run_id),
+                config=_thread_config(handle.run_id),
+            )
         except MalkuthError as err:
             bound.error("graph run failed", error_code=err.code, mode=str(topology.spec.mode))
             return RunResult(
@@ -177,4 +202,4 @@ class RunSubmitter:
             self.manager.release(handle.run_id, outcome)
 
 
-__all__ = ["DEFAULT_NODE_TIMEOUT_S", "RunResult", "RunSubmitter"]
+__all__ = ["DEFAULT_NODE_TIMEOUT_S", "RunResult", "RunSubmitter", "seed_state"]

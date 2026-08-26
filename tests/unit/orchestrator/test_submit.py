@@ -12,7 +12,7 @@ from malkuth.core.agent import TaskResult
 from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
 from malkuth.orchestrator.checkpoint import build_checkpointer
 from malkuth.orchestrator.run import RunStatus
-from malkuth.orchestrator.submit import RunSubmitter
+from malkuth.orchestrator.submit import RunSubmitter, seed_state
 from malkuth.orchestrator.topology import GraphMode
 from tests.fixtures.topologies import make_mission, make_service
 
@@ -27,6 +27,17 @@ class ScriptedRuntime:
     async def invoke(self, node, task):
         self.invoked.append(node.id)
         return TaskResult.completed(task, output=self._outputs.get(node.id, {}))
+
+
+class RecordingRuntime:
+    """노드가 받은 태스크의 추적 정보를 기록하는 런타임 대역."""
+
+    def __init__(self) -> None:
+        self.tasks: list[tuple[str, str, str]] = []
+
+    async def invoke(self, node, task):
+        self.tasks.append((node.id, task.run_id, task.trace.trace_id))
+        return TaskResult.completed(task, output={})
 
 
 class FailingRuntime:
@@ -204,3 +215,48 @@ async def test_resuming_a_tracked_run_is_rejected():
         await submit.resume(make_mission(), "run-live")
 
     assert exc_info.value.code == "VAL_002"
+
+
+# --- run 추적 정보 전파 ---------------------------------------------------------
+
+
+async def test_nodes_receive_the_actual_run_id():
+    """예약 채널을 주입하지 않으면 노드 태스크가 run-unknown 으로 실행되어,
+    run_id 하나로 전 계층 로그를 잇는다는 05 의 추적 전제가 깨진다."""
+    runtime = RecordingRuntime()
+
+    result = await submitter(runtime).submit(make_mission(), {"query": "q"}, run_id="run-actual")
+
+    assert runtime.tasks
+    assert all(run_id == result.run_id for _, run_id, _ in runtime.tasks)
+
+
+async def test_nodes_receive_a_trace_id():
+    runtime = RecordingRuntime()
+
+    await submitter(runtime).submit(make_mission(), {"query": "q"}, run_id="run-traced")
+
+    assert all(trace_id == "run-traced" for _, _, trace_id in runtime.tasks)
+
+
+def test_seed_state_populates_the_reserved_channels():
+    seeded = seed_state({"query": "q"}, run_id="run-1")
+
+    assert seeded["_run_id"] == "run-1"
+    assert seeded["_trace_id"] == "run-1"
+    assert seeded["query"] == "q"
+
+
+def test_seed_state_accepts_a_distinct_trace_id():
+    """A2A 로 이어지는 trace 는 run 과 다른 id 를 가질 수 있다."""
+    seeded = seed_state({}, run_id="run-1", trace_id="trace-9")
+
+    assert seeded["_trace_id"] == "trace-9"
+
+
+def test_seed_state_does_not_mutate_the_caller_state():
+    original = {"query": "q"}
+
+    seed_state(original, run_id="run-1")
+
+    assert original == {"query": "q"}

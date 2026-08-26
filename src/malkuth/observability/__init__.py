@@ -18,11 +18,23 @@ from malkuth.observability.logging import (
     get_logger,
     mask_secrets,
 )
+from malkuth.observability.metrics import (
+    DEFAULT_METRICS_PORT,
+    METRIC_SPECS,
+    Metrics,
+    MetricSpec,
+    snapshot,
+    start_metrics_server,
+)
 
 __all__ = [
+    "DEFAULT_METRICS_PORT",
+    "METRIC_SPECS",
     "REDACTED",
     "STANDARD_FIELDS",
     "LogField",
+    "MetricSpec",
+    "Metrics",
     "bind_a2a",
     "bind_agent",
     "bind_mcp",
@@ -32,4 +44,6 @@ __all__ = [
     "configure",
     "get_logger",
     "mask_secrets",
+    "snapshot",
+    "start_metrics_server",
 ]

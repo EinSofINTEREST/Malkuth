@@ -18,7 +18,7 @@ from malkuth.orchestrator.run import (
     RunStatus,
     ServiceRunner,
 )
-from malkuth.orchestrator.topology import GraphMode
+from malkuth.orchestrator.topology import GraphMode, NodeSpec
 from tests.fixtures.topologies import make_mission, make_service
 
 
@@ -497,14 +497,14 @@ async def test_halt_records_the_failed_iteration_index():
 
 
 class EchoRuntime:
-    """노드를 빈 출력으로 완료시키는 runtime 대역."""
+    """노드를 빈 출력으로 완료시키는 runtime 대역 (``NodeRuntime`` 계약)."""
 
     def __init__(self) -> None:
         self.invoked: list[str] = []
 
-    async def invoke(self, agent: str, request: TaskRequest) -> TaskResult:
-        self.invoked.append(agent)
-        return TaskResult.completed(request, output={})
+    async def invoke(self, node: NodeSpec, task: TaskRequest) -> TaskResult:
+        self.invoked.append(node.id)
+        return TaskResult.completed(task, output={})
 
 
 async def test_service_runner_iterates_a_real_compiled_graph():
@@ -525,4 +525,5 @@ async def test_service_runner_iterates_a_real_compiled_graph():
 
     assert handle.iteration == 3
     assert handle.status is RunStatus.STOPPED
-    assert runtime.invoked, "그래프가 노드를 한 번도 호출하지 않았다"
+    # 빈 state 로 시작하면 idle 분기를 타 watcher 만 돈다 — iteration 마다 한 번씩
+    assert runtime.invoked == ["watcher", "watcher", "watcher"]

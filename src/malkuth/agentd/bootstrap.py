@@ -7,7 +7,7 @@ agentd 기동 시퀀스 (03 MCP Startup Sequence). 순서를 지키는 것 자�
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from malkuth.core.agent import ComponentHealth, HealthState, HealthStatus
 from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
@@ -24,6 +24,7 @@ MCP_STARTUP_TIMEOUT_S = 15.0
 MCP_TOOL_PREFIX = "mcp__"
 
 
+@runtime_checkable
 class McpLauncher(Protocol):
     """Starts one MCP server and reports its tools.
 

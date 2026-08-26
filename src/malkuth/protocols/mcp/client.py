@@ -1,0 +1,166 @@
+"""Per-agent MCP client — owns every session this agent declares.
+
+에이전트 하나가 소유하는 MCP 세션 전부를 관리한다. 다른 에이전트와 세션을
+공유하지 않는다 — 격리 경계가 곧 권한 경계다 (03 Core Principle).
+"""
+
+from __future__ import annotations
+
+import time
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
+
+import structlog
+
+from malkuth.protocols.mcp.errors import unknown_tool
+from malkuth.protocols.mcp.session import (
+    DEFAULT_STARTUP_TIMEOUT_S,
+    McpSession,
+    ToolResult,
+)
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
+
+    from malkuth.core.agent import ComponentHealth
+    from malkuth.core.manifest import McpServerSpec
+    from malkuth.protocols.mcp.transport import TransportSelector
+
+MCP_TOOL_PREFIX = "mcp__"
+
+log = structlog.get_logger(__name__)
+
+
+def split_namespaced(name: str) -> tuple[str, str] | None:
+    """Split a namespaced MCP tool name into server and tool.
+
+    ``mcp__{server}__{tool}`` 를 서버와 tool 로 나눕니다. 형식이 아니면 None —
+    skillset tool 과 구분하는 판별에도 씁니다.
+
+    Args:
+        name: The possibly namespaced tool name.
+
+    Returns:
+        ``(server, tool)`` or None if the name is not an MCP tool.
+    """
+    if not name.startswith(MCP_TOOL_PREFIX):
+        return None
+    remainder = name[len(MCP_TOOL_PREFIX) :]
+    server, separator, tool = remainder.partition("__")
+    if not separator or not server or not tool:
+        return None
+    return server, tool
+
+
+@dataclass
+class McpClient:
+    """The MCP sessions belonging to one agent.
+
+    에이전트 하나의 MCP 세션 모음. ``agentd`` 의 ``McpLauncher`` 계약을 구현해
+    기동 시퀀스에 물린다.
+    """
+
+    agent: str
+    transports: TransportSelector
+    sessions: dict[str, McpSession] = field(default_factory=dict)
+
+    async def start(
+        self, spec: McpServerSpec, *, timeout_s: float = DEFAULT_STARTUP_TIMEOUT_S
+    ) -> Sequence[str]:
+        """Start one declared server and report its tools.
+
+        선언된 서버 하나를 기동하고 tool 목록을 보고합니다 —
+        ``agentd.bootstrap.McpLauncher`` 계약입니다.
+
+        Args:
+            spec: The server declaration.
+            timeout_s: Per-server startup budget.
+
+        Returns:
+            The bound tool names after ``allowed_tools`` filtering.
+
+        Raises:
+            MalkuthError: MCP/``MCP_001`` if the server fails to initialize.
+        """
+        session = McpSession(
+            spec=spec,
+            transport=self.transports.for_spec(spec),
+            agent=self.agent,
+            startup_timeout_s=timeout_s,
+        )
+        tools = await session.initialize()
+        self.sessions[spec.name] = session
+        return tools
+
+    async def call_tool(self, name: str, arguments: Mapping[str, Any]) -> ToolResult:
+        """Call a namespaced MCP tool.
+
+        네임스페이스가 붙은 MCP tool 을 호출합니다. 반환 내용은
+        **신뢰하지 않는 입력**입니다 (03 Security 6).
+
+        Args:
+            name: Namespaced name, ``mcp__{server}__{tool}``.
+            arguments: Tool arguments.
+
+        Returns:
+            The tool result.
+
+        Raises:
+            MalkuthError: MCP/``MCP_002`` if the name does not resolve to a
+                bound tool on a live session.
+        """
+        parts = split_namespaced(name)
+        if parts is None:
+            raise unknown_tool(self.agent, "unknown", name)
+        server, tool = parts
+
+        session = self.sessions.get(server)
+        if session is None:
+            raise unknown_tool(self.agent, server, tool)
+
+        started = time.monotonic()
+        try:
+            result = await session.call_tool(tool, arguments)
+        except Exception:
+            log.error(
+                "mcp tool call failed",
+                agent=self.agent,
+                mcp_server=server,
+                tool=tool,
+                duration_ms=int((time.monotonic() - started) * 1000),
+            )
+            raise
+
+        log.info(
+            "mcp tool call completed",
+            agent=self.agent,
+            mcp_server=server,
+            tool=tool,
+            duration_ms=int((time.monotonic() - started) * 1000),
+        )
+        return result
+
+    def tools(self) -> dict[str, str]:
+        """바인딩된 tool 전체 — 네임스페이스 이름에서 소유 서버로."""
+        return {
+            f"{MCP_TOOL_PREFIX}{name}__{tool}": name
+            for name, session in self.sessions.items()
+            for tool in session.tools
+        }
+
+    def health(self) -> dict[str, ComponentHealth]:
+        """세션별 상태 — health 종합에 그대로 실린다."""
+        return {f"mcp:{name}": session.health() for name, session in self.sessions.items()}
+
+    async def shutdown(self) -> None:
+        """모든 세션을 정리한다 — 하나가 실패해도 나머지를 계속 정리한다."""
+        for session in self.sessions.values():
+            await session.shutdown()
+        self.sessions.clear()
+
+
+__all__ = [
+    "MCP_TOOL_PREFIX",
+    "McpClient",
+    "split_namespaced",
+]

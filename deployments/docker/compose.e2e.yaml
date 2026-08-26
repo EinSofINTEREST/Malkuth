@@ -50,6 +50,32 @@ services:
       # E2E 는 모델 비결정성을 배제한다 — echo 대역으로 프로토콜 경로만 검증
       MALKUTH_EXECUTOR: echo
 
+  # 레퍼런스 그래프의 세 노드를 담당한다. 전부 echo 대역을 쓴다 —
+  # graph run 의 검증 대상은 라우팅과 state 병합이지 모델 출력이 아니다
+  agent-planner:
+    <<: *agent-defaults
+    image: malkuth/agent-echo:${IMAGE_TAG:-0.1.0}
+    ports:
+      - "18082:8080"
+    environment:
+      MALKUTH_EXECUTOR: echo
+
+  agent-researcher:
+    <<: *agent-defaults
+    image: malkuth/agent-echo:${IMAGE_TAG:-0.1.0}
+    ports:
+      - "18083:8080"
+    environment:
+      MALKUTH_EXECUTOR: echo
+
+  agent-writer:
+    <<: *agent-defaults
+    image: malkuth/agent-echo:${IMAGE_TAG:-0.1.0}
+    ports:
+      - "18084:8080"
+    environment:
+      MALKUTH_EXECUTOR: echo
+
 networks:
   malkuth-e2e-net:
     name: malkuth-e2e-net

@@ -222,3 +222,42 @@ def test_repository_validates_end_to_end(capsys):
     """저장소 전체가 8항목을 통과해야 한다 — CLI 가 만든 예제만 통과하면
     아무것도 증명하지 못한다."""
     assert run_cli(["--root", str(REPO_ROOT), "validate"]) == EXIT_OK
+
+
+# --- run ----------------------------------------------------------------------
+
+
+def test_run_is_registered():
+    assert "run" in build_parser().format_help()
+
+
+def test_run_rejects_an_invalid_deployment(workspace, capsys):
+    """검증에 실패한 그래프를 굴리면 노드 실행 중에야 실패한다."""
+    manifest = workspace / "agents" / "solo" / "manifest.yaml"
+    document = yaml.safe_load(manifest.read_text())
+    document["spec"]["promptset"]["ref"] = "promptsets/absent@9.9.9"
+    manifest.write_text(yaml.safe_dump(document), encoding="utf-8")
+    graph = str(workspace / "graphs" / "solo-graph.yaml")
+
+    assert run_cli(["--root", str(workspace), "run", graph]) == EXIT_FAILED
+
+    output = capsys.readouterr().out
+    assert "rejected" in output
+    assert "module_refs" in output
+
+
+def test_run_without_agent_addresses_fails_at_the_node(workspace, capsys):
+    """에이전트가 떠 있지 않으면 노드 실행이 GRAPH_002 로 실패한다."""
+    graph = str(workspace / "graphs" / "solo-graph.yaml")
+
+    assert run_cli(["--root", str(workspace), "run", graph]) == EXIT_FAILED
+
+    assert "failed" in capsys.readouterr().out
+
+
+def test_run_parses_agent_addresses():
+    args = build_parser().parse_args(
+        ["run", "g.yaml", "--agent", "planner=http://a:8080", "--agent", "writer=http://b:8080"]
+    )
+
+    assert args.agent == ["planner=http://a:8080", "writer=http://b:8080"]

@@ -235,6 +235,80 @@ def cmd_check(args: argparse.Namespace) -> int:
     return EXIT_OK if not found else EXIT_FAILED
 
 
+def cmd_run(args: argparse.Namespace) -> int:
+    """Submit a mission run and wait for it to finish.
+
+    mission run 을 제출하고 완주를 기다립니다.
+
+    실행에는 살아있는 에이전트가 필요합니다 — 컨테이너가 없으면 노드 실행이
+    ``GRAPH_002`` 로 실패하므로, 여기서는 **제출 전 계약 검증**까지 수행하고
+    실행 경로를 명시적으로 보고합니다.
+    """
+    import asyncio
+
+    from malkuth.orchestrator.checkpoint import build_checkpointer
+    from malkuth.orchestrator.submit import RunSubmitter
+    from malkuth.runtime.nodes import ControlNodeRuntime
+
+    root = Path(args.root)
+    topology = GraphTopology.model_validate(load_yaml(Path(args.graph)))
+    payload = json.loads(args.input) if args.input else {}
+
+    report = validate_deployment(
+        [topology],
+        manifests=discover_agents(root / "agents"),
+        groups=discover_groups(root / "groups"),
+        resolvable_refs=discover_refs(root / "modules"),
+    )
+    if not report.ok:
+        # 검증에 실패한 그래프를 굴리면 노드 실행 중에야 실패한다
+        emit(
+            {
+                "graph": topology.metadata.name,
+                "status": "rejected",
+                "failures": [f"{f.check}: {f.message}" for f in report.findings],
+            },
+            as_json=args.json,
+        )
+        return EXIT_FAILED
+
+    # 에이전트 주소는 runtime 이 제공한다 — CLI 가 포트를 추측하지 않는다
+    submitter = RunSubmitter(
+        runtime=ControlNodeRuntime(clients=_control_clients(args)),
+        checkpointer=build_checkpointer(args.checkpointer),
+    )
+    result = asyncio.run(submitter.submit(topology, payload, run_id=args.run_id))
+
+    emit(
+        {
+            "run_id": result.run_id,
+            "graph": result.graph,
+            "status": str(result.status),
+            "state": result.state,
+            "error": result.error.message if result.error else None,
+        },
+        as_json=args.json,
+    )
+    return EXIT_OK if result.ok else EXIT_FAILED
+
+
+def _control_clients(args: argparse.Namespace) -> dict[str, Any]:
+    """Build Control API clients from ``--agent name=url`` pairs.
+
+    ``--agent`` 로 받은 주소로 Control API 클라이언트를 만듭니다 —
+    CLI 가 컨테이너 포트를 추측하지 않고 호출자가 명시합니다.
+    """
+    from malkuth.runtime.control import ControlClient
+
+    clients: dict[str, Any] = {}
+    for entry in args.agent or ():
+        name, _, url = entry.partition("=")
+        if not name or not url:
+            continue
+        clients[name] = ControlClient(url, agent=name)
+    return clients
+
+
 def port_range(raw: str) -> tuple[int, int]:
     """Parse a ``low-high`` port range."""
     low, _, high = raw.partition("-")
@@ -267,6 +341,19 @@ def build_parser() -> argparse.ArgumentParser:
     config.add_argument("environment", nargs="?", default="dev")
     config.add_argument("--config-dir", default="configs", dest="config_dir")
     config.set_defaults(handler=cmd_config)
+
+    run = subcommands.add_parser("run", help="submit a mission run")
+    run.add_argument("graph", help="path to the graph topology yaml")
+    run.add_argument("--input", default=None, help="initial state as json")
+    run.add_argument("--run-id", default=None, dest="run_id")
+    run.add_argument("--checkpointer", default="default")
+    run.add_argument(
+        "--agent",
+        action="append",
+        metavar="NAME=URL",
+        help="agent control api address (repeatable)",
+    )
+    run.set_defaults(handler=cmd_run)
 
     check = subcommands.add_parser("check", help="report integrity discrepancies")
     check.add_argument("state", help="path to a yaml document describing observed state")

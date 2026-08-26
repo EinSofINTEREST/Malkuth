@@ -1,0 +1,256 @@
+"""Unit tests for the agent lifecycle state machine and restart policy.
+
+시간 의존 동작은 전부 주입된 fake clock 으로 검증한다 — 실제 대기 금지.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from malkuth.core.errors import ErrorCategory, MalkuthError
+from malkuth.runtime.lifecycle import (
+    AgentLifecycle,
+    AgentState,
+    ReplicaRouter,
+    RestartPolicy,
+)
+
+
+class FakeClock:
+    """수동으로 흐르는 시계."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+def ready_agent(name: str = "researcher", clock: FakeClock | None = None) -> AgentLifecycle:
+    """Ready 상태까지 정상 전이시킨 에이전트."""
+    agent = AgentLifecycle(agent=name, restart_policy=RestartPolicy(clock=clock or FakeClock()))
+    agent.transition(AgentState.BUILT)
+    agent.transition(AgentState.STARTING)
+    agent.transition(AgentState.READY)
+    return agent
+
+
+# --- 상태 전이 --------------------------------------------------------------
+
+
+def test_happy_path_reaches_ready():
+    assert ready_agent().state is AgentState.READY
+
+
+def test_full_lifecycle_to_stopped():
+    agent = ready_agent()
+
+    agent.transition(AgentState.DRAINING)
+    agent.transition(AgentState.STOPPED)
+
+    assert agent.is_terminal is True
+
+
+@pytest.mark.parametrize(
+    ("start", "target"),
+    [
+        (AgentState.DECLARED, AgentState.READY),  # 빌드를 건너뛸 수 없다
+        (AgentState.DECLARED, AgentState.STARTING),
+        (AgentState.READY, AgentState.BUILT),  # 되돌아갈 수 없다
+        (AgentState.DRAINING, AgentState.READY),  # drain 은 취소되지 않는다
+        (AgentState.STOPPED, AgentState.READY),
+    ],
+)
+def test_illegal_transitions_are_rejected(start, target):
+    """조용히 통과시키면 lifecycle 버그가 런타임 깊은 곳에서 드러난다."""
+    agent = AgentLifecycle(agent="a", state=start)
+
+    with pytest.raises(MalkuthError) as exc_info:
+        agent.transition(target)
+
+    assert exc_info.value.code == "RT_002"
+    assert exc_info.value.category is ErrorCategory.RUNTIME
+    assert agent.state is start  # 실패해도 상태는 유지된다
+
+
+def test_transition_to_the_same_state_is_a_noop():
+    agent = ready_agent()
+
+    assert agent.transition(AgentState.READY) is AgentState.READY
+
+
+def test_stopped_agent_can_be_restarted():
+    agent = ready_agent()
+    agent.transition(AgentState.STOPPED)
+
+    assert agent.transition(AgentState.STARTING) is AgentState.STARTING
+
+
+def test_failed_agent_can_be_redeployed():
+    agent = AgentLifecycle(agent="a", state=AgentState.FAILED)
+
+    assert agent.transition(AgentState.STARTING) is AgentState.STARTING
+
+
+def test_only_ready_accepts_tasks():
+    """drain 중에는 새 태스크를 받지 않는다."""
+    agent = ready_agent()
+    assert agent.accepts_tasks is True
+
+    agent.transition(AgentState.DRAINING)
+    assert agent.accepts_tasks is False
+
+
+# --- health 반영 ------------------------------------------------------------
+
+
+def test_unhealthy_after_three_consecutive_failures():
+    agent = ready_agent()
+
+    for _ in range(2):
+        agent.record_health(healthy=False)
+    assert agent.state is AgentState.READY  # 임계 미달
+
+    agent.record_health(healthy=False)
+    assert agent.state is AgentState.UNHEALTHY
+
+
+def test_success_resets_the_failure_streak():
+    agent = ready_agent()
+    agent.record_health(healthy=False)
+    agent.record_health(healthy=False)
+
+    agent.record_health(healthy=True)
+    agent.record_health(healthy=False)
+
+    assert agent.state is AgentState.READY
+    assert agent.consecutive_health_failures == 1
+
+
+def test_recovery_returns_to_ready():
+    agent = ready_agent()
+    for _ in range(3):
+        agent.record_health(healthy=False)
+
+    agent.record_health(healthy=True)
+
+    assert agent.state is AgentState.READY
+
+
+def test_custom_threshold_is_honored():
+    agent = ready_agent()
+
+    agent.record_health(healthy=False, threshold=1)
+
+    assert agent.state is AgentState.UNHEALTHY
+
+
+def test_health_does_not_disturb_draining():
+    """drain 중 health 실패가 상태를 되돌리면 안 된다."""
+    agent = ready_agent()
+    agent.transition(AgentState.DRAINING)
+
+    for _ in range(5):
+        agent.record_health(healthy=False)
+
+    assert agent.state is AgentState.DRAINING
+
+
+# --- 재시작 정책 ------------------------------------------------------------
+
+
+def test_backoff_grows_and_clamps():
+    policy = RestartPolicy(clock=FakeClock())
+
+    assert [policy.delay_for(a) for a in range(1, 8)] == [1, 2, 4, 8, 16, 32, 60]
+
+
+def test_delay_rejects_zero_attempt():
+    with pytest.raises(ValueError, match="attempt must be >= 1"):
+        RestartPolicy().delay_for(0)
+
+
+def test_restarts_outside_the_window_are_forgotten():
+    """오래된 재시작이 영원히 카운트되면 멀쩡한 에이전트가 Failed 로 간다."""
+    clock = FakeClock()
+    policy = RestartPolicy(clock=clock)
+
+    for _ in range(5):
+        policy.record_restart()
+    assert policy.restarts_in_window() == 5
+
+    clock.advance(601)
+    assert policy.restarts_in_window() == 0
+
+
+def test_plan_restart_returns_growing_delays():
+    agent = ready_agent(clock=FakeClock())
+
+    assert [agent.plan_restart() for _ in range(3)] == [1, 2, 4]
+
+
+def test_crash_loop_marks_the_agent_failed():
+    """10분 내 5회를 넘기면 재시도를 멈춘다."""
+    agent = ready_agent(clock=FakeClock())
+    for _ in range(5):
+        agent.plan_restart()
+
+    with pytest.raises(MalkuthError) as exc_info:
+        agent.plan_restart()
+
+    assert exc_info.value.code == "RT_002"
+    assert "restart limit exceeded" in exc_info.value.message
+    assert agent.state is AgentState.FAILED
+
+
+def test_restarts_spread_over_time_do_not_trip_the_ceiling():
+    clock = FakeClock()
+    agent = ready_agent(clock=clock)
+
+    for _ in range(10):
+        agent.plan_restart()
+        clock.advance(601)  # 창 밖으로 밀어낸다
+
+    assert agent.state is not AgentState.FAILED
+
+
+# --- 레플리카 라우팅 --------------------------------------------------------
+
+
+def test_router_requires_replicas():
+    with pytest.raises(ValueError, match="at least one replica"):
+        ReplicaRouter([])
+
+
+def test_round_robin_cycles_through_ready_replicas():
+    replicas = [ready_agent(f"a{i}") for i in range(3)]
+    router = ReplicaRouter(replicas)
+
+    picked = [router.next_replica().agent for _ in range(6)]
+
+    assert picked == ["a0", "a1", "a2", "a0", "a1", "a2"]
+
+
+def test_unready_replicas_are_skipped():
+    replicas = [ready_agent(f"a{i}") for i in range(3)]
+    replicas[1].transition(AgentState.DRAINING)
+    router = ReplicaRouter(replicas)
+
+    picked = {router.next_replica().agent for _ in range(4)}
+
+    assert picked == {"a0", "a2"}
+
+
+def test_no_ready_replica_is_a_retryable_error():
+    replicas = [ready_agent("a0")]
+    replicas[0].transition(AgentState.DRAINING)
+    router = ReplicaRouter(replicas)
+
+    with pytest.raises(MalkuthError) as exc_info:
+        router.next_replica()
+
+    assert exc_info.value.retryable is True
+    assert "no ready replica" in exc_info.value.message

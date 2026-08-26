@@ -1,0 +1,189 @@
+"""Unit tests for container spec derivation.
+
+보안 기본값은 선언 여부와 무관하게 항상 적용돼야 한다 — 빠뜨려서 취약해지는
+경로를 없애는 것이 이 계층의 목적이다.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from malkuth.runtime.spec import (
+    DEFAULT_CONTROL_PORT,
+    DEFAULT_NETWORK,
+    DEFAULT_PID_LIMIT,
+    build_container_spec,
+    container_name,
+)
+from tests.fixtures.builders import make_manifest
+
+GIB = 1024**3
+
+
+def agent_manifest(**spec_extra):
+    """runtime/a2a 만 바꿔 쓰는 manifest."""
+    return make_manifest(
+        spec={
+            "model": {"provider": "anthropic", "name": "claude-sonnet-5"},
+            "promptset": {"ref": "promptsets/test@0.1.0"},
+            **spec_extra,
+        }
+    )
+
+
+# --- 보안 기본값 (02 Container Standards) -----------------------------------
+
+
+def test_container_runs_as_non_root():
+    """base 이미지가 바뀌어도 root 로 뜨지 않도록 스펙에서 명시한다."""
+    spec = build_container_spec(agent_manifest())
+
+    assert spec.user == "1000:1000"
+
+
+def test_all_capabilities_are_dropped():
+    assert build_container_spec(agent_manifest()).cap_drop == ("ALL",)
+
+
+def test_root_filesystem_is_read_only_with_writable_tmpfs():
+    spec = build_container_spec(agent_manifest())
+
+    assert spec.read_only_rootfs is True
+    assert "/tmp" in spec.tmpfs  # noqa: S108 - 컨테이너 내부 경로
+
+
+def test_pid_limit_is_applied():
+    """fork bomb 방지 — 선언하지 않아도 적용된다."""
+    assert build_container_spec(agent_manifest()).pids_limit == DEFAULT_PID_LIMIT
+
+
+def test_defaults_apply_without_any_runtime_declaration():
+    """runtime 섹션을 생략해도 보안 기본값이 전부 적용된다."""
+    spec = build_container_spec(agent_manifest())
+
+    assert (spec.user, spec.read_only_rootfs, spec.cap_drop) == (
+        "1000:1000",
+        True,
+        ("ALL",),
+    )
+
+
+# --- 네트워크와 포트 --------------------------------------------------------
+
+
+def test_attaches_to_the_bridge_network_only():
+    spec = build_container_spec(agent_manifest())
+
+    assert spec.network == DEFAULT_NETWORK
+    assert spec.to_docker_kwargs()["network_mode"] is None  # 호스트 네트워크 금지
+
+
+def test_publish_all_ports_is_disabled():
+    """임의 포트 publish 금지 (02 Network 규칙)."""
+    assert build_container_spec(agent_manifest()).to_docker_kwargs()["publish_all_ports"] is False
+
+
+def test_only_control_port_is_exposed_without_a2a():
+    spec = build_container_spec(agent_manifest())
+
+    assert [p.container_port for p in spec.ports] == [DEFAULT_CONTROL_PORT]
+
+
+def test_a2a_port_is_exposed_when_enabled():
+    spec = build_container_spec(agent_manifest(a2a={"enabled": True}), a2a_port=9100)
+
+    assert {p.name for p in spec.ports} == {"control", "a2a"}
+    assert [p.container_port for p in spec.ports if p.name == "a2a"] == [9100]
+
+
+def test_a2a_port_is_omitted_when_runtime_assigns_none():
+    """포트를 아직 할당받지 못했으면 노출하지 않는다."""
+    spec = build_container_spec(agent_manifest(a2a={"enabled": True}))
+
+    assert [p.name for p in spec.ports] == ["control"]
+
+
+# --- 리소스와 이미지 --------------------------------------------------------
+
+
+def test_resource_limits_come_from_the_manifest():
+    spec = build_container_spec(
+        agent_manifest(runtime={"resources": {"cpu": "2.0", "memory": "4Gi"}})
+    )
+
+    assert spec.cpu_cores == 2.0
+    assert spec.memory_bytes == 4 * GIB
+    assert spec.to_docker_kwargs()["nano_cpus"] == 2_000_000_000
+
+
+def test_base_image_is_used_when_manifest_declares_none():
+    spec = build_container_spec(agent_manifest(), base_image="malkuth/agent-base:0.2.0")
+
+    assert spec.image == "malkuth/agent-base:0.2.0"
+
+
+def test_manifest_image_wins():
+    spec = build_container_spec(agent_manifest(runtime={"image": "malkuth/custom:1.0.0"}))
+
+    assert spec.image == "malkuth/custom:1.0.0"
+
+
+# --- env 주입 ---------------------------------------------------------------
+
+
+def test_only_provided_env_is_injected():
+    """스코프 해석은 앞 단계에서 끝나고, 여기서는 결과만 싣는다."""
+    spec = build_container_spec(agent_manifest(), env={"ANTHROPIC_API_KEY": "v"})
+
+    assert spec.env == {"ANTHROPIC_API_KEY": "v"}
+
+
+def test_env_defaults_to_empty():
+    assert build_container_spec(agent_manifest()).env == {}
+
+
+# --- 볼륨과 라벨 ------------------------------------------------------------
+
+
+def test_no_volumes_by_default():
+    """기본은 볼륨 없음 — 필요한 경우에만 명시 선언 (02 Volumes 규칙)."""
+    assert build_container_spec(agent_manifest()).volumes == ()
+
+
+def test_declared_volumes_are_carried():
+    spec = build_container_spec(
+        agent_manifest(runtime={"volumes": [{"name": "work", "mount_path": "/workspace"}]})
+    )
+
+    assert spec.volumes[0]["mount_path"] == "/workspace"
+
+
+def test_labels_identify_the_agent_and_group():
+    spec = build_container_spec(
+        make_manifest(metadata={"name": "researcher", "version": "0.1.0", "group": "research"})
+    )
+
+    assert spec.labels["malkuth.agent"] == "researcher"
+    assert spec.labels["malkuth.group"] == "research"
+
+
+def test_group_label_falls_back_to_global():
+    assert build_container_spec(agent_manifest()).labels["malkuth.group"] == "global"
+
+
+# --- 이름 ------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("replica", "expected"),
+    [(0, "malkuth-researcher-0"), (2, "malkuth-researcher-2")],
+)
+def test_container_names_are_unique_per_replica(replica, expected):
+    assert container_name("researcher", replica) == expected
+
+
+def test_spec_name_matches_the_replica():
+    spec = build_container_spec(agent_manifest(), replica=1)
+
+    assert spec.name.endswith("-1")
+    assert spec.labels["malkuth.replica"] == "1"

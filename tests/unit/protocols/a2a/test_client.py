@@ -290,3 +290,23 @@ def test_card_reports_declared_capabilities():
 
     assert card.capabilities["streaming"] is True
     assert card.capabilities["push_notifications"] is False
+
+
+async def test_peer_rejection_does_not_open_the_circuit():
+    """A2A_003 은 peer 가 살아서 거부한 것 — 실패로 세면 멀쩡한 peer 가 차단된다."""
+    task = make_task()
+    failed = TaskResult.failed(
+        task,
+        MalkuthErrorPayload(
+            category="internal", code="INTERNAL_001", message="cannot do that", retryable=False
+        ),
+    )
+    client = make_client(FakePeer(result=failed))
+
+    for _ in range(6):
+        with pytest.raises(MalkuthError) as exc_info:
+            await client.call("planner", make_task())
+        assert exc_info.value.code == "A2A_003"
+
+    # 6회 거부에도 회로는 닫혀 있어야 한다
+    assert client._breaker("planner").can_attempt() is True

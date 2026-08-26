@@ -42,7 +42,9 @@ def a2a_error(
         message=message,
         agent=caller,
         retryable=retryable,
-        details={"a2a_caller": caller, "a2a_callee": callee, **details},
+        # 표준 필드가 뒤에 온다 — details 가 a2a_caller/a2a_callee 를 덮어쓰면
+        # 로그·메트릭의 호출 방향이 조용히 틀어진다
+        details={**details, "a2a_caller": caller, "a2a_callee": callee},
     )
 
 
@@ -81,14 +83,34 @@ def task_rejected(caller: str, callee: str, **details: Any) -> MalkuthError:
     )
 
 
-def not_allowed(caller: str, callee: str, **details: Any) -> MalkuthError:
-    """Allowlist 위반 — 배선 문제이므로 재시도 무의미."""
-    return a2a_error(
+def not_allowed(
+    caller: str, callee: str, *, owner: str | None = None, **details: Any
+) -> MalkuthError:
+    """Allowlist 위반 — 배선 문제이므로 재시도 무의미.
+
+    Args:
+        caller: The calling agent.
+        callee: The called agent.
+        owner: The agent this error belongs to — 수신 측 판정이면 callee 다.
+            생략 시 caller 에 귀속한다.
+        **details: Extra context.
+    """
+    error = a2a_error(
         ErrorCode.A2A_004,
         f"a2a connection not declared: {caller} -> {callee}",
         caller=caller,
         callee=callee,
         **details,
+    )
+    if owner is None or owner == caller:
+        return error
+    return MalkuthError(
+        category=error.category,
+        code=error.code,
+        message=error.message,
+        agent=owner,
+        retryable=error.retryable,
+        details=error.details,
     )
 
 

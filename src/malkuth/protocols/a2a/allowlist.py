@@ -14,6 +14,7 @@ import hmac
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
 from malkuth.protocols.a2a.errors import depth_exceeded, not_allowed
 
 if TYPE_CHECKING:
@@ -77,11 +78,23 @@ class Allowlist:
 
     한 그래프의 A2A 연결 선언. 에이전트는 이 목록 밖의 peer 를 알지도, 부르지도
     못한다.
+
+    ``secret`` 은 필수다 — 기본값을 두면 runtime 이 주입을 빠뜨렸을 때 token 이
+    공개된 키로 HMAC 되어 누구나 계산할 수 있고, callee 측 방어가 통째로
+    무력화된다.
     """
 
     edges: frozenset[Edge]
-    secret: bytes = b""
+    secret: bytes
     max_depth: int = DEFAULT_MAX_DEPTH
+
+    def __post_init__(self) -> None:
+        if not self.secret:
+            raise MalkuthError(
+                category=ErrorCategory.CONFIG,
+                code=ErrorCode.CFG_002,
+                message="a2a allowlist requires a non-empty signing secret",
+            )
 
     def allows(self, caller: str, callee: str) -> bool:
         """이 방향의 호출이 선언되었는지 — 같은 그룹이어도 선언이 없으면 False."""
@@ -150,10 +163,15 @@ class Allowlist:
             MalkuthError: A2A/``A2A_004`` if the direction is undeclared or the
                 token does not match.
         """
-        expected = self.token_for(caller, callee)
+        # 수신 측 판정이므로 에러는 이 에이전트(callee)에 귀속시킨다 —
+        # caller 에 귀속하면 남의 이름으로 우리 로그가 오염된다
+        edge = Edge(caller=caller, callee=callee)
+        if edge not in self.edges:
+            raise not_allowed(caller, callee, owner=callee)
+        expected = issue_token(self.secret, edge)
         # 타이밍 공격을 피해 상수 시간 비교
         if not hmac.compare_digest(expected, token):
-            raise not_allowed(caller, callee, reason="invalid edge token")
+            raise not_allowed(caller, callee, owner=callee, reason="invalid edge token")
 
 
 __all__ = [

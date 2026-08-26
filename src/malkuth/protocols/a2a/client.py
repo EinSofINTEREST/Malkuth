@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 import structlog
 
 from malkuth.core.agent import TaskStatus
-from malkuth.core.errors import CircuitBreaker, ErrorCategory, ErrorCode
+from malkuth.core.errors import CircuitBreaker, ErrorCategory, ErrorCode, MalkuthError
 from malkuth.protocols.a2a.errors import submit_failed, task_rejected, unreachable
 
 if TYPE_CHECKING:
@@ -140,6 +140,20 @@ class A2AClient:
         started = time.monotonic()
         try:
             result = await self._send(callee, delegated, token)
+        except MalkuthError as err:
+            # A2A_003 은 peer 가 살아서 "그 태스크는 못 한다" 고 답한 것이다.
+            # 이를 실패로 세면 멀쩡한 peer 가 도달 불가(A2A_002)로 차단된다
+            if err.code != ErrorCode.A2A_003:
+                breaker.record_failure()
+            log.error(
+                "a2a call failed",
+                a2a_caller=self.agent,
+                a2a_callee=callee,
+                a2a_task_id=task.task_id,
+                error_code=err.code,
+                duration_ms=int((time.monotonic() - started) * 1000),
+            )
+            raise
         except Exception:
             breaker.record_failure()
             log.error(

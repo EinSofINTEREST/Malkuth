@@ -200,3 +200,64 @@ def test_edges_are_built_from_graph_connections():
     assert edges == frozenset(
         {Edge(caller="researcher", callee="planner"), Edge(caller="writer", callee="planner")}
     )
+
+
+# --- secret 필수 ---------------------------------------------------------------
+
+
+def test_empty_secret_is_rejected():
+    """빈 secret 이면 token 을 누구나 계산할 수 있어 callee 측 방어가 무력화된다."""
+    with pytest.raises(MalkuthError) as exc_info:
+        Allowlist(edges=frozenset({Edge(caller="a", callee="b")}), secret=b"")
+
+    assert exc_info.value.code == "CFG_002"
+
+
+def test_forged_token_from_an_empty_key_is_rejected():
+    """공개 키(빈 값)로 계산한 token 이 통과하면 인가가 성립하지 않는다."""
+    import hashlib
+    import hmac
+
+    allowlist = make_allowlist(("researcher", "planner"))
+    forged = hmac.new(b"", b"researcher->planner", hashlib.sha256).hexdigest()
+
+    with pytest.raises(MalkuthError) as exc_info:
+        allowlist.verify("researcher", "planner", forged)
+
+    assert exc_info.value.code == "A2A_004"
+
+
+def test_verify_attributes_the_error_to_the_callee():
+    """수신 측 판정이므로 callee 에 귀속한다 — caller 이름으로 우리 로그가 오염되면 안 된다."""
+    allowlist = make_allowlist(("researcher", "planner"))
+
+    with pytest.raises(MalkuthError) as exc_info:
+        allowlist.verify("researcher", "planner", "forged")
+
+    assert exc_info.value.agent == "planner"
+
+
+def test_caller_side_error_stays_with_the_caller():
+    allowlist = make_allowlist(("researcher", "planner"))
+
+    with pytest.raises(MalkuthError) as exc_info:
+        allowlist.check_call("writer", "planner", trace())
+
+    assert exc_info.value.agent == "writer"
+
+
+def test_details_cannot_overwrite_the_standard_fields():
+    """details 가 호출 방향을 덮어쓰면 로그·메트릭이 조용히 틀어진다."""
+    from malkuth.protocols.a2a.errors import a2a_error
+
+    error = a2a_error(
+        "A2A_004",
+        "test",
+        caller="researcher",
+        callee="planner",
+        a2a_caller="spoofed",
+        a2a_callee="spoofed",
+    )
+
+    assert error.details["a2a_caller"] == "researcher"
+    assert error.details["a2a_callee"] == "planner"

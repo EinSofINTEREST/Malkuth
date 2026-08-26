@@ -9,6 +9,7 @@ from malkuth.runtime.control import (
     ControlClient,
     control_url,
 )
+from malkuth.runtime.launcher import AgentLauncher, LaunchedAgent
 from malkuth.runtime.lifecycle import (
     AgentLifecycle,
     AgentState,
@@ -38,6 +39,8 @@ from malkuth.runtime.tokens import (
 )
 
 __all__ = [
+    "AgentLauncher",
+    "LaunchedAgent",
     "AGENT_TOKEN_ENV",
     "DEFAULT_CONTROL_PORT",
     "DEFAULT_NETWORK",

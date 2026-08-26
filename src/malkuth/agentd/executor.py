@@ -264,7 +264,7 @@ class Executor:
             response = await self._model.run(prompt, self._tool_schemas)
         except asyncio.CancelledError:
             raise
-        except BaseException:
+        except Exception:
             self._telemetry.model_called(status=STATUS_FAILED)
             raise
 
@@ -274,15 +274,26 @@ class Executor:
     async def _run_tools(
         self, calls: Sequence[ToolCall], task: TaskRequest, turn: int
     ) -> list[tuple[ToolCall, Any]]:
-        """독립 tool 호출을 병렬 실행한다."""
+        """독립 tool 호출을 병렬 실행한다.
+
+        하나가 실패해도 형제 호출을 중도 취소하지 않는다 — 취소된 호출은
+        결과도 메트릭도 남기지 못해, 다중 tool 턴의 집계가 조용히 비게 된다.
+        """
         ctx = SkillContext(agent=self._agent, task_id=task.task_id, run_id=task.run_id)
         coros = [self._run_tool(call, task, ctx) for call in calls]
 
         try:
-            outcomes = await asyncio.gather(*coros)
+            outcomes = await asyncio.gather(*coros, return_exceptions=True)
         except asyncio.CancelledError:
             self._cleanup()
             raise
+
+        for outcome in outcomes:
+            if isinstance(outcome, asyncio.CancelledError):
+                self._cleanup()
+                raise outcome
+            if isinstance(outcome, BaseException):
+                raise outcome
 
         return list(zip(calls, outcomes, strict=True))
 

@@ -303,3 +303,24 @@ async def test_streaming_without_metrics_still_streams():
     events = [event async for event in executor.stream(make_task())]
 
     assert events
+
+
+async def test_sibling_tools_are_counted_when_one_fails():
+    """한 tool 이 실패해 나머지가 취소되면 그 시도는 카운터에서 사라진다."""
+    metrics = make_metrics()
+    tools = FakeTools()
+    tools.fail(SKILL_TOOL, RuntimeError("boom"))
+    tools.script(MCP_TOOL, delay=0.05)
+    executor, _ = make_executor([calls(SKILL_TOOL, MCP_TOOL)], metrics=metrics, tools=tools)
+
+    await executor.execute(make_task())
+
+    recorded = value(
+        metrics,
+        "malkuth_tool_calls_total",
+        agent="researcher",
+        source="mcp",
+        tool=MCP_TOOL,
+        status="completed",
+    )
+    assert recorded == 1.0

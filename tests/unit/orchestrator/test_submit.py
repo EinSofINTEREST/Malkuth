@@ -260,3 +260,64 @@ def test_seed_state_does_not_mutate_the_caller_state():
     seed_state(original, run_id="run-1")
 
     assert original == {"query": "q"}
+
+
+# --- 초기 state 사전 검증 ------------------------------------------------------
+
+
+async def test_missing_required_state_is_rejected_before_any_node():
+    """검증 없이 제출하면 필수 필드 누락이 첫 노드 실행에서야 드러난다 —
+    그때는 이미 슬롯을 점유하고 컨테이너를 호출한 뒤다."""
+    runtime = ScriptedRuntime()
+    submit = submitter(runtime)
+
+    with pytest.raises(MalkuthError) as exc_info:
+        await submit.submit(make_mission(), {})
+
+    assert exc_info.value.code == "GRAPH_003"
+    assert runtime.invoked == []
+
+
+async def test_rejected_submission_does_not_consume_a_slot():
+    submit = submitter()
+
+    with pytest.raises(MalkuthError):
+        await submit.submit(make_mission(), {})
+
+    assert submit.manager.active(GraphMode.MISSION) == 0
+
+
+async def test_rejection_names_the_offending_field():
+    """어느 필드가 왜 틀렸는지 알려주지 않으면 운영자가 고칠 수 없다."""
+    with pytest.raises(MalkuthError) as exc_info:
+        await submitter().submit(make_mission(), {})
+
+    fields = [e["field"] for e in exc_info.value.details["errors"]]
+    assert "query" in fields
+
+
+async def test_wrong_type_is_also_rejected():
+    with pytest.raises(MalkuthError) as exc_info:
+        await submitter().submit(make_mission(), {"query": "q", "needs_research": "yes-ish"})
+
+    fields = [e["field"] for e in exc_info.value.details["errors"]]
+    assert "needs_research" in fields
+
+
+async def test_valid_state_still_completes():
+    runtime = ScriptedRuntime()
+
+    result = await submitter(runtime).submit(make_mission(), {"query": "q"})
+
+    assert result.ok
+    assert runtime.invoked
+
+
+async def test_reserved_channels_survive_pre_validation():
+    """validate_state 의 결과를 쓰면 예약 채널이 사라져 추적이 깨진다 —
+    검증만 하고 원본을 그대로 넘겨야 한다 (#71 회귀 방지)."""
+    runtime = RecordingRuntime()
+
+    await submitter(runtime).submit(make_mission(), {"query": "q"}, run_id="rid-kept")
+
+    assert all(run_id == "rid-kept" for _, run_id, _ in runtime.tasks)

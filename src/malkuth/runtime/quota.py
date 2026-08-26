@@ -45,7 +45,16 @@ def demand_of(manifest: AgentManifest) -> ResourceTotals:
     에이전트 한 대(레플리카 포함)의 리소스 요구량을 계산합니다.
     """
     runtime = manifest.spec.runtime
-    replicas = max(runtime.replicas, 1)
+    replicas = runtime.replicas
+    if replicas < 1:
+        # 조용히 1 로 보정하면 잘못된 manifest 가 quota 검증을 통과해버린다
+        raise MalkuthError(
+            category=ErrorCategory.VALIDATION,
+            code=ErrorCode.VAL_002,
+            message="runtime.replicas must be >= 1",
+            agent=manifest.name,
+            details={"replicas": replicas},
+        )
     return ResourceTotals(
         cpu_cores=runtime.resources.cpu_cores * replicas,
         memory_bytes=runtime.resources.memory_bytes * replicas,

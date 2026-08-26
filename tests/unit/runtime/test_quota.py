@@ -183,3 +183,17 @@ def test_host_memory_capacity_exceeded_is_rejected():
 
 def test_host_capacity_without_limits_is_unbounded():
     check_host_capacity([agent(f"a{i}", cpu="8.0") for i in range(10)])
+
+
+@pytest.mark.parametrize("replicas", [0, -1])
+def test_non_positive_replicas_is_a_config_error(replicas):
+    """조용히 1 로 보정하면 잘못된 manifest 가 quota 검증을 통과한다."""
+    with pytest.raises(MalkuthError) as exc_info:
+        demand_of(agent(replicas=replicas))
+
+    assert exc_info.value.code == "VAL_002"
+    assert exc_info.value.agent == "worker"
+
+
+def test_single_replica_is_the_normal_case():
+    assert demand_of(agent(replicas=1)).agents == 1

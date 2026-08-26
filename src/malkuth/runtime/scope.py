@@ -10,7 +10,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
@@ -42,8 +42,9 @@ class ResolvedSecret:
     """
 
     key: str
-    value: str
-    scope: SecretScope
+    # repr 에 값이 실리면 객체를 로깅하는 것만으로 secret 이 새어나간다
+    value: str = field(repr=False)
+    scope: SecretScope = SecretScope.LOCAL
     group: str | None = None
 
     def describe(self) -> dict[str, str]:
@@ -71,6 +72,7 @@ class ScopedSecrets:
         global_: Mapping[str, str] | None = None,
         group_name: str | None = None,
         group_declared: frozenset[str] | None = None,
+        allowlist: frozenset[str] | None = None,
     ) -> None:
         self._local = dict(local or {})
         self._group = dict(group or {})
@@ -78,6 +80,8 @@ class ScopedSecrets:
         self._group_name = group_name
         # 그룹이 제공하기로 선언한 키 — 미선언 키는 멤버에게도 보이지 않는다
         self._group_declared = group_declared if group_declared is not None else frozenset()
+        # 에이전트가 선언한 env_allowlist — None 이면 제한 없음 (테스트/저수준 사용)
+        self._allowlist = allowlist
 
     @classmethod
     def for_agent(
@@ -117,6 +121,7 @@ class ScopedSecrets:
             global_=global_values,
             group_name=group_name,
             group_declared=declared,
+            allowlist=frozenset(manifest.spec.runtime.env_allowlist),
         )
 
     def resolve(self, key: str) -> ResolvedSecret:
@@ -133,6 +138,16 @@ class ScopedSecrets:
         Raises:
             MalkuthError: CONFIG/``CFG_002`` if the key resolves in no scope.
         """
+        # 선언되지 않은 키는 어떤 스코프에서도 해석하지 않는다 —
+        # 그러지 않으면 에이전트가 allowlist 밖의 secret 을 읽을 수 있다
+        if self._allowlist is not None and key not in self._allowlist:
+            raise MalkuthError(
+                category=ErrorCategory.CONFIG,
+                code=ErrorCode.CFG_002,
+                message=f"secret key is not in the agent env_allowlist: {key}",
+                details={"key": key, "group": self._group_name or RESERVED_GLOBAL_GROUP},
+            )
+
         if key in self._local:
             return ResolvedSecret(key, self._local[key], SecretScope.LOCAL)
 

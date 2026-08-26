@@ -235,3 +235,48 @@ def test_get_returns_value_or_none():
 
     assert secrets.get("KEY") == "value"
     assert secrets.get("MISSING") is None
+
+
+def test_repr_never_exposes_the_value():
+    """객체를 로깅하는 것만으로 secret 이 새면 안 된다."""
+    resolved = ScopedSecrets(local={"KEY": "super-secret-value"}).resolve("KEY")
+
+    assert "super-secret-value" not in repr(resolved)
+    assert "KEY" in repr(resolved)
+    assert resolved.value == "super-secret-value"  # 주입 경로는 그대로 동작
+
+
+def test_undeclared_key_is_rejected_even_when_present():
+    """allowlist 밖의 키는 값이 있어도 해석하지 않는다."""
+    secrets = ScopedSecrets(
+        local={"DECLARED": "1", "UNDECLARED": "2"}, allowlist=frozenset({"DECLARED"})
+    )
+
+    assert secrets.resolve("DECLARED").value == "1"
+    with pytest.raises(MalkuthError) as exc_info:
+        secrets.resolve("UNDECLARED")
+
+    assert exc_info.value.code == "CFG_002"
+    assert "env_allowlist" in exc_info.value.message
+
+
+def test_undeclared_global_key_is_rejected():
+    secrets = ScopedSecrets(global_={"LEAK": "v"}, allowlist=frozenset({"DECLARED"}))
+
+    assert secrets.get("LEAK") is None
+
+
+def test_for_agent_enforces_the_manifest_allowlist():
+    """for_agent 는 manifest 의 env_allowlist 를 강제해야 한다."""
+    secrets = ScopedSecrets.for_agent(
+        member_manifest(group=None, allowlist=("ANTHROPIC_API_KEY",)),
+        local={"ANTHROPIC_API_KEY": "ok", "OTHER_SECRET": "leak"},
+    )
+
+    assert secrets.get("ANTHROPIC_API_KEY") == "ok"
+    assert secrets.get("OTHER_SECRET") is None
+
+
+def test_resolver_without_allowlist_is_unrestricted():
+    """저수준 사용(테스트 등)에서는 allowlist 미지정이 제한 없음을 뜻한다."""
+    assert ScopedSecrets(local={"ANY": "v"}).get("ANY") == "v"

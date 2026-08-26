@@ -1,0 +1,23 @@
+apiVersion: malkuth/v1
+kind: Agent
+metadata:
+  name: echo
+  version: 0.1.0
+  description: 입력을 그대로 돌려주는 테스트 전용 에이전트
+
+spec:
+  model:
+    provider: anthropic
+    name: claude-sonnet-5
+
+  promptset:
+    ref: promptsets/echo@0.1.0
+
+  a2a:
+    enabled: false
+
+  runtime:
+    image: malkuth/agent-echo:0.1.0
+    resources:
+      cpu: "0.5"
+      memory: 256Mi

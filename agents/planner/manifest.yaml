@@ -1,0 +1,35 @@
+apiVersion: malkuth/v1
+kind: Agent
+metadata:
+  name: planner
+  version: 0.1.0
+  group: research
+  description: 질의를 실행 가능한 리서치 계획으로 나누는 에이전트
+
+spec:
+  model:
+    provider: anthropic
+    name: claude-sonnet-5
+    max_tokens: 4096
+    temperature: 0.2
+
+  promptset:
+    ref: promptsets/planner@0.1.0
+
+  memory:
+    spaces:
+      - ref: memorysets/agent-longterm@0.1.0
+        as: longterm
+
+  a2a:
+    enabled: true      # researcher 가 계획을 되물을 수 있어야 한다
+    capabilities:
+      streaming: true
+
+  runtime:
+    image: malkuth/agent-base:0.1.0
+    resources:
+      cpu: "0.5"
+      memory: 512Mi
+    env_allowlist:
+      - ANTHROPIC_API_KEY

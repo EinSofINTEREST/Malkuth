@@ -1,0 +1,25 @@
+apiVersion: malkuth/v1
+kind: Group
+metadata:
+  name: research
+  version: 0.1.0
+  description: 리서치 도메인 에이전트 그룹
+
+spec:
+  quotas:
+    # 멤버 3개의 합계는 cpu 2.0 / memory 2Gi — 여유를 두되 무한은 아니다
+    cpu: "8.0"
+    memory: 16Gi
+    max_agents: 10
+
+  secrets:
+    - SEARCH_API_KEY
+
+  memory:
+    spaces:
+      - ref: memorysets/domain-knowledge@0.1.0
+        as: knowledge
+        mode: rw
+
+  artifacts:
+    quota: 50Gi

@@ -1,0 +1,16 @@
+apiVersion: malkuth/v1
+kind: Group
+metadata:
+  name: global
+  version: 0.1.0
+  description: 예약 그룹 — 전역 스코프 리소스 선언 전용
+
+spec:
+  secrets:
+    - ANTHROPIC_API_KEY
+
+  memory:
+    spaces:
+      - ref: memorysets/domain-knowledge@0.1.0
+        as: org
+        # writers 미지정 = 전 에이전트 read-only. 전사 지식은 아무나 쓰면 오염된다

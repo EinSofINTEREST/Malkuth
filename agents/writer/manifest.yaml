@@ -1,0 +1,33 @@
+apiVersion: malkuth/v1
+kind: Agent
+metadata:
+  name: writer
+  version: 0.1.0
+  group: research
+  description: 수집된 근거를 보고서로 정리하는 에이전트
+
+spec:
+  model:
+    provider: anthropic
+    name: claude-sonnet-5
+    max_tokens: 8192
+    temperature: 0.4
+
+  promptset:
+    ref: promptsets/writer@0.1.0
+
+  memory:
+    spaces:
+      - ref: memorysets/agent-longterm@0.1.0
+        as: longterm
+
+  a2a:
+    enabled: false     # 위임을 받지 않는다 — 필요해지면 선언으로 열면 된다
+
+  runtime:
+    image: malkuth/agent-base:0.1.0
+    resources:
+      cpu: "0.5"
+      memory: 512Mi
+    env_allowlist:
+      - ANTHROPIC_API_KEY

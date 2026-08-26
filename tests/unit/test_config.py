@@ -1,0 +1,284 @@
+"""Unit tests for configuration loading.
+
+잘못된 설정으로는 기동하지 않는다 — 런타임 중에 발견되는 설정 오류는 이미 늦다.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from malkuth.config import (
+    ENV_PREFIX,
+    MalkuthConfig,
+    RuntimeConfig,
+    env_overrides,
+    load_config,
+    merge,
+)
+from malkuth.core.errors import ErrorCategory, MalkuthError
+
+REPO_CONFIGS = Path(__file__).resolve().parents[2] / "configs"
+
+
+def write(tmp_path: Path, body: str, environment: str = "dev") -> Path:
+    """설정 파일을 만든다."""
+    (tmp_path / f"{environment}.yaml").write_text(body, encoding="utf-8")
+    return tmp_path
+
+
+# --- 배포되는 설정 파일 ---------------------------------------------------------
+
+
+@pytest.mark.parametrize("environment", ["dev", "staging", "prod"])
+def test_shipped_configs_are_valid(environment):
+    """저장소에 실린 설정이 스키마를 통과해야 한다."""
+    config = load_config(environment, config_dir=REPO_CONFIGS, environ={})
+
+    assert isinstance(config, MalkuthConfig)
+
+
+def test_environments_differ_where_intended():
+    """환경별 차이가 실제로 반영되는지 — 파일이 복사본으로 남지 않게."""
+    dev = load_config("dev", config_dir=REPO_CONFIGS, environ={})
+    prod = load_config("prod", config_dir=REPO_CONFIGS, environ={})
+
+    assert dev.orchestrator.checkpointer == "memory"
+    assert prod.orchestrator.checkpointer == "postgres"
+    assert dev.observability.log_format == "pretty"
+    assert prod.observability.log_format == "json"
+
+
+# --- 기본값 -------------------------------------------------------------------
+
+
+def test_empty_config_uses_defaults(tmp_path):
+    """운영자는 바꾸고 싶은 것만 적는다."""
+    config = load_config("dev", config_dir=write(tmp_path, ""), environ={})
+
+    assert config.runtime.network == "malkuth-net"
+    assert config.orchestrator.max_concurrent_runs == 10
+
+
+def test_partial_section_keeps_sibling_defaults(tmp_path):
+    """섹션 하나를 덮어써도 나머지 키가 사라지면 안 된다."""
+    directory = write(tmp_path, "runtime:\n  network: custom-net\n")
+
+    config = load_config("dev", config_dir=directory, environ={})
+
+    assert config.runtime.network == "custom-net"
+    assert config.runtime.agent_base_image == "malkuth/agent-base:0.1.0"
+
+
+def test_registry_roots_cover_every_ref_type():
+    """해석 루트가 빠진 ref 타입은 배포 검증에서 터진다."""
+    roots = MalkuthConfig().registry.roots
+
+    assert set(roots.model_dump()) == {
+        "skillsets",
+        "promptsets",
+        "memorysets",
+        "agents",
+        "graphs",
+    }
+
+
+# --- 실패 경로 ----------------------------------------------------------------
+
+
+def test_missing_file_is_cfg_001(tmp_path):
+    with pytest.raises(MalkuthError) as exc_info:
+        load_config("absent", config_dir=tmp_path, environ={})
+
+    assert exc_info.value.code == "CFG_001"
+    assert exc_info.value.category is ErrorCategory.CONFIG
+
+
+def test_unparseable_yaml_is_cfg_001(tmp_path):
+    directory = write(tmp_path, "runtime: [unclosed\n")
+
+    with pytest.raises(MalkuthError) as exc_info:
+        load_config("dev", config_dir=directory, environ={})
+
+    assert exc_info.value.code == "CFG_001"
+
+
+def test_non_mapping_root_is_rejected(tmp_path):
+    directory = write(tmp_path, "- just\n- a list\n")
+
+    with pytest.raises(MalkuthError) as exc_info:
+        load_config("dev", config_dir=directory, environ={})
+
+    assert exc_info.value.code == "CFG_001"
+
+
+def test_schema_violation_reports_the_field(tmp_path):
+    """어느 필드가 왜 틀렸는지 알려주지 않으면 운영자가 고칠 수 없다."""
+    directory = write(tmp_path, "orchestrator:\n  max_concurrent_runs: 0\n")
+
+    with pytest.raises(MalkuthError) as exc_info:
+        load_config("dev", config_dir=directory, environ={})
+
+    fields = [e["field"] for e in exc_info.value.details["errors"]]
+    assert "orchestrator.max_concurrent_runs" in fields
+
+
+def test_unknown_checkpointer_is_rejected(tmp_path):
+    directory = write(tmp_path, "orchestrator:\n  checkpointer: mystery\n")
+
+    with pytest.raises(MalkuthError) as exc_info:
+        load_config("dev", config_dir=directory, environ={})
+
+    assert exc_info.value.code == "CFG_001"
+
+
+# --- 스키마 규칙 --------------------------------------------------------------
+
+
+def test_host_network_is_rejected():
+    """호스트 네트워크 모드는 격리를 무력화한다."""
+    with pytest.raises(ValueError, match="host"):
+        RuntimeConfig(network="host")
+
+
+def test_health_timeout_beyond_interval_is_rejected():
+    """타임아웃이 주기보다 길면 확인이 밀려 상태 판정이 늦어진다."""
+    with pytest.raises(ValueError, match="interval_s"):
+        MalkuthConfig.model_validate(
+            {"runtime": {"health_check": {"interval_s": 3, "timeout_s": 10}}}
+        )
+
+
+def test_inverted_idle_delays_are_rejected():
+    """min 이 max 보다 크면 backoff 가 진행되지 않는다."""
+    with pytest.raises(ValueError, match="idle_min_delay_s"):
+        MalkuthConfig.model_validate(
+            {
+                "orchestrator": {
+                    "service_defaults": {"idle_min_delay_s": 900, "idle_max_delay_s": 60}
+                }
+            }
+        )
+
+
+def test_inverted_port_range_is_rejected():
+    with pytest.raises(ValueError, match="ascending"):
+        MalkuthConfig.model_validate({"protocols": {"a2a": {"port_range": [9199, 9100]}}})
+
+
+def test_privileged_port_range_is_rejected():
+    """1024 미만은 root 권한이 필요하다 — non-root 컨테이너가 바인딩할 수 없다."""
+    with pytest.raises(ValueError, match="privileged"):
+        MalkuthConfig.model_validate({"protocols": {"a2a": {"port_range": [80, 443]}}})
+
+
+def test_privileged_metrics_port_is_rejected():
+    with pytest.raises(ValueError):
+        MalkuthConfig.model_validate({"observability": {"metrics_port": 80}})
+
+
+# --- 환경변수 오버라이드 --------------------------------------------------------
+
+
+def test_env_override_replaces_a_value(tmp_path):
+    """컨테이너 배포에서 파일을 다시 굽지 않고 조정할 수 있어야 한다."""
+    directory = write(tmp_path, "runtime:\n  network: from-file\n")
+
+    config = load_config(
+        "dev", config_dir=directory, environ={f"{ENV_PREFIX}RUNTIME__NETWORK": "from-env"}
+    )
+
+    assert config.runtime.network == "from-env"
+
+
+def test_env_override_coerces_numbers():
+    """숫자가 문자열로 남으면 스키마 검증에서 터진다."""
+    overrides = env_overrides({f"{ENV_PREFIX}ORCHESTRATOR__NODE_TIMEOUT_S": "42.5"})
+
+    assert overrides == {"orchestrator": {"node_timeout_s": 42.5}}
+
+
+def test_env_override_coerces_booleans():
+    overrides = env_overrides({f"{ENV_PREFIX}RUNTIME__ENABLED": "true"})
+
+    assert overrides == {"runtime": {"enabled": True}}
+
+
+def test_env_override_handles_deep_nesting():
+    overrides = env_overrides({f"{ENV_PREFIX}RUNTIME__HEALTH_CHECK__INTERVAL_S": "20"})
+
+    assert overrides == {"runtime": {"health_check": {"interval_s": 20}}}
+
+
+def test_nested_override_keeps_sibling_file_values(tmp_path):
+    directory = write(
+        tmp_path,
+        "runtime:\n  health_check:\n    interval_s: 10\n    unhealthy_threshold: 7\n",
+    )
+
+    config = load_config(
+        "dev",
+        config_dir=directory,
+        environ={f"{ENV_PREFIX}RUNTIME__HEALTH_CHECK__INTERVAL_S": "20"},
+    )
+
+    assert config.runtime.health_check.interval_s == 20
+    assert config.runtime.health_check.unhealthy_threshold == 7
+
+
+def test_unrelated_env_vars_are_ignored():
+    assert env_overrides({"PATH": "/usr/bin", "HOME": "/root"}) == {}
+
+
+def test_malformed_override_key_is_ignored():
+    """MALKUTH_ 만 있거나 빈 구간이 있는 키는 무시한다."""
+    assert env_overrides({ENV_PREFIX: "x", f"{ENV_PREFIX}RUNTIME__": "y"}) == {}
+
+
+def test_override_can_introduce_a_new_section():
+    overrides = env_overrides({f"{ENV_PREFIX}MEMORY__BACKEND": "postgres"})
+
+    assert overrides == {"memory": {"backend": "postgres"}}
+
+
+def test_invalid_override_still_fails_validation(tmp_path):
+    """환경변수로도 스키마를 우회할 수 없다."""
+    directory = write(tmp_path, "")
+
+    with pytest.raises(MalkuthError) as exc_info:
+        load_config(
+            "dev",
+            config_dir=directory,
+            environ={f"{ENV_PREFIX}ORCHESTRATOR__CHECKPOINTER": "mystery"},
+        )
+
+    assert exc_info.value.code == "CFG_001"
+
+
+def test_scalar_over_mapping_override_replaces_cleanly():
+    """중간 경로가 스칼라였어도 하위 키를 만들 수 있어야 한다."""
+    overrides = env_overrides({f"{ENV_PREFIX}RUNTIME": "x", f"{ENV_PREFIX}RUNTIME__NETWORK": "net"})
+
+    assert overrides == {"runtime": {"network": "net"}}
+
+
+# --- merge --------------------------------------------------------------------
+
+
+def test_merge_is_deep():
+    base = {"a": {"b": 1, "c": 2}}
+
+    assert merge(base, {"a": {"b": 9}}) == {"a": {"b": 9, "c": 2}}
+
+
+def test_merge_does_not_mutate_the_base():
+    base = {"a": {"b": 1}}
+
+    merge(base, {"a": {"b": 2}})
+
+    assert base == {"a": {"b": 1}}
+
+
+def test_merge_replaces_a_mapping_with_a_scalar():
+    assert merge({"a": {"b": 1}}, {"a": 5}) == {"a": 5}

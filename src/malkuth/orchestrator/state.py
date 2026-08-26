@@ -190,6 +190,13 @@ def validate_state(schema: type[BaseModel], state: dict[str, Any]) -> dict[str, 
     try:
         return schema.model_validate(state).model_dump()
     except ValidationError as err:
+        # 어느 필드가 왜 틀렸는지 알려주지 않으면 운영자가 고칠 수 없다
+        # (config.py 의 CFG_001 과 같은 수준으로 맞춘다)
         raise _state_error(
-            "state does not satisfy the graph schema", schema=schema.__name__
+            "state does not satisfy the graph schema",
+            schema=schema.__name__,
+            errors=[
+                {"field": ".".join(str(p) for p in e["loc"]), "problem": e["msg"]}
+                for e in err.errors()
+            ],
         ) from err

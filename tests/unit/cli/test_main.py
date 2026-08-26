@@ -254,12 +254,22 @@ def test_run_rejects_an_invalid_deployment(workspace, capsys):
     assert "module_refs" in output
 
 
-def test_run_without_agent_addresses_fails_at_the_node(workspace, capsys):
-    """에이전트가 떠 있지 않으면 노드 실행이 GRAPH_002 로 실패한다."""
+def test_run_without_initial_state_is_rejected_before_the_node(workspace, capsys):
+    """필수 state 가 없으면 노드 실행 전에 막힌다 — 어느 필드인지도 알려준다."""
     graph = str(workspace / "graphs" / "solo-graph.yaml")
 
     assert run_cli(["--root", str(workspace), "run", graph]) == EXIT_FAILED
 
+    assert "query" in capsys.readouterr().err
+
+
+def test_run_without_agent_addresses_fails_at_the_node(workspace, capsys):
+    """state 가 유효하면 제출까지 가고, 에이전트가 없어 노드에서 실패한다."""
+    graph = str(workspace / "graphs" / "solo-graph.yaml")
+
+    exit_code = run_cli(["--root", str(workspace), "run", graph, "--input", '{"query": "q"}'])
+
+    assert exit_code == EXIT_FAILED
     assert "failed" in capsys.readouterr().out
 
 

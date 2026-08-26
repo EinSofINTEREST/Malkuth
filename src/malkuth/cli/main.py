@@ -23,7 +23,7 @@ from malkuth.cli.integrity import (
 from malkuth.config import load_config
 from malkuth.core.errors import MalkuthError
 from malkuth.core.manifest import AgentManifest, GroupManifest
-from malkuth.deploy import validate_deployment
+from malkuth.deploy import ValidationReport, validate_deployment
 from malkuth.orchestrator.topology import GraphTopology
 
 if TYPE_CHECKING:
@@ -94,6 +94,30 @@ def discover_refs(root: Path) -> frozenset[str]:
     return frozenset(refs)
 
 
+def validate_root(
+    root: Path,
+    topologies: Sequence[GraphTopology],
+    *,
+    a2a_port_range: tuple[int, int] | None = None,
+) -> ValidationReport:
+    """Validate topologies against the repository's declarations.
+
+    저장소 선언을 기준으로 토폴로지를 검증합니다.
+
+    세 명령(`deploy` / `validate` / `run`)이 **같은 입력으로 같은 판정**을
+    내리도록 한 곳에 모읍니다 — 흩어지면 한 명령만 통과하는 상태가 생깁니다.
+    """
+    groups = discover_groups(root / "groups")
+    return validate_deployment(
+        topologies,
+        manifests=discover_agents(root / "agents"),
+        groups=groups,
+        resolvable_refs=discover_refs(root / "modules"),
+        global_secrets=frozenset(groups["global"].spec.secrets) if "global" in groups else (),
+        a2a_port_range=a2a_port_range,
+    )
+
+
 def emit(payload: dict[str, Any], *, as_json: bool) -> None:
     """Print a command result.
 
@@ -121,16 +145,8 @@ def cmd_deploy(args: argparse.Namespace) -> int:
     root = Path(args.root)
     topology = GraphTopology.model_validate(load_yaml(Path(args.graph)))
     manifests = discover_agents(root / "agents")
-    groups = discover_groups(root / "groups")
 
-    report = validate_deployment(
-        [topology],
-        manifests=manifests,
-        groups=groups,
-        resolvable_refs=discover_refs(root / "modules"),
-        global_secrets=frozenset(groups["global"].spec.secrets) if "global" in groups else (),
-        a2a_port_range=args.a2a_port_range,
-    )
+    report = validate_root(root, [topology], a2a_port_range=args.a2a_port_range)
 
     emit(
         {
@@ -151,20 +167,12 @@ def cmd_validate(args: argparse.Namespace) -> int:
     """
     root = Path(args.root)
     manifests = discover_agents(root / "agents")
-    groups = discover_groups(root / "groups")
     topologies = [
         GraphTopology.model_validate(load_yaml(path))
         for path in sorted((root / "graphs").glob("*.yaml"))
     ]
 
-    report = validate_deployment(
-        topologies,
-        manifests=manifests,
-        groups=groups,
-        resolvable_refs=discover_refs(root / "modules"),
-        global_secrets=frozenset(groups["global"].spec.secrets) if "global" in groups else (),
-        a2a_port_range=args.a2a_port_range,
-    )
+    report = validate_root(root, topologies, a2a_port_range=args.a2a_port_range)
 
     emit(
         {
@@ -254,12 +262,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     topology = GraphTopology.model_validate(load_yaml(Path(args.graph)))
     payload = json.loads(args.input) if args.input else {}
 
-    report = validate_deployment(
-        [topology],
-        manifests=discover_agents(root / "agents"),
-        groups=discover_groups(root / "groups"),
-        resolvable_refs=discover_refs(root / "modules"),
-    )
+    report = validate_root(root, [topology])
     if not report.ok:
         # 검증에 실패한 그래프를 굴리면 노드 실행 중에야 실패한다
         emit(

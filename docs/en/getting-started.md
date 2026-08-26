@@ -3,8 +3,8 @@
 **[한국어](../ko/getting-started.md)** | English
 
 > **Status**: The framework layers are implemented and the reference solution validates
-> end to end. Commands marked *(needs a running stack)* require deployed containers,
-> which is the remaining integration work.
+> end to end. `malkuth run` needs deployed agent containers; commands marked
+> *(not implemented yet)* are on the roadmap.
 
 ## Prerequisites
 
@@ -119,13 +119,33 @@ module refs, ghost containers:
 malkuth check observed-state.yaml
 ```
 
-### 5. Run a graph *(needs a running stack)*
+### 5. Run a graph
+
+`run` submits a mission graph and waits for it to reach END. Contracts are validated
+before anything is submitted, and agent addresses are given explicitly — the CLI does
+not guess container ports:
 
 ```bash
-malkuth run research-pipeline --input '{"query": "..."}'
-malkuth run trace <run_id>                      # node timeline
-malkuth agent invoke researcher --input '{"query": "..."}'   # direct request
+malkuth run graphs/research-pipeline.yaml \
+  --input '{"query": "..."}' \
+  --agent planner=http://127.0.0.1:18082 \
+  --agent researcher=http://127.0.0.1:18083 \
+  --agent writer=http://127.0.0.1:18084
 ```
+
+Bring the agents up first with `make e2e-up` (fake model provider, no real LLM calls).
+
+Direct requests reach any agent's Control API without a graph run:
+
+```bash
+curl -X POST http://127.0.0.1:18081/v1/invoke \
+  -H 'content-type: application/json' \
+  -d '{"task_id":"t1","run_id":"direct-1","node_id":null,
+       "input":{"msg":"hello"},"trace":{"trace_id":"tr-1"}}'
+```
+
+Still on the roadmap *(not implemented yet)*: `malkuth run trace`, `agent invoke`,
+`agent logs`, `replay`, `memory reindex`.
 
 ## Where to Go Next
 

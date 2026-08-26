@@ -11,7 +11,15 @@ from pathlib import Path
 import pytest
 import yaml
 
-from malkuth.cli.main import EXIT_FAILED, EXIT_OK, build_parser, discover_refs, main
+from malkuth.cli.main import (
+    EXIT_FAILED,
+    EXIT_OK,
+    build_parser,
+    discover_refs,
+    main,
+    validate_root,
+)
+from malkuth.orchestrator.topology import GraphTopology
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
@@ -261,3 +269,24 @@ def test_run_parses_agent_addresses():
     )
 
     assert args.agent == ["planner=http://a:8080", "writer=http://b:8080"]
+
+
+def test_run_and_validate_agree_on_the_same_repository(workspace):
+    """세 명령이 같은 입력에 다른 판정을 내리면 한 명령만 통과하는 상태가 생긴다."""
+    topology = GraphTopology.model_validate(
+        yaml.safe_load((workspace / "graphs" / "solo-graph.yaml").read_text())
+    )
+
+    assert validate_root(workspace, [topology]).ok
+
+
+def test_global_secrets_resolve_for_every_command():
+    """run 이 global_secrets 를 빠뜨리면 deploy 는 통과하는 배포를 거부한다."""
+    topologies = [
+        GraphTopology.model_validate(
+            yaml.safe_load((REPO_ROOT / "graphs" / f"{name}.yaml").read_text())
+        )
+        for name in ("research-pipeline",)
+    ]
+
+    assert validate_root(REPO_ROOT, topologies).ok

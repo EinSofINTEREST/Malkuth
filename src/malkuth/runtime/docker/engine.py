@@ -7,6 +7,7 @@ SDK 타입은 여기서 벗겨진다 — backend 를 Kubernetes 로 바꿔도 �
 from __future__ import annotations
 
 import asyncio
+import inspect
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
@@ -16,6 +17,7 @@ from malkuth.runtime.docker.errors import (
     OOM_EXIT_CODE,
     drain_timeout,
     image_unavailable,
+    invalid_spec,
     oom_killed,
     start_failed,
 )
@@ -56,7 +58,7 @@ def control_port_of(spec: ContainerSpec) -> int:
     for binding in spec.ports:
         if binding.name == CONTROL_PORT_NAME:
             return binding.container_port
-    raise start_failed(agent_of(spec), spec.image, reason="spec declares no control port")
+    raise invalid_spec(agent_of(spec), spec.image, reason="spec declares no control port")
 
 
 @runtime_checkable
@@ -176,7 +178,7 @@ class DockerEngine:
             )
         except Exception as err:
             # 반쯤 만들어진 컨테이너를 남기면 유령 컨테이너가 쌓인다
-            await self._discard(container_id)
+            await self._discard(container_id, agent=agent, image=spec.image)
             raise start_failed(
                 agent, spec.image, container_id=container_id[:12], reason=type(err).__name__
             ) from err
@@ -252,7 +254,9 @@ class DockerEngine:
         now = clock or asyncio.get_running_loop().time
 
         result = request_drain()
-        if asyncio.iscoroutine(result):
+        # coroutine 뿐 아니라 Future/Task 도 기다려야 한다 — 건너뛰면 에이전트가
+        # 아직 태스크를 받는 중인데 drain 이 진행된다
+        if inspect.isawaitable(result):
             await result
 
         deadline = now() + timeout_s
@@ -263,6 +267,7 @@ class DockerEngine:
                     "agent drained",
                     agent=handle.agent,
                     container_id=handle.short_id,
+                    image=handle.image,
                 )
                 return
             if now() >= deadline:
@@ -296,7 +301,7 @@ class DockerEngine:
             )
 
         if remove:
-            await self._discard(handle.container_id)
+            await self._discard(handle.container_id, agent=handle.agent, image=handle.image)
 
         self.started.pop(handle.agent, None)
         log.info(
@@ -306,14 +311,20 @@ class DockerEngine:
             image=handle.image,
         )
 
-    async def _discard(self, container_id: str) -> None:
-        """컨테이너를 제거한다 — 실패는 로그만 남긴다."""
+    async def _discard(self, container_id: str, *, agent: str, image: str) -> None:
+        """컨테이너를 제거한다 — 실패는 로그만 남긴다.
+
+        제거 실패 로그에도 소유자와 이미지를 남긴다: 여러 이미지가 함께 도는
+        환경에서 이 필드가 없으면 사고 추적이 끊긴다 (05 필수 필드).
+        """
         try:
             await asyncio.to_thread(self.client.remove, container_id)
         except Exception as err:  # noqa: BLE001
             log.warning(
                 "container removal failed",
+                agent=agent,
                 container_id=container_id[:12],
+                image=image,
                 error=type(err).__name__,
             )
 

@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
@@ -133,7 +134,8 @@ class HealthMonitor:
             count += 1
             if iterations is None or count < iterations:
                 result = sleeper(self.interval_s)
-                if asyncio.iscoroutine(result):
+                # Future/Task 를 건너뛰면 대기가 사라져 루프가 busy-run 한다
+                if inspect.isawaitable(result):
                     await result
 
 

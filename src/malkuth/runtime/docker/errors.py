@@ -71,6 +71,20 @@ def start_failed(agent: str, image: str, **details: Any) -> MalkuthError:
     )
 
 
+def invalid_spec(agent: str, image: str, **details: Any) -> MalkuthError:
+    """컨테이너 스펙 자체가 계약을 어김 — 결정적 오류이므로 재시도 금지.
+
+    재시도 가능으로 표시하면 고쳐지지 않을 스펙으로 재시작 루프가 돈다.
+    """
+    return runtime_error(
+        ErrorCode.RT_001,
+        "container spec violates the runtime contract",
+        agent=agent,
+        image=image,
+        **details,
+    )
+
+
 def oom_killed(agent: str, container_id: str, **details: Any) -> MalkuthError:
     """OOM kill — 메모리 상한을 올리지 않으면 재시도해도 같은 결과다."""
     return runtime_error(
@@ -97,6 +111,7 @@ __all__ = [
     "OOM_EXIT_CODE",
     "drain_timeout",
     "image_unavailable",
+    "invalid_spec",
     "oom_killed",
     "runtime_error",
     "start_failed",

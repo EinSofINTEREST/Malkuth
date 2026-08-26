@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 
 from malkuth.core.agent import HealthState, HealthStatus
 from malkuth.core.errors import MalkuthError
@@ -188,20 +189,24 @@ def engine(echo_image: str) -> Iterator[tuple[DockerEngine, CliDockerClient]]:
         docker("network", "rm", TEST_NETWORK, check=False)
 
 
-def echo_spec(**overrides: Any):
-    """echo 에이전트의 컨테이너 스펙."""
-    import yaml
+def echo_spec(*, image: str | None = None, **overrides: Any):
+    """echo 에이전트의 컨테이너 스펙.
 
-    manifest = AgentManifest.model_validate(
-        yaml.safe_load(ECHO_MANIFEST.read_text(encoding="utf-8"))
-    )
-    return build_container_spec(
-        manifest,
-        env={"MALKUTH_EXECUTOR": "echo"},
-        network=TEST_NETWORK,
-        base_image="malkuth/agent-echo:0.1.0",
-        **overrides,
-    )
+    ``image`` 는 manifest 의 ``runtime.image`` 를 갈아끼운다 —
+    ``base_image`` 는 manifest 가 이미지를 선언하지 않았을 때의 fallback 이라,
+    그쪽으로 넘기면 echo manifest 의 선언에 가려 무시된다.
+    """
+    document = yaml.safe_load(ECHO_MANIFEST.read_text(encoding="utf-8"))
+    if image is not None:
+        document["spec"]["runtime"]["image"] = image
+
+    manifest = AgentManifest.model_validate(document)
+    kwargs: dict[str, Any] = {
+        "env": {"MALKUTH_EXECUTOR": "echo"},
+        "network": TEST_NETWORK,
+    }
+    kwargs.update(overrides)
+    return build_container_spec(manifest, **kwargs)
 
 
 async def wait_ready(monitor: HealthMonitor, *, attempts: int = 60) -> AgentState:
@@ -266,7 +271,7 @@ async def test_missing_image_is_rt_004(engine):
     docker_engine, _ = engine
 
     with pytest.raises(MalkuthError) as exc_info:
-        await docker_engine.start(echo_spec(base_image="malkuth/absent:9.9.9"))
+        await docker_engine.start(echo_spec(image="malkuth/absent:9.9.9"))
 
     assert exc_info.value.code == "RT_004"
 

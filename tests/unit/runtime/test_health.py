@@ -255,3 +255,20 @@ def test_gauge_lookup_rejects_a_non_gauge():
 
     with pytest.raises(TypeError, match="not a gauge"):
         metrics.gauge("malkuth_agent_tasks_total")
+
+
+async def test_run_awaits_a_future_returning_sleep():
+    """Future 를 반환하는 sleep 을 건너뛰면 대기가 사라져 루프가 busy-run 한다."""
+    awaited: list[float] = []
+
+    def sleep(delay: float):
+        future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        future.set_result(None)
+        awaited.append(delay)
+        return future
+
+    monitor = make_monitor(interval_s=5.0, sleep=sleep)
+
+    await monitor.run(iterations=2)
+
+    assert awaited == [5.0]

@@ -6,6 +6,8 @@ Docker 그 자체가 아니다.
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from malkuth.core.errors import ErrorCategory, MalkuthError
@@ -51,6 +53,8 @@ def test_spec_without_a_control_port_is_rejected():
         control_port_of(stripped)
 
     assert exc_info.value.code == "RT_001"
+    # 결정적 계약 위반이다 — 재시도 가능으로 표시하면 재시작 루프가 돈다
+    assert exc_info.value.retryable is False
 
 
 def test_fake_client_satisfies_the_contract():
@@ -288,3 +292,63 @@ def test_handle_short_id_is_truncated():
     )
 
     assert handle.short_id == "0123456789ab"
+
+
+async def test_drain_awaits_a_future_request():
+    """coroutine 이 아닌 awaitable 도 기다려야 한다 — 건너뛰면 에이전트가
+    아직 태스크를 받는 중인데 drain 이 진행된다."""
+    docker = engine()
+    handle = await docker.start(spec())
+    completed = []
+
+    def request():
+        future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        future.set_result(None)
+        completed.append(True)
+        return future
+
+    await docker.drain(handle, request_drain=request, inflight=lambda: 0, clock=lambda: 0.0)
+
+    assert completed == [True]
+
+
+async def test_removal_failure_log_carries_agent_and_image(monkeypatch):
+    """제거 실패 로그에 소유자와 이미지가 없으면 사고 추적이 끊긴다 (05 필수 필드)."""
+    recorded: list[dict] = []
+
+    def capture(_event: str, **fields: object) -> None:
+        recorded.append(dict(fields))
+
+    from malkuth.runtime.docker import engine as engine_module
+
+    monkeypatch.setattr(engine_module.log, "warning", capture)
+
+    client = FakeDockerClient(start_error=RuntimeError("boom"), remove_error=RuntimeError("in use"))
+
+    with pytest.raises(MalkuthError):
+        await engine(client).start(spec())
+
+    assert recorded[-1]["agent"] == "test-agent"
+    assert recorded[-1]["image"]
+    assert recorded[-1]["container_id"]
+
+
+async def test_drain_success_log_includes_the_image(monkeypatch):
+    """컨테이너 조작 로그는 container_id 와 image 를 모두 실어야 한다."""
+    recorded: list[dict] = []
+
+    def capture(_event: str, **fields: object) -> None:
+        recorded.append(dict(fields))
+
+    from malkuth.runtime.docker import engine as engine_module
+
+    monkeypatch.setattr(engine_module.log, "info", capture)
+
+    docker = engine()
+    handle = await docker.start(spec())
+    recorded.clear()
+
+    await docker.drain(handle, request_drain=lambda: None, inflight=lambda: 0, clock=lambda: 0.0)
+
+    assert recorded[-1]["image"] == handle.image
+    assert recorded[-1]["container_id"] == handle.short_id

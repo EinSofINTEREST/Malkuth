@@ -253,10 +253,9 @@ class ControlClient:
 
         status = response.status_code
         if status == 404:
-            # TODO(juhyuni): PR #24 의 NF_001 이 main 에 들어오면 그 코드로 교체
             raise MalkuthError(
                 category=ErrorCategory.NOT_FOUND,
-                code=ErrorCode.VAL_001,
+                code=ErrorCode.NF_001,
                 message=f"control endpoint not found: {response.request.url.path}",
                 agent=self._agent,
                 task_id=task_id,

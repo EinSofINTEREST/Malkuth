@@ -210,6 +210,7 @@ async def test_missing_endpoint_is_not_found():
             await client.invoke(make_task())
 
     assert exc_info.value.category is ErrorCategory.NOT_FOUND
+    assert exc_info.value.code == "NF_001"
 
 
 async def test_errors_carry_the_task_id():

@@ -228,6 +228,7 @@ def test_all_documented_error_codes_exist():
         "GRAPH_001", "GRAPH_002", "GRAPH_003", "GRAPH_004", "GRAPH_005",
         "MOD_001", "MOD_002", "MOD_003", "MOD_004",
         "MEM_001", "MEM_002", "MEM_003", "MEM_004",
+        "NF_001",
         "VAL_001", "VAL_002",
         "STOR_001", "STOR_002", "STOR_003",
         "CFG_001", "CFG_002",

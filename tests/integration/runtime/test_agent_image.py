@@ -128,6 +128,21 @@ def request_json(port: int, path: str, body: dict | None = None) -> dict:
         return result
 
 
+def direct_task(payload: dict) -> dict:
+    """직렬화된 direct TaskRequest.
+
+    ``node_id`` 부재가 direct 요청을 뜻한다. ``trace`` 는 필수다 — 모든 태스크는
+    run 전체를 단일 trace 로 묶을 수 있어야 한다 (05 Run Tracing).
+    """
+    return {
+        "task_id": "t-echo",
+        "run_id": "direct-1",
+        "node_id": None,
+        "input": payload,
+        "trace": {"trace_id": "trace-echo"},
+    }
+
+
 def wait_until_healthy(container: str, port: int) -> str:
     """Docker healthcheck 가 healthy 로 전환할 때까지 기다린다."""
     deadline = time.monotonic() + READY_TIMEOUT_S
@@ -164,19 +179,25 @@ def test_invoke_echoes_the_input(echo_container: tuple[str, int]) -> None:
     container, port = echo_container
     assert wait_until_healthy(container, port) == "healthy"
 
-    result = request_json(
-        port,
-        "/v1/invoke",
-        {
-            "task_id": "t-echo",
-            "run_id": "direct-1",
-            "node_id": None,
-            "input": {"msg": "hi"},
-        },
-    )
+    result = request_json(port, "/v1/invoke", direct_task({"msg": "hi"}))
 
     assert result["status"] == "completed"
     assert result["output"] == {"msg": "hi"}
+
+
+@requires_docker
+def test_invoke_rejects_a_task_without_trace(echo_container: tuple[str, int]) -> None:
+    """trace 없는 태스크는 거부된다 — 모든 태스크는 단일 trace 로 묶여야 한다."""
+    container, port = echo_container
+    assert wait_until_healthy(container, port) == "healthy"
+
+    untraceable = direct_task({"msg": "hi"})
+    del untraceable["trace"]
+
+    with pytest.raises(urllib.error.HTTPError) as exc_info:
+        request_json(port, "/v1/invoke", untraceable)
+
+    assert exc_info.value.code == 422
 
 
 @requires_docker

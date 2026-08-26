@@ -1,0 +1,66 @@
+# Malkuth alerting rules.
+#
+# PromQL 이 참조하는 메트릭 이름은 src/malkuth/observability/metrics.py 의
+# METRIC_SPECS 가 단일 소스다 — 테스트가 이 파일의 참조를 레지스트리와 대조한다.
+groups:
+  - name: malkuth
+    interval: 30s
+    rules:
+      - alert: AgentHighFailureRate
+        expr: |
+          rate(malkuth_agent_tasks_total{status="failed"}[5m]) /
+          rate(malkuth_agent_tasks_total[5m]) > 0.1
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "Agent {{ $labels.agent }} failure rate > 10%"
+          runbook: "docs/en/runbooks/incident-response.md#agenthighfailurerate"
+
+      - alert: AgentDown
+        expr: malkuth_agent_health == 0
+        for: 3m
+        labels: {severity: critical}
+        annotations:
+          summary: "Agent {{ $labels.agent }} unhealthy for 3m"
+          runbook: "docs/en/runbooks/incident-response.md#agentdown"
+
+      - alert: ContainerRestartLoop
+        expr: increase(malkuth_container_restarts_total[10m]) > 5
+        labels: {severity: critical}
+        annotations:
+          summary: "Agent {{ $labels.agent }} restart loop"
+          runbook: "docs/en/runbooks/incident-response.md#containerrestartloop"
+
+      - alert: ModelRateLimited
+        expr: |
+          rate(malkuth_model_requests_total{status="rate_limited"}[5m]) > 1
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "Agent {{ $labels.agent }} is being rate limited by {{ $labels.provider }}"
+          runbook: "docs/en/runbooks/incident-response.md#modelratelimited"
+
+      - alert: CheckpointFailures
+        expr: |
+          rate(malkuth_checkpoint_operations_total{status="error"}[5m]) > 0
+        for: 5m
+        labels: {severity: critical}
+        annotations:
+          summary: "Checkpoint failures — run recovery at risk"
+          runbook: "docs/en/runbooks/recovery.md#checkpoint-failures"
+
+      - alert: ServiceRunStalled
+        expr: |
+          malkuth_runs_active{mode="service"} > 0
+          and increase(malkuth_service_iterations_total[30m]) == 0
+        labels: {severity: critical}
+        annotations:
+          summary: "Service graph {{ $labels.graph }} made no progress for 30m"
+          runbook: "docs/en/runbooks/incident-response.md#servicerunstalled"
+
+      - alert: ServiceRunHalted
+        expr: increase(malkuth_service_iterations_total{status="halted"}[10m]) > 0
+        labels: {severity: critical}
+        annotations:
+          summary: "Service graph {{ $labels.graph }} halted (GRAPH_005 failure streak)"
+          runbook: "docs/en/runbooks/recovery.md#service-run-halted"

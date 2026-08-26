@@ -205,6 +205,35 @@ class Metrics:
             raise TypeError(f"metric is not a gauge: {name}")
         return metric
 
+    def counter(self, name: str) -> Counter:
+        """Look up a counter by name.
+
+        카운터를 이름으로 조회합니다 — ``__getitem__`` 은 union 을 돌려주므로
+        ``.inc()`` 를 쓰는 호출부가 매번 캐스팅해야 합니다.
+
+        Raises:
+            KeyError: If the metric is not part of the standard contract.
+            TypeError: If the metric exists but is not a counter.
+        """
+        metric = self._metrics[name]
+        if not isinstance(metric, Counter):
+            raise TypeError(f"metric is not a counter: {name}")
+        return metric
+
+    def histogram(self, name: str) -> Histogram:
+        """Look up a histogram by name.
+
+        히스토그램을 이름으로 조회합니다 — ``.observe()`` 호출부의 캐스팅을 없앱니다.
+
+        Raises:
+            KeyError: If the metric is not part of the standard contract.
+            TypeError: If the metric exists but is not a histogram.
+        """
+        metric = self._metrics[name]
+        if not isinstance(metric, Histogram):
+            raise TypeError(f"metric is not a histogram: {name}")
+        return metric
+
     def names(self) -> frozenset[str]:
         """등록된 메트릭 이름 집합."""
         return frozenset(self._metrics)

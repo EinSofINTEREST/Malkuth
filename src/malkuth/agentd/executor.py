@@ -13,6 +13,7 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol
 
+from malkuth.agentd.telemetry import STATUS_COMPLETED, STATUS_FAILED
 from malkuth.core.agent import (
     DEFAULT_MAX_TURNS,
     DEFAULT_TOOL_TIMEOUT_S,
@@ -33,6 +34,8 @@ from malkuth.core.skill import SkillContext
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+
+    from malkuth.agentd.telemetry import ExecutorTelemetry
 
 MCP_TOOL_PREFIX = "mcp__"
 
@@ -140,8 +143,10 @@ class Executor:
         tool_schemas: Sequence[Any] = (),
         config: ExecutorConfig | None = None,
         on_cleanup: Callable[[], None] | None = None,
+        telemetry: ExecutorTelemetry | None = None,
     ) -> None:
         self._agent = agent
+        self._telemetry = telemetry
         self._model = model
         self._tools = tools
         self._render = render
@@ -167,6 +172,7 @@ class Executor:
         if cached is not None:
             return cached
 
+        started = time.perf_counter()
         try:
             result = await asyncio.wait_for(self._run(task), timeout=task.config.timeout_s)
         except TimeoutError:
@@ -202,11 +208,19 @@ class Executor:
                 ),
             )
 
+        self._record_task(result, duration_s=time.perf_counter() - started)
+
         # 재시도 가능한 실패를 캐싱하면 이 계층이 유일한 재시도 계층인데도
         # 재시도가 영원히 무효화된다 — 성공과 영구 실패만 기억한다
         if result.error is None or not result.error.retryable:
             self._completed[task.task_id] = result
         return result
+
+    def _record_task(self, result: TaskResult, *, duration_s: float) -> None:
+        """태스크 종료를 메트릭에 남긴다 — telemetry 미주입 시 무동작."""
+        if self._telemetry is None:
+            return
+        self._telemetry.task_finished(status=result.status.value, duration_s=duration_s)
 
     async def _run(self, task: TaskRequest) -> TaskResult:
         """모델과 tool 을 오가며 루프를 돈다."""
@@ -218,7 +232,7 @@ class Executor:
 
         try:
             for turn in range(max_turns):
-                response = await self._model.run(prompt, self._tool_schemas)
+                response = await self._model_turn(prompt)
                 usage = usage.merge(response.usage)
 
                 if response.is_final:
@@ -240,6 +254,22 @@ class Executor:
             task_id=task.task_id,
             details={"max_turns": max_turns},
         )
+
+    async def _model_turn(self, prompt: str) -> ModelResponse:
+        """모델 한 턴 — 실패도 메트릭에 남겨야 하므로 여기서 감싼다."""
+        if self._telemetry is None:
+            return await self._model.run(prompt, self._tool_schemas)
+
+        try:
+            response = await self._model.run(prompt, self._tool_schemas)
+        except asyncio.CancelledError:
+            raise
+        except BaseException:
+            self._telemetry.model_called(status=STATUS_FAILED)
+            raise
+
+        self._telemetry.model_called(status=STATUS_COMPLETED, usage=response.usage)
+        return response
 
     async def _run_tools(
         self, calls: Sequence[ToolCall], task: TaskRequest, turn: int
@@ -267,10 +297,11 @@ class Executor:
         """단일 tool 을 상한 안에서 실행하고 실패를 변환한다."""
         timeout = self._tool_timeout(call.name, task)
         try:
-            return await asyncio.wait_for(
+            result = await asyncio.wait_for(
                 self._tools.call(call.name, call.arguments, ctx), timeout=timeout
             )
         except TimeoutError as err:
+            self._record_tool(call.name, status=STATUS_FAILED)
             raise MalkuthError(
                 category=ErrorCategory.TIMEOUT,
                 code=ErrorCode.TO_002,
@@ -283,7 +314,16 @@ class Executor:
         except asyncio.CancelledError:
             raise
         except Exception as err:
+            self._record_tool(call.name, status=STATUS_FAILED)
             raise _tool_error(call.name, task, self._agent, err) from err
+
+        self._record_tool(call.name, status=STATUS_COMPLETED)
+        return result
+
+    def _record_tool(self, tool: str, *, status: str) -> None:
+        """tool 호출을 메트릭에 남긴다 — telemetry 미주입 시 무동작."""
+        if self._telemetry is not None:
+            self._telemetry.tool_called(tool=tool, status=status)
 
     def _extend(
         self, prompt: str, response: ModelResponse, results: Sequence[tuple[ToolCall, Any]]
@@ -357,7 +397,7 @@ class Executor:
 
         try:
             for turn in range(max_turns):
-                response = await self._model.run(prompt, self._tool_schemas)
+                response = await self._model_turn(prompt)
                 usage = usage.merge(response.usage)
 
                 if response.content:

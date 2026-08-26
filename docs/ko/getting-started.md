@@ -151,6 +151,11 @@ Control API 는 에이전트별 토큰을 요구합니다. `/v1/health` 만 무�
 난수 토큰을 발급해 주입하며, 개발 스택은 같은 코드 경로를 유지하려고 고정
 placeholder 를 씁니다.
 
+placeholder 는 스택마다 다릅니다: `make e2e-up` (`compose.e2e.yaml`) 은
+`e2e-token`, 일반 개발 스택 (`compose.yaml`) 은 `dev-local-token` 이 기본값입니다.
+띄운 스택에 맞는 값을 넘기거나, 기동 전에 `MALKUTH_AGENT_TOKEN` 을 export 해서
+양쪽이 같은 값을 보게 하십시오. 토큰이 어긋나면 모든 노드 호출이 `401` 이 됩니다.
+
 아직 로드맵에 있는 것 *(미구현)*: `malkuth run trace`, `agent invoke`,
 `agent logs`, `replay`, `memory reindex`.
 

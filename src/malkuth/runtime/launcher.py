@@ -9,11 +9,13 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import structlog
 
+from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
 from malkuth.runtime.control import ControlClient
 from malkuth.runtime.spec import build_container_spec
 from malkuth.runtime.tokens import TokenIssuer, authenticated_env
@@ -82,6 +84,17 @@ class AgentLauncher:
             The launched agent — its client already carries the token.
         """
         agent = manifest.name
+        # 이름만으로 보관하므로 두 번째 기동은 첫 핸들을 덮어 컨테이너를 미아로 만든다.
+        # replica 라우팅은 ReplicaRouter 소관이지 이 계층이 아니다
+        if agent in self.launched:
+            raise MalkuthError(
+                category=ErrorCategory.RUNTIME,
+                code=ErrorCode.RT_001,
+                message="agent is already launched",
+                agent=agent,
+                details={"replica": replica},
+            )
+
         spec = build_container_spec(
             manifest,
             env=authenticated_env(self.issuer, agent, secrets),
@@ -113,19 +126,37 @@ class AgentLauncher:
         """Stop an agent and forget its token.
 
         에이전트를 정지하고 토큰을 버립니다 — 죽은 토큰을 들고 있지 않습니다.
+        컨테이너 정지가 실패하면 핸들을 **그대로 둡니다** — 유일한 재시도
+        수단을 먼저 버리면 미아 컨테이너를 다시 정리할 방법이 없습니다.
         """
-        launched = self.launched.pop(agent, None)
+        launched = self.launched.get(agent)
         if launched is None:
             return
 
         await launched.aclose()
         await self.engine.stop(launched.handle)
+        del self.launched[agent]
         self.issuer.forget(agent)
 
     async def stop_all(self) -> None:
         """기동된 에이전트를 전부 정지한다 — 하나가 실패해도 나머지를 계속 정리한다."""
+        failures: list[BaseException] = []
         for agent in list(self.launched):
-            await self.stop(agent)
+            try:
+                await self.stop(agent)
+            except asyncio.CancelledError:
+                raise
+            except Exception as err:
+                failures.append(err)
+                log.error("agent stop failed", agent=agent, exc_info=err)
+
+        if failures:
+            raise MalkuthError(
+                category=ErrorCategory.RUNTIME,
+                code=ErrorCode.RT_005,
+                message="one or more agents failed to stop",
+                details={"agents": len(failures)},
+            ) from failures[0]
 
     def clients(self) -> dict[str, ControlClient]:
         """노드 런타임이 쓰는 에이전트별 클라이언트 매핑."""

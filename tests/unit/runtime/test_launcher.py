@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from malkuth.core.errors import ErrorCode, MalkuthError
 from malkuth.core.manifest import AgentManifest
 from malkuth.runtime.docker.engine import DockerEngine
 from malkuth.runtime.launcher import AgentLauncher
@@ -125,3 +126,79 @@ async def test_replica_index_reaches_the_container_name(replica):
     await launcher(client).start(manifest(), replica=replica)
 
     assert client.created[0]["name"].endswith(str(replica))
+
+
+# --- lifecycle 상태의 무결성 -------------------------------------------------
+
+
+async def test_launching_the_same_agent_twice_is_rejected():
+    """이름만으로 보관하므로 덮어쓰면 첫 컨테이너가 미아가 된다."""
+    client = FakeDockerClient()
+    launch = launcher(client)
+    await launch.start(manifest())
+
+    with pytest.raises(MalkuthError) as exc_info:
+        await launch.start(manifest(), replica=1)
+
+    assert exc_info.value.code == ErrorCode.RT_001
+    # 거부는 기동 전에 — 컨테이너를 만들어놓고 버리면 안 된다
+    assert len(client.created) == 1
+
+
+async def test_failed_stop_keeps_the_handle_for_retry():
+    """유일한 재시도 수단을 먼저 버리면 미아 컨테이너를 정리할 방법이 없다.
+
+    DockerEngine.stop 은 실패를 삼키므로(유령 컨테이너 방지) 실제로 터질 수
+    있는 지점은 클라이언트 정리다.
+    """
+    client = FakeDockerClient()
+    launch = launcher(client)
+    launched = await launch.start(manifest())
+
+    async def failing_aclose() -> None:
+        raise RuntimeError("connection pool busy")
+
+    launched.client.aclose = failing_aclose  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError):
+        await launch.stop("echo")
+
+    assert "echo" in launch.launched
+    assert launch.issuer.known("echo")
+
+
+async def test_successful_stop_forgets_the_token():
+    client = FakeDockerClient()
+    launch = launcher(client)
+    await launch.start(manifest())
+
+    await launch.stop("echo")
+
+    assert "echo" not in launch.launched
+    assert not launch.issuer.known("echo")
+
+
+async def test_stop_all_cleans_every_agent_before_reporting_failure():
+    """하나가 실패해도 나머지를 정리해야 한다 — docstring 이 약속한 동작이다."""
+    client = FakeDockerClient()
+    launch = launcher(client)
+    broken = await launch.start(manifest())
+
+    async def failing_aclose() -> None:
+        raise RuntimeError("connection pool busy")
+
+    broken.client.aclose = failing_aclose  # type: ignore[method-assign]
+
+    healthy = await launch.start(
+        manifest().model_copy(
+            update={"metadata": manifest().metadata.model_copy(update={"name": "other"})}
+        )
+    )
+
+    with pytest.raises(MalkuthError) as exc_info:
+        await launch.stop_all()
+
+    assert exc_info.value.code == ErrorCode.RT_005
+    # 실패한 쪽은 재시도용으로 남고, 멀쩡한 쪽은 끝까지 정리된다
+    assert set(launch.launched) == {"echo"}
+    assert healthy.handle.container_id in client.removed

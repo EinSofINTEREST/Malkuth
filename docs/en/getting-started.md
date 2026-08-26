@@ -151,6 +151,12 @@ endpoint (Docker's healthcheck calls it directly). In production the runtime min
 random token per agent and injects it — the dev stack uses a fixed placeholder so the
 same code path stays exercised.
 
+The placeholder differs per stack: `make e2e-up` (`compose.e2e.yaml`) defaults to
+`e2e-token`, while the plain dev stack (`compose.yaml`) defaults to `dev-local-token`.
+Pass the one matching the stack you started, or export `MALKUTH_AGENT_TOKEN` before
+bringing it up so both sides read the same value. A mismatched token surfaces as `401`
+on every node call.
+
 Still on the roadmap *(not implemented yet)*: `malkuth run trace`, `agent invoke`,
 `agent logs`, `replay`, `memory reindex`.
 

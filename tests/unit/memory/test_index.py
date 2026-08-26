@@ -383,3 +383,72 @@ def test_entry_rejected_by_the_index_is_retried_not_lost():
     assert indexed == 0
     assert queue.lag == 1
     assert queue.failures[stray.entry_id] == 1
+
+
+# --- 큐 진행 상황 보존 ---------------------------------------------------------
+
+
+def test_indexed_entries_leave_the_queue_even_when_a_later_one_raises():
+    """예외가 진행 상황을 삼키면, 성공한 항목이 다음 drain 에서 중복 색인되어
+    dedup 과 idf 랭킹 가정이 깨진다."""
+    queue = IndexQueue(max_failures=1)
+    good = entry("정상 항목")
+    bad = entry("다른 space", space="local:writer:longterm")
+    queue.submit(good, spec())
+    queue.submit(bad, spec())
+    indexes = {SPACE: SpaceIndex(space=SPACE)}
+
+    with pytest.raises(MalkuthError):
+        queue.drain(indexes)
+
+    assert [item.entry_id for item, _ in queue.pending] == [bad.entry_id]
+
+
+def test_repeated_drains_do_not_duplicate_chunks():
+    queue = IndexQueue(max_failures=1)
+    good = entry("정상 항목")
+    bad = entry("다른 space", space="local:writer:longterm")
+    queue.submit(good, spec())
+    queue.submit(bad, spec())
+    index = SpaceIndex(space=SPACE)
+
+    for _ in range(2):
+        with pytest.raises(MalkuthError):
+            queue.drain({SPACE: index})
+
+    assert sum(1 for c in index.chunks if c.entry_id == good.entry_id) == 1
+
+
+def test_failure_reason_reaches_the_log(monkeypatch):
+    """reason 이 없으면 반복 실패의 원인을 진단할 수 없다."""
+    recorded: list[dict] = []
+
+    def capture(_event: str, **fields: object) -> None:
+        recorded.append(dict(fields))
+
+    from malkuth.memory import index as index_module
+
+    monkeypatch.setattr(index_module.log, "warning", capture)
+
+    queue = IndexQueue(max_failures=5)
+    queue.submit(entry("다른 space", space="local:writer:longterm"), spec())
+    queue.drain({SPACE: SpaceIndex(space=SPACE)})
+
+    assert recorded[-1]["reason"] == "unknown space"
+
+
+# --- cosine 정규화 -------------------------------------------------------------
+
+
+def test_cosine_normalizes_unnormalized_input():
+    """공개 유틸이라 호출자가 정규화 여부를 알기 어렵다 — 내적을 코사인이라
+    부르면 점수가 조용히 부풀려진다."""
+    assert cosine([3.0, 0.0], [5.0, 0.0]) == pytest.approx(1.0)
+
+
+def test_cosine_of_orthogonal_vectors_is_zero():
+    assert cosine([2.0, 0.0], [0.0, 7.0]) == pytest.approx(0.0)
+
+
+def test_cosine_with_a_zero_vector_is_zero():
+    assert cosine([0.0, 0.0], [1.0, 0.0]) == 0.0

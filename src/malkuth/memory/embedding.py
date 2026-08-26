@@ -103,12 +103,22 @@ def normalize(vector: Sequence[float]) -> tuple[float, ...]:
 def cosine(left: Sequence[float], right: Sequence[float]) -> float:
     """Cosine similarity between two vectors.
 
-    두 벡터의 코사인 유사도. 길이가 다르면 비교가 성립하지 않으므로 0을 돌려줍니다
-    — 혼합된 임베딩 공간을 조용히 비교하지 않기 위해서입니다.
+    두 벡터의 코사인 유사도.
+
+    입력이 단위벡터가 아니어도 올바른 값을 돌려주도록 크기로 나눕니다 —
+    공개 유틸이라 호출자가 정규화 여부를 알기 어렵고, 내적을 코사인이라 부르면
+    정규화되지 않은 벡터에서 점수가 조용히 부풀려집니다.
+
+    길이가 다르면 비교가 성립하지 않으므로 0을 돌려줍니다 — 혼합된 임베딩
+    공간을 조용히 비교하지 않기 위해서입니다. 영벡터도 0입니다.
     """
     if len(left) != len(right):
         return 0.0
-    return sum(a * b for a, b in zip(left, right, strict=True))
+    dot = sum(a * b for a, b in zip(left, right, strict=True))
+    scale = math.sqrt(sum(a * a for a in left)) * math.sqrt(sum(b * b for b in right))
+    if scale == 0:
+        return 0.0
+    return dot / scale
 
 
 __all__ = ["Embedder", "HashEmbedder", "cosine", "normalize", "tokenize"]

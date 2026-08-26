@@ -292,23 +292,31 @@ class IndexQueue:
         """
         indexed = 0
         retry: list[tuple[MemoryEntry, ChunkSpec]] = []
+        remaining = list(self.pending)
 
-        for entry, spec in self.pending:
-            index = indexes.get(entry.space)
-            if index is None:
-                self._record_failure(entry, reason="unknown space")
-                retry.append((entry, spec))
-                continue
-            try:
-                index.add(entry, spec)
-            except MalkuthError:
-                self._record_failure(entry, reason="index rejected the entry")
-                retry.append((entry, spec))
-                continue
-            self.failures.pop(entry.entry_id, None)
-            indexed += 1
+        try:
+            while remaining:
+                entry, spec = remaining[0]
+                index = indexes.get(entry.space)
+                if index is None:
+                    self._record_failure(entry, reason="unknown space")
+                    retry.append(remaining.pop(0))
+                    continue
+                try:
+                    index.add(entry, spec)
+                except MalkuthError:
+                    self._record_failure(entry, reason="index rejected the entry")
+                    retry.append(remaining.pop(0))
+                    continue
+                self.failures.pop(entry.entry_id, None)
+                remaining.pop(0)
+                indexed += 1
+        finally:
+            # _record_failure 가 MEM_003 을 던져도 진행 상황을 잃지 않는다.
+            # 성공한 항목이 큐에 남으면 다음 drain 에서 중복 색인되어
+            # dedup 과 idf 랭킹 가정이 깨진다
+            self.pending = retry + remaining
 
-        self.pending = retry
         return indexed
 
     def _record_failure(self, entry: MemoryEntry, *, reason: str) -> None:
@@ -321,6 +329,7 @@ class IndexQueue:
             entry_id=entry.entry_id,
             attempt=count,
             max_attempts=self.max_failures,
+            reason=reason,
         )
         if count >= self.max_failures:
             raise index_error(

@@ -45,8 +45,12 @@ Malkuth 는 LangGraph state graph 로 여러 AI 에이전트를 오케스트레�
 |---|---|---|
 | 목표 | 특정 산출물/기능 완성 | 무한히 반복되는 과업 |
 | 종료 | END 도달 시 결과 반환 | 운영자 stop / 명시적 stop 조건 |
-| 토폴로지 | END 필수, cycle 은 `max_iterations` 필수 | 무한 cycle 허용, idle 정책 필수 |
+| 토폴로지 | END 필수, cycle 은 `max_iterations` 필수 | 좌동 + idle 정책 필수 — 반복은 그래프가 아니라 runner 소유 |
 | Checkpoint | node 단위 | node + iteration 단위 (재시작 시 이어서) |
+
+Service 의 한 iteration 은 `START → … → END` 한 바퀴입니다. 반복은 그래프가 아니라
+runner 가 소유합니다 — 그래프가 스스로 순환하면 한 번의 실행이 끝나지 않아
+checkpoint 를 남길 iteration 경계 자체가 없습니다.
 
 Service 그래프는 유휴 시 exponential backoff 로 대기하고 (모델 호출 busy-loop 금지),
 연속 실패 임계 초과 시 정지 + 알림됩니다. Iteration 간 state 공유가 불필요하면 스케줄

@@ -285,9 +285,9 @@ spec:
   edges:
     - {from: START, to: watcher}
     - {from: watcher, to: classifier, condition: malkuth.graphs.conditions:has_new_items}
-    - {from: watcher, to: watcher, condition: malkuth.graphs.conditions:idle}  # 무한 루프 — service 만 허용
+    - {from: watcher, to: END, condition: malkuth.graphs.conditions:idle}  # 이번 iteration 종료
     - {from: classifier, to: notifier}
-    - {from: notifier, to: watcher}
+    - {from: notifier, to: END}
 ```
 
 ### Graph Rules
@@ -303,10 +303,13 @@ spec:
    - conditional edge 의 조건 함수 import 가능
    - `connections` 의 caller/callee 가 모두 그래프 노드
 3. **Mode & Cycle Policy**
-   - `mission` (기본): END 도달 필수. 순환 edge (self-loop 포함, 재시도/refinement 패턴)
-     는 허용하되 `max_iterations` 명시 필수 — 미명시 시 검증 실패
-   - `service`: END 없어도 됨 — 종료는 운영자 stop / 명시적 stop 조건.
-     무한 순환 허용, 대신 `service.idle` (backoff) 미선언 시 검증 실패.
+   - **두 모드 공통**: END 도달 필수. 순환 edge (self-loop 포함, 재시도/refinement
+     패턴) 는 허용하되 `max_iterations` 명시 필수 — 미명시 시 검증 실패
+   - `mission` (기본): END 도달 시 run 완료, 최종 state 반환
+   - `service`: **한 iteration = START → END 한 바퀴**. 반복은 그래프가 아니라
+     `ServiceRunner` 가 소유한다 — 그래프가 스스로 순환하면 한 번의 실행이 끝나지
+     않아 iteration 경계가 성립하지 않는다. 종료는 운영자 stop / 명시적 stop 조건.
+     `service.idle` (backoff) 미선언 시 검증 실패.
      Iteration 마다 checkpoint, `max_failure_streak` (기본 5) 초과 시 정지 + 알림.
      Iteration 간 state 연속성이 불필요하면 service 대신 스케줄 반복 mission 사용
      ([01-architecture.md](01-architecture.md) Mode Rules)

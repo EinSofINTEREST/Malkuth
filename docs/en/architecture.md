@@ -46,8 +46,12 @@ entirely by wiring.
 |---|---|---|
 | Goal | Complete a specific outcome | A perpetually repeating task |
 | Termination | Reaches END, returns result | Operator stop / explicit stop condition |
-| Topology | END required; cycles need `max_iterations` | Infinite cycles allowed; idle policy required |
+| Topology | END required; cycles need `max_iterations` | Same, plus an idle policy — the loop belongs to the runner, not the graph |
 | Checkpoint | Per node | Per node + per iteration (resumes across restarts) |
+
+One service iteration is a single `START → … → END` pass. The repetition belongs to the
+runner, not to the graph — a graph that cycles into itself never finishes a single pass,
+so there is no iteration boundary to checkpoint.
 
 Service graphs back off exponentially when idle (no busy-looping model calls) and halt
 with an alert after a configured failure streak. If iterations don't need shared state,

@@ -1,0 +1,20 @@
+apiVersion: malkuth/v1
+kind: Skillset
+metadata:
+  name: web-search
+  version: 0.2.0
+  description: 웹 검색 및 페이지 fetch 스킬
+
+spec:
+  skills:
+    - name: search
+      entrypoint: skills.search:search
+      description: 웹 검색을 수행하고 상위 결과를 반환
+      timeout_s: 30
+    - name: fetch_page
+      entrypoint: skills.fetch:fetch_page
+      timeout_s: 60
+
+  requires:
+    env: [SEARCH_API_KEY]
+    python: ">=3.12"

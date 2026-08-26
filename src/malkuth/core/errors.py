@@ -112,6 +112,9 @@ class ErrorCode(StrEnum):
     MEM_003 = "MEM_003"  # 인덱싱 실패 누적 / 재인덱싱 필요
     MEM_004 = "MEM_004"  # 검색 실패 / 인덱스 손상
 
+    # Not found
+    NF_001 = "NF_001"  # 대상 리소스 미존재 (run, 에이전트 등)
+
     # Validation
     VAL_001 = "VAL_001"  # 필수 필드 누락
     VAL_002 = "VAL_002"  # 필드 형식 오류

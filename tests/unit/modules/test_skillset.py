@@ -1,0 +1,271 @@
+"""Unit tests for the skillset loader."""
+
+from __future__ import annotations
+
+import pytest
+
+from malkuth.core.errors import MalkuthError
+from malkuth.core.skill import SkillContext
+from malkuth.modules.registry import ModuleRegistry, RegistryRoots
+from malkuth.modules.skillset import SkillsetLoader
+from tests.fixtures.registry import fixture_registry
+
+REF = "skillsets/web-search@0.2.0"
+
+
+@pytest.fixture
+def loader() -> SkillsetLoader:
+    return SkillsetLoader(fixture_registry())
+
+
+def test_load_binds_all_declared_skills(loader):
+    skillset = loader.load(REF)
+
+    assert [s.name for s in skillset.skills] == ["search", "fetch_page"]
+
+
+def test_tool_schema_snapshot(loader):
+    """스킬셋이 노출하는 tool 계약 고정 — 변경 시 모델이 보는 계약이 바뀐다."""
+    skillset = loader.load(REF)
+
+    assert skillset.get("search").spec.model_dump() == {
+        "name": "search",
+        "description": "웹 검색을 수행하고 상위 결과를 반환",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "max_results": {"type": "integer", "default": 10},
+            },
+            "required": ["query"],
+        },
+    }
+
+
+def test_declaration_description_overrides_docstring(loader):
+    skillset = loader.load(REF)
+
+    # search 는 skillset.yaml 에 description 이 있고, fetch_page 는 없다
+    assert skillset.get("search").spec.description == "웹 검색을 수행하고 상위 결과를 반환"
+    assert skillset.get("fetch_page").spec.description == "URL 의 본문 텍스트를 추출합니다."
+
+
+def test_timeout_comes_from_declaration(loader):
+    skillset = loader.load(REF)
+
+    assert skillset.get("search").timeout_s == 30
+    assert skillset.get("fetch_page").timeout_s == 60
+
+
+def test_required_env_is_exposed(loader):
+    skillset = loader.load(REF)
+
+    assert skillset.required_env == ("SEARCH_API_KEY",)
+
+
+def test_tools_returns_all_specs(loader):
+    skillset = loader.load(REF)
+
+    assert {t.name for t in skillset.tools()} == {"search", "fetch_page"}
+
+
+def test_get_unknown_skill_raises_mod_001(loader):
+    skillset = loader.load(REF)
+
+    with pytest.raises(MalkuthError) as exc_info:
+        skillset.get("nonexistent")
+
+    assert exc_info.value.code == "MOD_001"
+
+
+async def test_loaded_skill_is_callable(loader):
+    skillset = loader.load(REF)
+    ctx = SkillContext(agent="researcher", task_id="t", run_id="r")
+
+    results = await skillset.get("search").fn(ctx, "query", 2)
+
+    assert len(results) == 2
+
+
+def _write_skillset(tmp_path, *, yaml_body: str, modules: dict[str, str] | None = None):
+    module = tmp_path / "modules" / "skillsets" / "custom" / "0.1.0"
+    (module / "skills").mkdir(parents=True)
+    (module / "skills" / "__init__.py").write_text("", encoding="utf-8")
+    (module / "skillset.yaml").write_text(yaml_body, encoding="utf-8")
+    for name, source in (modules or {}).items():
+        (module / "skills" / f"{name}.py").write_text(source, encoding="utf-8")
+    return SkillsetLoader(ModuleRegistry.under(tmp_path))
+
+
+HEADER = """apiVersion: malkuth/v1
+kind: Skillset
+metadata:
+  name: custom
+  version: 0.1.0
+spec:
+  skills:
+"""
+
+
+def test_missing_skill_module_raises_mod_003(tmp_path):
+    loader = _write_skillset(
+        tmp_path,
+        yaml_body=HEADER + "    - name: a\n      entrypoint: skills.absent:a\n",
+    )
+
+    with pytest.raises(MalkuthError) as exc_info:
+        loader.load("skillsets/custom@0.1.0")
+
+    assert exc_info.value.code == "MOD_003"
+    assert "module not found" in exc_info.value.message
+
+
+def test_missing_entrypoint_function_raises_mod_003(tmp_path):
+    loader = _write_skillset(
+        tmp_path,
+        yaml_body=HEADER + "    - name: a\n      entrypoint: skills.mod:absent\n",
+        modules={"mod": "value = 1\n"},
+    )
+
+    with pytest.raises(MalkuthError) as exc_info:
+        loader.load("skillsets/custom@0.1.0")
+
+    assert exc_info.value.code == "MOD_003"
+    assert "entrypoint not found" in exc_info.value.message
+
+
+def test_sync_skill_raises_mod_003(tmp_path):
+    """모든 skill 은 async — 동기 함수는 로드 단계에서 걸러진다."""
+    loader = _write_skillset(
+        tmp_path,
+        yaml_body=HEADER + "    - name: a\n      entrypoint: skills.mod:a\n",
+        modules={"mod": "def a(ctx, q: str) -> str:\n    '''동기.'''\n    return q\n"},
+    )
+
+    with pytest.raises(MalkuthError) as exc_info:
+        loader.load("skillsets/custom@0.1.0")
+
+    assert exc_info.value.code == "MOD_003"
+
+
+def test_module_import_failure_raises_mod_003(tmp_path):
+    loader = _write_skillset(
+        tmp_path,
+        yaml_body=HEADER + "    - name: a\n      entrypoint: skills.mod:a\n",
+        modules={"mod": "raise RuntimeError('boom')\n"},
+    )
+
+    with pytest.raises(MalkuthError) as exc_info:
+        loader.load("skillsets/custom@0.1.0")
+
+    assert exc_info.value.code == "MOD_003"
+    assert "import failed" in exc_info.value.message
+
+
+def test_undecorated_async_function_still_gets_schema(tmp_path):
+    loader = _write_skillset(
+        tmp_path,
+        yaml_body=HEADER + "    - name: a\n      entrypoint: skills.mod:a\n",
+        modules={"mod": "async def a(ctx, q: str) -> str:\n    '''설명.'''\n    return q\n"},
+    )
+
+    skillset = loader.load("skillsets/custom@0.1.0")
+
+    assert skillset.get("a").spec.parameters["required"] == ["q"]
+
+
+def test_declared_name_overrides_function_name(tmp_path):
+    loader = _write_skillset(
+        tmp_path,
+        yaml_body=HEADER + "    - name: renamed\n      entrypoint: skills.mod:original\n",
+        modules={
+            "mod": (
+                "from malkuth.core.skill import SkillContext, skill\n\n\n"
+                "@skill\nasync def original(ctx: SkillContext, q: str) -> str:\n"
+                "    '''설명.'''\n    return q\n"
+            )
+        },
+    )
+
+    skillset = loader.load("skillsets/custom@0.1.0")
+
+    assert skillset.get("renamed").spec.name == "renamed"
+
+
+def test_duplicate_skill_names_raise_mod_003(tmp_path):
+    loader = _write_skillset(
+        tmp_path,
+        yaml_body=HEADER
+        + "    - name: a\n      entrypoint: skills.mod:a\n"
+        + "    - name: a\n      entrypoint: skills.mod:a\n",
+        modules={"mod": "async def a(ctx) -> None:\n    '''설명.'''\n"},
+    )
+
+    with pytest.raises(MalkuthError) as exc_info:
+        loader.load("skillsets/custom@0.1.0")
+
+    assert exc_info.value.code == "MOD_003"
+
+
+def test_empty_skillset_raises_mod_003(tmp_path):
+    loader = _write_skillset(tmp_path, yaml_body=HEADER + "    []\n")
+
+    with pytest.raises(MalkuthError) as exc_info:
+        loader.load("skillsets/custom@0.1.0")
+
+    assert exc_info.value.code == "MOD_003"
+
+
+@pytest.mark.parametrize("entrypoint", ["skills.mod", "skills.mod:a:b", ":a", "skills.mod:"])
+def test_malformed_entrypoint_raises_mod_003(tmp_path, entrypoint):
+    loader = _write_skillset(
+        tmp_path,
+        yaml_body=HEADER + f"    - name: a\n      entrypoint: '{entrypoint}'\n",
+    )
+
+    with pytest.raises(MalkuthError) as exc_info:
+        loader.load("skillsets/custom@0.1.0")
+
+    assert exc_info.value.code == "MOD_003"
+
+
+def test_skillset_supports_intra_package_imports(tmp_path):
+    """스킬셋 내부의 상대 import 가 동작해야 한다.
+
+    중간 패키지를 등록하지 않으면 `from .util import ...` 같은 평범한 구조의
+    스킬셋이 통째로 로드되지 않는다.
+    """
+    root = tmp_path / "web-search" / "0.1.0"
+    (root / "skills").mkdir(parents=True)
+    (root / "skillset.yaml").write_text(
+        "apiVersion: malkuth/v1\n"
+        "kind: Skillset\n"
+        "metadata: {name: web-search, version: 0.1.0}\n"
+        "spec:\n"
+        "  skills:\n"
+        "    - name: search\n"
+        "      entrypoint: skills.search:search\n"
+        "      description: d\n"
+    )
+    (root / "skills" / "__init__.py").write_text("")
+    (root / "skills" / "util.py").write_text("HELPER = 'ok'\n")
+    (root / "skills" / "search.py").write_text(
+        "from malkuth.core.skill import SkillContext, skill\n"
+        "from .util import HELPER\n"
+        "\n"
+        "@skill\n"
+        "async def search(ctx: SkillContext, q: str) -> str:\n"
+        '    """s."""\n'
+        "    return HELPER\n"
+    )
+    roots = RegistryRoots(
+        skillsets=tmp_path,
+        promptsets=tmp_path,
+        memorysets=tmp_path,
+        agents=tmp_path,
+        graphs=tmp_path,
+    )
+
+    loaded = SkillsetLoader(ModuleRegistry(roots)).load("skillsets/web-search@0.1.0")
+
+    assert [s.name for s in loaded.skills] == ["search"]

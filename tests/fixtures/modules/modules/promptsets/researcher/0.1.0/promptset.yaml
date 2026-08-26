@@ -1,0 +1,24 @@
+apiVersion: malkuth/v1
+kind: Promptset
+metadata:
+  name: researcher
+  version: 0.1.0
+  description: 리서치 에이전트 프롬프트
+
+spec:
+  engine: jinja2
+  default_locale: en
+  templates:
+    default:
+      file: templates/default.j2
+      variables:
+        query: {type: string, required: true}
+    research:
+      file: templates/research.j2
+      variables:
+        query: {type: string, required: true}
+        depth: {type: integer, default: 2}
+    summarize:
+      file: templates/summarize.j2
+      variables:
+        documents: {type: array, required: true}

@@ -1,0 +1,42 @@
+apiVersion: malkuth/v1
+kind: Graph
+metadata:
+  name: memory-maintenance
+  version: 1.0.0
+  description: memory space compaction 을 수행하는 시스템 유지보수 그래프
+
+spec:
+  mode: service
+  goal: 선언된 memory space 를 점검해 trigger 에 도달한 space 를 압축한다
+
+  # 프레임워크가 자체 메커니즘(에이전트 + 그래프)으로 compaction 을 수행한다
+  # (09 Compaction 2) — 별도 배치 잡을 두지 않는다
+  service:
+    idle:
+      min_delay_s: 300      # 압축은 급하지 않다 — 자주 깨울 이유가 없다
+      max_delay_s: 3600
+    max_failure_streak: 3
+
+  state:
+    schema: malkuth.graphs.schemas:MaintenanceState
+
+  nodes:
+    - id: scanner
+      agent: agents/planner@0.1.0
+      input_map: {spaces: state.spaces}
+      output_map: {pending_spaces: output.pending_spaces}
+
+    - id: compactor
+      agent: agents/writer@0.1.0
+      input_map: {pending_spaces: state.pending_spaces}
+      output_map: {compacted: output.compacted}
+
+  edges:
+    - {from: START, to: scanner}
+    - from: scanner
+      to: compactor
+      condition: malkuth.graphs.conditions:needs_compaction
+    - from: scanner
+      to: scanner
+      condition: malkuth.graphs.conditions:maintenance_idle
+    - {from: compactor, to: scanner}

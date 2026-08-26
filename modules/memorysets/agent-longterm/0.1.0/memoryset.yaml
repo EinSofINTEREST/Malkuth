@@ -1,0 +1,34 @@
+apiVersion: malkuth/v1
+kind: Memoryset
+metadata:
+  name: agent-longterm
+  version: 0.1.0
+  description: 에이전트 장기 기억 표준 정책
+
+spec:
+  scope: local
+
+  index:
+    embedding:
+      provider: openai-compatible
+      model: text-embedding-3-small   # 버전 고정 — 변경 시 재인덱싱 + version bump
+      dimensions: 1536
+    chunk:
+      max_tokens: 400
+      overlap_tokens: 40
+    hybrid:
+      vector_weight: 0.6
+      lexical_weight: 0.4
+
+  retention:
+    ttl_days: 365
+    compaction:
+      trigger_entries: 5000
+      strategy: summarize
+      keep_kinds: [fact, summary]
+
+  recall:
+    auto: true
+    k: 6
+    min_score: 0.35
+    budget_tokens: 2000

@@ -36,3 +36,22 @@ class FeedMonitorState(BaseModel):
     new_items: list[str] = Field(default_factory=list)
     seen_ids: list[str] = Field(default_factory=list)
     notified: int = 0
+
+
+class MaintenanceState(BaseModel):
+    """State for the memory maintenance service graph.
+
+    메모리 유지보수 상주 그래프의 state. 프레임워크가 자기 메커니즘(에이전트 +
+    그래프)으로 compaction 을 수행하므로, 대상 space 와 진행 상황이 iteration
+    사이에 이어져야 한다.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    spaces: list[str] = Field(default_factory=list)
+    """점검 대상 memory space 별칭."""
+
+    pending_spaces: list[str] = Field(default_factory=list)
+    """compaction trigger 에 도달해 압축이 필요한 space."""
+
+    compacted: int = 0

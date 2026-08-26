@@ -25,7 +25,6 @@ from malkuth.runtime.nodes import ControlNodeRuntime
 from tests.e2e.test_stack import (
     COMPOSE_FILE,
     docker,
-    fetch,
     requires_docker,
     wait_healthy,
 )
@@ -55,17 +54,21 @@ def graph_stack() -> Iterator[dict[str, int]]:
 
 
 @pytest.fixture
-def node_runtime(graph_stack: dict[str, int]) -> Iterator[ControlNodeRuntime]:
-    """실제 Control API 를 호출하는 노드 런타임."""
+async def node_runtime(graph_stack: dict[str, int]):
+    """실제 Control API 를 호출하는 노드 런타임.
+
+    각 ControlClient 가 httpx.AsyncClient 를 들고 있으므로 finalizer 에서
+    반드시 닫는다 — 안 닫으면 커넥션이 새고 unclosed-client 경고가 뜬다.
+    """
     clients = {
         name: ControlClient(f"http://127.0.0.1:{port}", agent=name)
         for name, port in graph_stack.items()
     }
-    runtime = ControlNodeRuntime(clients=clients)
     try:
-        yield runtime
+        yield ControlNodeRuntime(clients=clients)
     finally:
-        pass
+        for client in clients.values():
+            await client.aclose()
 
 
 def submitter(runtime: ControlNodeRuntime) -> RunSubmitter:
@@ -94,27 +97,40 @@ async def test_mission_run_visits_every_node(node_runtime):
 
 
 @requires_docker
-async def test_nodes_receive_the_run_id_over_the_wire(node_runtime):
-    """run_id 하나로 전 계층 로그를 잇는다 — 컨테이너를 건너도 유지되어야 한다."""
+async def test_nodes_receive_the_run_id_over_the_wire(graph_stack):
+    """run_id 하나로 전 계층 로그를 잇는다 — 컨테이너를 건너도 유지되어야 한다.
+
+    **그래프가 실제로 넘긴 TaskRequest** 를 관찰한다. 별도의 직접 호출을 만들어
+    검증하면, 오케스트레이터가 run_id 를 통째로 누락시켜도 테스트가 통과한다.
+    """
     run_id = "e2e-traced"
+    observed: list[tuple[str, str]] = []
 
-    await submitter(node_runtime).submit(
-        topology("research-pipeline"), {"query": "q"}, run_id=run_id
-    )
+    clients = {
+        name: ControlClient(f"http://127.0.0.1:{port}", agent=name)
+        for name, port in graph_stack.items()
+    }
 
-    # echo 에이전트가 입력을 그대로 돌려주므로, 노드가 받은 run_id 를 직접 확인한다
-    port = AGENT_PORTS["planner"]
-    echoed = fetch(
-        f"http://127.0.0.1:{port}/v1/invoke",
-        {
-            "task_id": "probe",
-            "run_id": run_id,
-            "node_id": "planner",
-            "input": {"run_id": run_id},
-            "trace": {"trace_id": run_id},
-        },
-    )
-    assert echoed["output"]["run_id"] == run_id
+    class Observing:
+        """실제 Control API 로 넘기되, 넘어간 태스크를 기록한다."""
+
+        def __init__(self) -> None:
+            self._inner = ControlNodeRuntime(clients=clients)
+
+        async def invoke(self, node, task):
+            observed.append((task.run_id, task.trace.trace_id))
+            return await self._inner.invoke(node, task)
+
+    try:
+        await submitter(Observing()).submit(  # type: ignore[arg-type]
+            topology("research-pipeline"), {"query": "q"}, run_id=run_id
+        )
+    finally:
+        for client in clients.values():
+            await client.aclose()
+
+    assert observed, "no node was invoked"
+    assert all(seen == (run_id, run_id) for seen in observed), observed
 
 
 @requires_docker

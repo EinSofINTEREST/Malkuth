@@ -203,12 +203,25 @@ class McpSession:
                 ``MCP_003`` on execution failure, ``MCP_004`` if the transport
                 is gone and reconnection failed.
         """
-        if tool not in self.tools:
-            raise unknown_tool(self.agent, self.name, tool)
-
         assert self.breaker is not None  # noqa: S101 — __post_init__ 가 보장
         if not self.breaker.can_attempt():
             raise transport_lost(self.agent, self.name, reason="circuit open")
+
+        # 연결 여부를 tool 조회보다 먼저 본다. 단절 상태에서는 tools 가 비어 있어,
+        # 순서를 바꾸면 복구 가능한 단절(MCP_004)이 tool 미존재(MCP_002, 재시도
+        # 무의미)로 오분류되어 호출자가 재시도를 포기한다
+        if self._connection is None:
+            try:
+                await self.reconnect()
+                result = await self._call_once(tool, arguments)
+            except MalkuthError:
+                self.breaker.record_failure()
+                raise
+            self.breaker.record_success()
+            return result
+
+        if tool not in self.tools:
+            raise unknown_tool(self.agent, self.name, tool)
 
         try:
             result = await self._call_once(tool, arguments)
@@ -216,9 +229,10 @@ class McpSession:
             if err.code != ErrorCode.MCP_004:
                 self.breaker.record_failure()
                 raise
-            # 단절은 재연결 후 1회만 재시도한다 (05 Retry Layering)
-            await self.reconnect()
+            # 단절은 재연결 후 1회만 재시도한다 (05 Retry Layering).
+            # 재연결 자체의 실패도 breaker 에 반영해야 죽은 서버를 계속 두드리지 않는다
             try:
+                await self.reconnect()
                 result = await self._call_once(tool, arguments)
             except MalkuthError:
                 self.breaker.record_failure()
@@ -232,6 +246,8 @@ class McpSession:
         connection = self._connection
         if connection is None:
             raise transport_lost(self.agent, self.name, reason="session not established")
+        if tool not in self.tools:
+            raise unknown_tool(self.agent, self.name, tool)
 
         try:
             return await asyncio.wait_for(

@@ -143,15 +143,63 @@ async def test_transport_loss_is_retryable_mcp_004():
     assert exc_info.value.retryable is True
 
 
-async def test_call_before_initialize_reports_transport_lost():
-    session = make_session(FakeTransport(["read_file"]))
-    session.spec = stdio_spec()
+async def test_call_without_a_session_reconnects_first():
+    """세션이 없으면 재연결을 시도한다 — 살아있는 서버를 죽었다고 단정하지 않는다."""
+    transport = FakeTransport(["read_file"])
+    session = make_session(transport)
+
+    result = await session.call_tool("read_file", {})
+
+    assert result.content == "ok"
+    assert transport.connects == 1
+
+
+async def test_call_without_a_session_reports_transport_lost_when_dead():
+    """재연결도 실패하면 tool 미존재가 아니라 단절로 보고한다."""
+    session = make_session(
+        FakeTransport(["read_file"], connect_errors=[RuntimeError("down")]), max_reconnects=1
+    )
 
     with pytest.raises(MalkuthError) as exc_info:
         await session.call_tool("read_file", {})
 
-    # 바인딩된 tool 이 없으니 먼저 MCP_002 로 걸린다
-    assert exc_info.value.code == "MCP_002"
+    assert exc_info.value.code == "MCP_004"
+    assert exc_info.value.retryable is True
+
+
+async def test_disconnected_session_does_not_report_unknown_tool():
+    """단절 상태에서 tools 가 비어 MCP_002 로 오분류되면 호출자가 재시도를 포기한다."""
+    transport = FakeTransport(["read_file"], connect_errors=[None, RuntimeError("down")])
+    session = make_session(transport, max_reconnects=1)
+    await session.initialize()
+    transport.fail_calls_with(ConnectionError("gone"))
+
+    with pytest.raises(MalkuthError):
+        await session.call_tool("read_file", {})
+    assert session.connected is False
+
+    with pytest.raises(MalkuthError) as exc_info:
+        await session.call_tool("read_file", {})
+
+    assert exc_info.value.code == "MCP_004"
+    assert exc_info.value.retryable is True
+
+
+async def test_reconnect_failure_counts_toward_the_circuit():
+    """재연결 자체가 실패해도 breaker 가 열려야 죽은 서버를 계속 두드리지 않는다."""
+    transport = FakeTransport(
+        ["read_file"], connect_errors=[None, *(RuntimeError("down") for _ in range(20))]
+    )
+    session = make_session(transport, max_reconnects=1)
+    await session.initialize()
+    transport.fail_calls_with(ConnectionError("gone"))
+
+    assert session.breaker is not None
+    for _ in range(5):
+        with pytest.raises(MalkuthError):
+            await session.call_tool("read_file", {})
+
+    assert session.breaker.can_attempt() is False
 
 
 # --- 재연결 -------------------------------------------------------------------

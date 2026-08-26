@@ -1,0 +1,19 @@
+{
+  "title": "Malkuth — Overview",
+  "uid": "malkuth-overview",
+  "description": "Active runs, task success rate, token usage, container health",
+  "panels": [
+    {"title": "Active runs", "type": "stat",
+     "targets": [{"expr": "sum by (graph, mode) (malkuth_runs_active)"}]},
+    {"title": "Task success rate", "type": "timeseries",
+     "targets": [{"expr": "sum(rate(malkuth_agent_tasks_total{status=\"completed\"}[5m])) / sum(rate(malkuth_agent_tasks_total[5m]))"}]},
+    {"title": "Task failures by agent", "type": "timeseries",
+     "targets": [{"expr": "sum by (agent) (rate(malkuth_agent_tasks_total{status=\"failed\"}[5m]))"}]},
+    {"title": "Token usage", "type": "timeseries",
+     "targets": [{"expr": "sum by (direction) (rate(malkuth_model_tokens_total[5m]))"}]},
+    {"title": "Containers running", "type": "stat",
+     "targets": [{"expr": "sum(malkuth_containers_running)"}]},
+    {"title": "Unhealthy agents", "type": "stat",
+     "targets": [{"expr": "count(malkuth_agent_health == 0)"}]}
+  ]
+}

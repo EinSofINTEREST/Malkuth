@@ -6,10 +6,12 @@ name: malkuth
 
 services:
   agent-echo:
-    image: malkuth/agent-echo:0.1.0
+    image: malkuth/agent-echo:${IMAGE_TAG:-0.1.0}
     build:
       context: ../..
       dockerfile: deployments/docker/agent-echo.Dockerfile
+      args:
+        BASE_TAG: ${IMAGE_TAG:-0.1.0}
     networks: [malkuth-net]
     ports:
       # 개발 편의를 위한 control port 노출 — 운영에서는 runtime 만 접근한다

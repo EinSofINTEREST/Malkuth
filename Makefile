@@ -42,13 +42,15 @@ IMAGE_TAG ?= 0.1.0
 
 build: ## 에이전트 base image + 테스트 echo image 빌드
 	docker build -t malkuth/agent-base:$(IMAGE_TAG) -f $(DOCKER_DIR)/agent-base.Dockerfile .
-	docker build -t malkuth/agent-echo:$(IMAGE_TAG) -f $(DOCKER_DIR)/agent-echo.Dockerfile .
+	docker build -t malkuth/agent-echo:$(IMAGE_TAG) \
+		--build-arg BASE_TAG=$(IMAGE_TAG) \
+		-f $(DOCKER_DIR)/agent-echo.Dockerfile .
 
 up: ## 개발 스택 기동
-	docker compose -f $(DOCKER_DIR)/compose.yaml up -d
+	IMAGE_TAG=$(IMAGE_TAG) docker compose -f $(DOCKER_DIR)/compose.yaml up -d
 
 down: ## 개발 스택 정지
-	docker compose -f $(DOCKER_DIR)/compose.yaml down -v
+	IMAGE_TAG=$(IMAGE_TAG) docker compose -f $(DOCKER_DIR)/compose.yaml down -v
 
 clean: ## 빌드/캐시 산출물 정리
 	rm -rf .pytest_cache .mypy_cache .ruff_cache .coverage htmlcov dist

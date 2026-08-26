@@ -372,3 +372,33 @@ def test_optional_union_is_not_reported_as_untyped(monkeypatch):
         return "x"
 
     assert [r for r in recorded if "have no type" in r["event"]] == []
+
+
+def test_warnings_use_the_exposed_tool_name(monkeypatch):
+    """@skill(name=...) 로 바꾼 경우 운영자가 로그의 이름으로 tool 을 찾을 수 있어야 한다."""
+    recorded = _captured_warnings(monkeypatch)
+
+    namespace: dict = {}
+    exec(  # noqa: S102 — 미해결 힌트를 만들려면 지연 평가가 필요하다
+        "from __future__ import annotations\n"
+        "from malkuth.core.skill import skill\n"
+        "@skill(name='public_name')\n"
+        "async def internal_fn(ctx: 'NotImportedHere', q: str) -> str:\n"
+        '    """설명."""\n',
+        namespace,
+    )
+
+    assert recorded
+    assert all(r["tool"] == "public_name" for r in recorded), recorded
+
+
+def test_untyped_warning_also_uses_the_exposed_name(monkeypatch):
+    recorded = _captured_warnings(monkeypatch)
+
+    @skill(name="renamed")
+    async def internal(ctx: SkillContext, thing) -> str:
+        """설명."""
+        return "x"
+
+    warned = [r for r in recorded if "have no type" in r["event"]]
+    assert warned[0]["tool"] == "renamed"

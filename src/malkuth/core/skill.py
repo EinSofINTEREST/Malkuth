@@ -197,7 +197,9 @@ def build_spec(fn: Callable[..., Any], *, name: str | None = None) -> SkillSpec:
         # 동적 정의 skill 을 막지 않기 위해 에러 대신 경고로 드러낸다
         log.warning(
             "skill type hints could not be resolved",
-            tool=fn.__name__,
+            # 노출되는 이름을 쓴다 — fn.__name__ 을 쓰면 @skill(name=...) 로
+            # 바꾼 경우 운영자가 로그의 이름으로 tool 을 찾을 수 없다
+            tool=name or fn.__name__,
             reason=type(err).__name__,
             detail=str(err),
         )

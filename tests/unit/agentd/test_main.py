@@ -11,9 +11,17 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from malkuth.agentd.__main__ import CONTROL_PORT, build_app, load_manifest
+from malkuth.agentd.__main__ import (
+    CONTROL_PORT,
+    ECHO_EXECUTOR,
+    EXECUTOR_ENV,
+    build_app,
+    build_executor,
+    load_manifest,
+)
 from malkuth.agentd.echo import EchoExecutor
 from malkuth.core.agent import TaskStatus
+from malkuth.core.errors import MalkuthError
 from malkuth.core.manifest import AgentManifest
 from tests.fixtures.builders import make_task
 
@@ -45,7 +53,7 @@ def test_shipped_echo_manifest_is_valid():
 
 def test_missing_manifest_is_a_config_error(tmp_path: Path):
     """읽을 수 없는 manifest 로는 기동하지 않는다."""
-    with pytest.raises(Exception) as exc_info:
+    with pytest.raises(MalkuthError) as exc_info:
         load_manifest(tmp_path / "absent.yaml")
 
     assert exc_info.value.code == "CFG_001"
@@ -55,7 +63,7 @@ def test_invalid_manifest_is_rejected(tmp_path: Path):
     """미검증 manifest 로 컨테이너를 기동하지 않는다 (02 Manifest Rules 1)."""
     path = write(tmp_path, "apiVersion: malkuth/v1\nkind: Agent\nmetadata: {}\n")
 
-    with pytest.raises(Exception) as exc_info:
+    with pytest.raises(MalkuthError) as exc_info:
         load_manifest(path)
 
     assert exc_info.value.code == "CFG_001"
@@ -64,7 +72,7 @@ def test_invalid_manifest_is_rejected(tmp_path: Path):
 def test_unparseable_yaml_is_rejected(tmp_path: Path):
     path = write(tmp_path, "apiVersion: [unclosed\n")
 
-    with pytest.raises(Exception) as exc_info:
+    with pytest.raises(MalkuthError) as exc_info:
         load_manifest(path)
 
     assert exc_info.value.code == "CFG_001"
@@ -141,3 +149,35 @@ async def test_echo_streams_token_then_done():
 
     assert [e.type for e in events] == ["token", "done"]
     assert events[-1].output == {"msg": "hi"}
+
+
+# --- 실행기 선택 --------------------------------------------------------------
+
+
+def test_echo_executor_is_opt_in(monkeypatch):
+    """테스트 이미지만 echo 대역을 쓴다."""
+    monkeypatch.setenv(EXECUTOR_ENV, ECHO_EXECUTOR)
+
+    executor = build_executor(load_manifest(ECHO_MANIFEST))
+
+    assert isinstance(executor, EchoExecutor)
+
+
+def test_base_image_does_not_default_to_echo(monkeypatch):
+    """base 이미지가 echo 로 돌면 모든 에이전트가 대역이 된다 — 조용히 떨어지지 않는다."""
+    monkeypatch.delenv(EXECUTOR_ENV, raising=False)
+
+    with pytest.raises(MalkuthError) as exc_info:
+        build_executor(load_manifest(ECHO_MANIFEST))
+
+    assert exc_info.value.code == "CFG_001"
+
+
+def test_unknown_executor_selection_is_rejected(monkeypatch):
+    monkeypatch.setenv(EXECUTOR_ENV, "mystery")
+
+    with pytest.raises(MalkuthError) as exc_info:
+        build_executor(load_manifest(ECHO_MANIFEST))
+
+    assert exc_info.value.code == "CFG_001"
+    assert exc_info.value.details["executor"] == "mystery"

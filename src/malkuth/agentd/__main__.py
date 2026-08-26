@@ -29,6 +29,10 @@ CONTROL_PORT = 8080
 DEFAULT_MANIFEST_PATH = "/app/manifest.yaml"
 MANIFEST_ENV = "MALKUTH_MANIFEST"
 TOKEN_ENV = "MALKUTH_AGENT_TOKEN"  # noqa: S105 — 값이 아니라 키 이름이다
+EXECUTOR_ENV = "MALKUTH_EXECUTOR"
+
+ECHO_EXECUTOR = "echo"
+"""테스트 이미지가 선택하는 대역 — base 이미지의 기본값이 되어서는 안 된다."""
 
 log = structlog.get_logger(__name__)
 
@@ -97,15 +101,57 @@ def build_app(manifest: AgentManifest, executor: Any, *, token: str | None = Non
     return create_app(runtime, token=token)
 
 
+def build_executor(manifest: AgentManifest) -> Any:
+    """Select the executor this image should serve.
+
+    이 이미지가 서빙할 실행기를 고릅니다. 기본은 manifest 기반 표준 실행기이고,
+    ``MALKUTH_EXECUTOR=echo`` 를 선언한 **테스트 이미지만** echo 대역을 씁니다 —
+    base 이미지가 echo 로 동작하면 모든 에이전트가 대역이 되어버립니다.
+
+    Args:
+        manifest: The validated agent manifest.
+
+    Returns:
+        The executor serving invoke/stream.
+
+    Raises:
+        MalkuthError: CONFIG/``CFG_001`` if the declared executor is unknown.
+    """
+    declared = os.environ.get(EXECUTOR_ENV, "").strip().lower()
+
+    if declared == ECHO_EXECUTOR:
+        from malkuth.agentd.echo import EchoExecutor
+
+        return EchoExecutor()
+
+    if declared:
+        raise MalkuthError(
+            category=ErrorCategory.CONFIG,
+            code=ErrorCode.CFG_001,
+            message="unknown executor selection",
+            agent=manifest.name,
+            details={"executor": declared},
+        )
+
+    # 표준 경로: manifest 의 모듈/모델 선언을 따르는 실행기.
+    # 모델 provider 바인딩(#14)이 서기 전까지는 기동 시점에 명확히 실패한다 —
+    # 조용히 대역으로 떨어지면 운영에서 가짜 응답이 나간다
+    raise MalkuthError(
+        category=ErrorCategory.CONFIG,
+        code=ErrorCode.CFG_001,
+        message="no model provider bound for this agent image",
+        agent=manifest.name,
+        details={"hint": f"set {EXECUTOR_ENV}={ECHO_EXECUTOR} for the test image"},
+    )
+
+
 def main() -> None:
     """Run the agent daemon.
 
-    에이전트 데몬을 실행합니다 — manifest 로드 → 앱 구성 → Control API 서빙.
+    에이전트 데몬을 실행합니다 — manifest 로드 → 실행기 선택 → Control API 서빙.
     """
-    from malkuth.agentd.echo import EchoExecutor
-
     manifest = load_manifest(Path(os.environ.get(MANIFEST_ENV, DEFAULT_MANIFEST_PATH)))
-    app = build_app(manifest, EchoExecutor(), token=os.environ.get(TOKEN_ENV))
+    app = build_app(manifest, build_executor(manifest), token=os.environ.get(TOKEN_ENV))
 
     log.info(
         "agentd starting",

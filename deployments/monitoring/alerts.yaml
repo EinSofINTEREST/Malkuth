@@ -7,9 +7,13 @@ groups:
     interval: 30s
     rules:
       - alert: AgentHighFailureRate
+        # 분모에서 status 를 제거해야 한다 — 남겨 두면 status="failed" 끼리만
+        # 벡터 매칭되어 비율이 항상 1.0 이 되고, 실패 1건에도 발화한다
         expr: |
-          rate(malkuth_agent_tasks_total{status="failed"}[5m]) /
-          rate(malkuth_agent_tasks_total[5m]) > 0.1
+          sum without (status) (rate(malkuth_agent_tasks_total{status="failed"}[5m]))
+          /
+          sum without (status) (rate(malkuth_agent_tasks_total[5m]))
+          > 0.1
         for: 5m
         labels: {severity: warning}
         annotations:
@@ -25,7 +29,9 @@ groups:
           runbook: "docs/en/runbooks/incident-response.md#agentdown"
 
       - alert: ContainerRestartLoop
-        expr: increase(malkuth_container_restarts_total[10m]) > 5
+        # reason 을 합산하지 않으면 같은 에이전트가 reason 조합별로 쪼개져 발화한다
+        expr: |
+          sum without (reason) (increase(malkuth_container_restarts_total[10m])) > 5
         labels: {severity: critical}
         annotations:
           summary: "Agent {{ $labels.agent }} restart loop"
@@ -33,7 +39,9 @@ groups:
 
       - alert: ModelRateLimited
         expr: |
-          rate(malkuth_model_requests_total{status="rate_limited"}[5m]) > 1
+          sum without (status) (
+            rate(malkuth_model_requests_total{status="rate_limited"}[5m])
+          ) > 1
         for: 5m
         labels: {severity: warning}
         annotations:
@@ -42,7 +50,9 @@ groups:
 
       - alert: CheckpointFailures
         expr: |
-          rate(malkuth_checkpoint_operations_total{status="error"}[5m]) > 0
+          sum without (status) (
+            rate(malkuth_checkpoint_operations_total{status="error"}[5m])
+          ) > 0
         for: 5m
         labels: {severity: critical}
         annotations:
@@ -50,16 +60,22 @@ groups:
           runbook: "docs/en/runbooks/recovery.md#checkpoint-failures"
 
       - alert: ServiceRunStalled
+        # `and` 는 전체 라벨셋 일치를 요구한다 — 좌변은 {graph,mode}, 우변은
+        # {graph,status} 라 on(graph) 없이는 교집합이 비어 영원히 발화하지 않는다
         expr: |
-          malkuth_runs_active{mode="service"} > 0
-          and increase(malkuth_service_iterations_total[30m]) == 0
+          sum without (mode) (malkuth_runs_active{mode="service"}) > 0
+          and on (graph)
+          sum without (status) (increase(malkuth_service_iterations_total[30m])) == 0
         labels: {severity: critical}
         annotations:
           summary: "Service graph {{ $labels.graph }} made no progress for 30m"
           runbook: "docs/en/runbooks/incident-response.md#servicerunstalled"
 
       - alert: ServiceRunHalted
-        expr: increase(malkuth_service_iterations_total{status="halted"}[10m]) > 0
+        expr: |
+          sum without (status) (
+            increase(malkuth_service_iterations_total{status="halted"}[10m])
+          ) > 0
         labels: {severity: critical}
         annotations:
           summary: "Service graph {{ $labels.graph }} halted (GRAPH_005 failure streak)"

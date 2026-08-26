@@ -102,14 +102,82 @@ def test_every_alert_links_an_existing_runbook_section(alert_rules):
         assert anchor in headings, f"{rule['alert']} -> missing anchor #{anchor}"
 
 
+def label_filters(text: str) -> list[tuple[str, str]]:
+    """`metric{a="x", b="y"}` 의 **모든** 라벨을 추출한다.
+
+    첫 라벨만 보면 두 번째 이후의 오타를 놓친다.
+    """
+    found: list[tuple[str, str]] = []
+    # JSON 안에서는 따옴표가 \" 로 이스케이프되므로 백슬래시를 먼저 걷어낸다 —
+    # 그러지 않으면 대시보드의 라벨을 하나도 못 잡고 테스트가 공허하게 통과한다
+    normalized = text.replace('\\"', '"')
+    for metric, selector in re.findall(r"(malkuth_[a-z0-9_]+)\{([^}]*)\}", normalized):
+        for label in re.findall(r"(\w+)\s*[=!]~?\s*[\"\']", selector):
+            found.append((metric, label))
+    return found
+
+
+def assert_label_filters_exist(text: str, source: str) -> None:
+    """참조된 라벨이 전부 레지스트리에 존재하는지 확인한다."""
+    labels_by_metric = {spec.name: set(spec.labels) for spec in METRIC_SPECS}
+
+    for metric, label in label_filters(text):
+        known = labels_by_metric[base_metric(metric)]
+        assert label in known, f"{source}: {metric} has no label {label!r} (has {sorted(known)})"
+
+
 def test_alert_expressions_use_label_filters_that_exist(alert_rules):
     """존재하지 않는 라벨로 필터하면 알림이 영원히 발화하지 않는다."""
-    labels_by_metric = {spec.name: set(spec.labels) for spec in METRIC_SPECS}
-    text = ALERTS.read_text(encoding="utf-8")
+    assert_label_filters_exist(ALERTS.read_text(encoding="utf-8"), "alerts.yaml")
 
-    for metric, label in re.findall(r"(malkuth_[a-z0-9_]+)\{(\w+)=", text):
-        known = labels_by_metric[base_metric(metric)]
-        assert label in known, f"{metric} has no label {label!r} (has {sorted(known)})"
+
+@pytest.mark.parametrize("path", DASHBOARDS, ids=lambda p: p.stem)
+def test_dashboard_label_filters_exist(path):
+    """대시보드의 라벨 오타는 빈 패널이 되어 조용히 넘어간다."""
+    assert_label_filters_exist(path.read_text(encoding="utf-8"), path.name)
+
+
+def test_label_filter_extraction_catches_every_label():
+    """추출기 자체의 회귀 방지 — 첫 라벨만 잡으면 뒤의 오타를 놓친다."""
+    sample = 'malkuth_agent_tasks_total{agent="a", status="failed", graph="g"}'
+
+    assert label_filters(sample) == [
+        ("malkuth_agent_tasks_total", "agent"),
+        ("malkuth_agent_tasks_total", "status"),
+        ("malkuth_agent_tasks_total", "graph"),
+    ]
+
+
+def test_label_filter_extraction_handles_json_escaping():
+    """대시보드는 JSON 이라 따옴표가 이스케이프된다 — 못 읽으면 검증이 공허해진다."""
+    sample = r'{"expr": "malkuth_agent_tasks_total{status=\"completed\"}"}'
+
+    assert label_filters(sample) == [("malkuth_agent_tasks_total", "status")]
+
+
+def test_dashboards_actually_contain_label_filters():
+    """추출기가 대시보드에서 라벨을 하나도 못 찾으면 검증이 무의미하다."""
+    text = "\n".join(p.read_text(encoding="utf-8") for p in DASHBOARDS)
+
+    assert label_filters(text), "no label filters extracted — the validation is vacuous"
+
+
+def test_binary_operations_align_label_sets(alert_rules):
+    """이항 연산은 라벨셋이 맞아야 한다.
+
+    `/` 의 양변이나 `and` 의 좌우가 서로 다른 라벨을 들고 있으면 매칭이
+    어긋나 항상 참(오탐) 이거나 영원히 빈 벡터(미발화) 가 된다.
+    """
+    for rule in alert_rules["groups"][0]["rules"]:
+        expr = " ".join(rule["expr"].split())
+        if " and " in expr:
+            assert "on (" in expr or "on(" in expr, (
+                f"{rule['alert']}: `and` needs an explicit on(...) matcher"
+            )
+        if "/" in expr:
+            assert expr.count("sum without") >= 2, (
+                f"{rule['alert']}: ratio needs both sides aggregated to the same label set"
+            )
 
 
 # --- 대시보드 --------------------------------------------------------------

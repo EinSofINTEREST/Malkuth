@@ -9,6 +9,12 @@ from malkuth.runtime.control import (
     ControlClient,
     control_url,
 )
+from malkuth.runtime.lifecycle import (
+    AgentLifecycle,
+    AgentState,
+    ReplicaRouter,
+    RestartPolicy,
+)
 from malkuth.runtime.quota import (
     ResourceTotals,
     check_group_quota,
@@ -17,16 +23,32 @@ from malkuth.runtime.quota import (
     total_demand,
 )
 from malkuth.runtime.scope import ResolvedSecret, ScopedSecrets, SecretScope
+from malkuth.runtime.spec import (
+    DEFAULT_NETWORK,
+    ContainerSpec,
+    PortBinding,
+    build_container_spec,
+    container_name,
+)
 
 __all__ = [
     "DEFAULT_CONTROL_PORT",
+    "DEFAULT_NETWORK",
+    "AgentLifecycle",
+    "AgentState",
+    "ContainerSpec",
     "ControlClient",
+    "PortBinding",
+    "ReplicaRouter",
     "ResolvedSecret",
     "ResourceTotals",
+    "RestartPolicy",
     "ScopedSecrets",
     "SecretScope",
+    "build_container_spec",
     "check_group_quota",
     "check_host_capacity",
+    "container_name",
     "control_url",
     "demand_of",
     "total_demand",

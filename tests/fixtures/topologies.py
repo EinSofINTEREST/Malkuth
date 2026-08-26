@@ -49,6 +49,7 @@ def service_dict(**spec_overrides: Any) -> dict[str, Any]:
     """Build a raw service-mode topology mapping.
 
     유효한 service 토폴로지 매핑을 만듭니다 — idle 정책 포함.
+    한 iteration 은 START -> END 로 끝난다 (반복은 ServiceRunner 소유).
     """
     spec: dict[str, Any] = {
         "mode": "service",
@@ -69,8 +70,8 @@ def service_dict(**spec_overrides: Any) -> dict[str, Any]:
                 "to": "notifier",
                 "condition": "malkuth.graphs.conditions:has_new_items",
             },
-            {"from": "watcher", "to": "watcher", "condition": "malkuth.graphs.conditions:idle"},
-            {"from": "notifier", "to": "watcher"},
+            {"from": "watcher", "to": "END", "condition": "malkuth.graphs.conditions:idle"},
+            {"from": "notifier", "to": "END"},
         ],
     }
     spec.update(spec_overrides)

@@ -458,19 +458,26 @@ def _has_cycle(topology: GraphTopology) -> bool:
 
 
 def _check_mode_topology(topology: GraphTopology) -> None:
-    """모드별 토폴로지 규칙 — mission 은 END 도달, cycle 은 max_iterations 필수."""
-    spec = topology.spec
-    if spec.mode is GraphMode.MISSION:
-        if END not in _reachable_from_start(topology):
-            raise _topology_error("mission graph must be able to reach END", graph=topology.name)
-        # 상한은 순환에 놓인 edge 에 있어야 한다 — 무관한 edge 에 붙은 값은
-        # 실제 순환을 전혀 제한하지 못한 채 검사만 통과시킨다
-        cycle_edges = _cycle_edges(topology)
-        if cycle_edges and not any(e.max_iterations for e in cycle_edges):
-            raise _topology_error(
-                "mission graph with a cycle requires 'max_iterations' on a cycle edge",
-                graph=topology.name,
-            )
+    """모드별 토폴로지 규칙 — 두 모드 모두 END 도달과 순환 상한을 요구한다.
+
+    Service 그래프의 "무한 반복" 은 그래프 안의 순환이 아니라 ``ServiceRunner`` 의
+    iteration 루프가 담당한다. 그래프가 스스로 순환하면 한 번의 실행이 끝나지 않아
+    iteration 경계 자체가 성립하지 않는다 — 그래서 END 요건은 모드와 무관하다.
+    """
+    if END not in _reachable_from_start(topology):
+        raise _topology_error(
+            f"{topology.spec.mode.value} graph must be able to reach END",
+            graph=topology.name,
+        )
+    # 상한은 순환에 놓인 edge 에 있어야 한다 — 무관한 edge 에 붙은 값은
+    # 실제 순환을 전혀 제한하지 못한 채 검사만 통과시킨다
+    cycle_edges = _cycle_edges(topology)
+    if cycle_edges and not any(e.max_iterations for e in cycle_edges):
+        raise _topology_error(
+            f"{topology.spec.mode.value} graph with a cycle requires "
+            "'max_iterations' on a cycle edge",
+            graph=topology.name,
+        )
 
 
 def _check_connections(topology: GraphTopology) -> None:

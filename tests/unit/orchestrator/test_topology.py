@@ -17,7 +17,13 @@ from malkuth.orchestrator.topology import (
     resolve_import_ref,
     validate_topology,
 )
-from tests.fixtures.topologies import make_mission, make_service, mission_dict, service_dict
+from tests.fixtures.topologies import (
+    condition_ref,
+    make_mission,
+    make_service,
+    mission_dict,
+    service_dict,
+)
 
 
 def assert_graph_001(exc_info: pytest.ExceptionInfo[MalkuthError]) -> None:
@@ -262,9 +268,41 @@ def test_mission_cycle_with_max_iterations_passes():
     validate_topology(topology)
 
 
-def test_service_infinite_cycle_is_allowed():
-    """service 는 END 없이 무한 순환해도 된다."""
-    validate_topology(make_service())
+def test_service_graph_must_reach_end():
+    """service 도 END 로 끝나야 한다 — 반복은 그래프가 아니라 runner 가 소유한다.
+
+    그래프가 스스로 순환하면 한 번의 실행이 끝나지 않아 ServiceRunner 의
+    iteration 경계가 성립하지 않는다.
+    """
+    topology = make_service(
+        edges=[
+            {"from": "START", "to": "watcher"},
+            {"from": "watcher", "to": "notifier"},
+            {"from": "notifier", "to": "watcher"},
+        ]
+    )
+
+    with pytest.raises(MalkuthError) as exc_info:
+        validate_topology(topology)
+
+    assert "service graph must be able to reach END" in exc_info.value.message
+
+
+def test_service_cycle_requires_max_iterations():
+    """그래프 안에 남긴 순환은 mission 과 같은 상한 규칙을 받는다."""
+    topology = make_service(
+        edges=[
+            {"from": "START", "to": "watcher"},
+            {"from": "watcher", "to": "notifier"},
+            {"from": "notifier", "to": "watcher", "condition": condition_ref()},
+            {"from": "notifier", "to": "END", "condition": condition_ref()},
+        ]
+    )
+
+    with pytest.raises(MalkuthError) as exc_info:
+        validate_topology(topology)
+
+    assert "max_iterations" in exc_info.value.message
 
 
 def test_connection_caller_must_be_a_node():

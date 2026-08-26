@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import TYPE_CHECKING, Any, Final
+import sys
+import threading
+from typing import TYPE_CHECKING, Any, Final, Literal
 
 import structlog
 
@@ -162,11 +164,47 @@ def mask_secrets(
     return event_dict
 
 
+class _StreamLogger:
+    """Writes rendered log lines to a stream resolved at write time.
+
+    스트림 객체를 붙잡아 두지 않고 **쓸 때마다 조회**합니다 — 캡처해 두면
+    호출자가 스트림을 교체하거나 닫은 뒤 "I/O operation on closed file" 로
+    터집니다 (pytest capsys, 로그 리다이렉션, 데몬 재바인딩 등).
+    """
+
+    def __init__(self, stream_name: Literal["stdout", "stderr"]) -> None:
+        self._stream_name = stream_name
+        self._lock = threading.Lock()
+
+    def msg(self, message: str) -> None:
+        """렌더된 한 줄을 기록한다."""
+        stream = getattr(sys, self._stream_name)
+        with self._lock:
+            stream.write(message + "\n")
+            stream.flush()
+
+    log = debug = info = warn = warning = error = critical = exception = fatal = msg
+
+    def __repr__(self) -> str:
+        return f"<_StreamLogger({self._stream_name})>"
+
+
+class _StreamLoggerFactory:
+    """Builds stream loggers for the configured destination."""
+
+    def __init__(self, stream_name: Literal["stdout", "stderr"]) -> None:
+        self._stream_name = stream_name
+
+    def __call__(self, *args: Any) -> _StreamLogger:
+        return _StreamLogger(self._stream_name)
+
+
 def configure(
     *,
     level: str = DEFAULT_LOG_LEVEL,
     json_output: bool = True,
     extra_processors: Iterable[Any] | None = None,
+    stream_name: Literal["stdout", "stderr"] = "stdout",
 ) -> None:
     """Configure structlog for the process.
 
@@ -203,7 +241,7 @@ def configure(
     structlog.configure(
         processors=processors,
         wrapper_class=structlog.make_filtering_bound_logger(resolved_level),
-        logger_factory=structlog.PrintLoggerFactory(),
+        logger_factory=_StreamLoggerFactory(stream_name),
         cache_logger_on_first_use=True,
     )
 

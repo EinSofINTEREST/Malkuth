@@ -24,6 +24,7 @@ from malkuth.config import load_config
 from malkuth.core.errors import MalkuthError
 from malkuth.core.manifest import AgentManifest, GroupManifest
 from malkuth.deploy import ValidationReport, validate_deployment
+from malkuth.observability.logging import configure
 from malkuth.orchestrator.topology import GraphTopology
 
 if TYPE_CHECKING:
@@ -374,6 +375,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     """
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    # 로그는 stderr 로 — stdout 은 명령 결과 전용이다. 섞이면 `--json` 출력을
+    # 스크립트가 파싱할 수 없다 (출력과 진단의 분리는 CLI 의 기본 계약)
+    configure(json_output=bool(args.json), stream_name="stderr")
 
     try:
         exit_code: int = args.handler(args)

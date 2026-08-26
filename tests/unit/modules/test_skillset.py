@@ -269,3 +269,18 @@ def test_skillset_supports_intra_package_imports(tmp_path):
     loaded = SkillsetLoader(ModuleRegistry(roots)).load("skillsets/web-search@0.1.0")
 
     assert [s.name for s in loaded.skills] == ["search"]
+
+
+# --- 타입 없는 파라미터 리포트 ---------------------------------------------------
+
+
+def test_reference_skillset_has_no_untyped_parameters(tmp_path):
+    """배포되는 스킬셋이 타입 없는 tool 을 모델에 노출하면 안 된다."""
+    from pathlib import Path
+
+    from malkuth.modules.registry import ModuleRegistry
+
+    repo_root = Path(__file__).resolve().parents[3]
+    loaded = SkillsetLoader(ModuleRegistry.under(repo_root)).load("skillsets/web-search@0.2.0")
+
+    assert loaded.untyped_parameters() == {}

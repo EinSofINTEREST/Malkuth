@@ -43,6 +43,24 @@ async def search(ctx: SkillContext, query: str, max_results: int = 10) -> list[d
 핵심 규칙: async-first, secrets/로깅은 `SkillContext` 로만 접근, timeout 은
 `skillset.yaml` 에 선언, 실패는 예외로 (agentd boundary 에서 변환).
 
+**`SkillContext` 는 런타임에 import 하세요 — `TYPE_CHECKING` 뒤에 두지 마세요.**
+tool 스키마는 `get_type_hints()` 로 시그니처에서 도출됩니다. 어노테이션의 이름이
+런타임에 해석되지 않으면 그 호출이 실패하고, 프레임워크는 **스키마 없이** 진행합니다 —
+모델은 타입 없는 파라미터를 보게 되어 어떤 값을 넣어야 할지 알 수 없습니다:
+
+```python
+# 잘못됨 — get_type_hints() 가 NameError, 모든 파라미터가 타입을 잃는다
+if TYPE_CHECKING:
+    from malkuth.core.skill import SkillContext
+
+# 올바름
+from malkuth.core.skill import SkillContext, skill
+```
+
+동적 정의 skill 을 막지 않기 위해 에러가 아닌 경고로 드러냅니다
+(`skill type hints could not be resolved` / `skill parameters have no type`).
+`LoadedSkillset.untyped_parameters()` 가 tool 별로 같은 내용을 보고합니다.
+
 ## 프롬프트셋
 
 템플릿은 그래프 `node_id` (direct 요청은 `default`) 로 선택됩니다. 변수는 스키마로

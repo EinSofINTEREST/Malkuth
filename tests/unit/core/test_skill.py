@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from enum import StrEnum
 from typing import Any
 
@@ -279,3 +280,95 @@ def test_any_valued_dict_stays_unconstrained():
     props = build_spec(_untyped_mapping).parameters["properties"]
 
     assert props["raw"] == {"type": "object", "additionalProperties": {}}
+
+
+# --- silent degradation 을 드러내기 ---------------------------------------------
+
+
+def _captured_warnings(monkeypatch) -> list[dict]:
+    """skill 모듈의 WARN 을 가로챈다."""
+    recorded: list[dict] = []
+
+    def capture(event: str, **fields: object) -> None:
+        recorded.append({"event": event, **fields})
+
+    # malkuth.core.__init__ 이 skill *함수* 를 re-export 해 모듈명을 가린다 —
+    # sys.modules 로 실제 모듈을 잡는다
+    monkeypatch.setattr(sys.modules["malkuth.core.skill"].log, "warning", capture)
+    return recorded
+
+
+def test_unresolvable_hints_are_warned(monkeypatch):
+    """조용히 넘기면 모델이 타입 없는 tool 을 본다.
+
+    흔한 원인은 SkillContext 를 TYPE_CHECKING 뒤에 두어 런타임에 이름이
+    없는 경우다 — 레퍼런스 스킬셋 작성 중 실제로 밟은 함정이다.
+    """
+    recorded = _captured_warnings(monkeypatch)
+
+    namespace: dict = {}
+    exec(  # noqa: S102 — 미해결 힌트를 만들려면 지연 평가가 필요하다
+        "from __future__ import annotations\n"
+        "from malkuth.core.skill import skill\n"
+        "@skill\n"
+        "async def broken(ctx: 'NotImportedHere', query: str) -> str:\n"
+        '    """설명."""\n',
+        namespace,
+    )
+
+    resolution = [r for r in recorded if "could not be resolved" in r["event"]]
+    assert resolution, recorded
+    assert resolution[0]["tool"] == "broken"
+    assert resolution[0]["reason"] == "NameError"
+
+
+def test_untyped_parameters_are_warned(monkeypatch):
+    """타입 없는 파라미터를 주면 모델이 어떤 값을 넣을지 알 수 없다."""
+    recorded = _captured_warnings(monkeypatch)
+
+    @skill
+    async def loose(ctx: SkillContext, thing, count: int = 1) -> str:
+        """설명."""
+        return "x"
+
+    warned = [r for r in recorded if "have no type" in r["event"]]
+    assert warned
+    assert warned[0]["parameters"] == ["thing"]
+
+
+def test_fully_typed_skill_warns_nothing(monkeypatch):
+    """정상 skill 이 경고를 내면 경고가 무의미해진다."""
+    recorded = _captured_warnings(monkeypatch)
+
+    @skill
+    async def clean(ctx: SkillContext, query: str, limit: int = 10) -> list[str]:
+        """설명."""
+        return []
+
+    assert recorded == []
+
+
+def test_untyped_skill_still_loads(monkeypatch):
+    """동적 정의 skill 을 막지 않는다 — 경고이지 에러가 아니다."""
+    _captured_warnings(monkeypatch)
+
+    @skill
+    async def dynamic(ctx: SkillContext, payload) -> str:
+        """설명."""
+        return "x"
+
+    spec = dynamic.__malkuth_skill__
+    assert spec.name == "dynamic"
+    assert "payload" in spec.parameters["properties"]
+
+
+def test_optional_union_is_not_reported_as_untyped(monkeypatch):
+    """anyOf 스키마도 타입이 있는 것이다 — 오탐이면 경고를 무시하게 된다."""
+    recorded = _captured_warnings(monkeypatch)
+
+    @skill
+    async def optional(ctx: SkillContext, value: str | None = None) -> str:
+        """설명."""
+        return "x"
+
+    assert [r for r in recorded if "have no type" in r["event"]] == []

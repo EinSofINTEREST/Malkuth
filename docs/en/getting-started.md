@@ -2,9 +2,9 @@
 
 **[한국어](../ko/getting-started.md)** | English
 
-> **Bootstrap notice**: Malkuth is in its pre-v0.1.0 bootstrap phase — the ruleset and
-> documentation exist, but the framework code has not landed yet. Commands marked
-> *(planned)* describe the contract the implementation will fulfill.
+> **Status**: The framework layers are implemented and the reference solution validates
+> end to end. Commands marked *(needs a running stack)* require deployed containers,
+> which is the remaining integration work.
 
 ## Prerequisites
 
@@ -18,7 +18,7 @@
 ```bash
 git clone https://github.com/EinSofINTEREST/Malkuth.git
 cd Malkuth
-uv sync                 # (planned) install pinned dependencies
+uv sync                 # install pinned dependencies
 ```
 
 Quality gates used locally and in CI:
@@ -97,19 +97,34 @@ spec:
       - {ref: memorysets/domain-knowledge@0.1.0, as: knowledge, mode: rw}
 ```
 
-### 4. Deploy and run *(planned)*
+### 4. Validate before deploying
+
+Contract validation runs before anything starts — **if any of the eight checks fails,
+no container is started**:
 
 ```bash
-malkuth deploy graphs/research-pipeline.yaml   # validate contracts → start containers
-malkuth run research-pipeline --input '{"query": "..."}'
-malkuth status                                  # agents healthy?
-malkuth run trace <run_id>                      # node timeline
+malkuth validate                                # every graph in the repository
+malkuth deploy graphs/research-pipeline.yaml    # one graph
+malkuth status                                  # what is declared here
+malkuth config dev                              # resolved settings for an environment
 ```
 
-Any agent can also be invoked directly, without a graph run:
+Both `validate` and `deploy` exit non-zero when a check fails, so they compose with
+scripts. Add `--json` for machine-readable output.
+
+Integrity checks compare records against reality — orphaned checkpoints, dangling
+module refs, ghost containers:
 
 ```bash
-malkuth agent invoke researcher --input '{"query": "..."}'   # (planned)
+malkuth check observed-state.yaml
+```
+
+### 5. Run a graph *(needs a running stack)*
+
+```bash
+malkuth run research-pipeline --input '{"query": "..."}'
+malkuth run trace <run_id>                      # node timeline
+malkuth agent invoke researcher --input '{"query": "..."}'   # direct request
 ```
 
 ## Where to Go Next

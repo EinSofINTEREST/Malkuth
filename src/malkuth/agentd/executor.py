@@ -104,7 +104,7 @@ class ExecutorConfig:
     tool_timeout_s: float = DEFAULT_TOOL_TIMEOUT_S
 
 
-def _tool_error(name: str, task: TaskRequest, agent: str, err: Exception) -> MalkuthError:
+def _tool_error(name: str, task: TaskRequest, agent: str, err: BaseException) -> MalkuthError:
     """tool 실패를 출처에 맞는 코드로 변환한다.
 
     skillset tool 은 ``SKILL_001``, MCP tool 은 ``MCP_003`` — 출처가 다르면
@@ -187,8 +187,25 @@ class Executor:
             raise
         except MalkuthError as err:
             result = TaskResult.failed(task, err)
+        except Exception as err:
+            # 모델 provider 예외가 새어나가면 데몬이 죽는다 — tool 쪽은 이미
+            # _tool_error 가 변환하는데 모델 쪽만 빠져 있었다
+            result = TaskResult.failed(
+                task,
+                MalkuthError(
+                    category=ErrorCategory.INTERNAL,
+                    code=ErrorCode.INTERNAL_001,
+                    message="unexpected error during task execution",
+                    agent=self._agent,
+                    task_id=task.task_id,
+                    details={"cause": type(err).__name__},
+                ),
+            )
 
-        self._completed[task.task_id] = result
+        # 재시도 가능한 실패를 캐싱하면 이 계층이 유일한 재시도 계층인데도
+        # 재시도가 영원히 무효화된다 — 성공과 영구 실패만 기억한다
+        if result.error is None or not result.error.retryable:
+            self._completed[task.task_id] = result
         return result
 
     async def _run(self, task: TaskRequest) -> TaskResult:
@@ -239,9 +256,16 @@ class Executor:
 
         return list(zip(calls, outcomes, strict=True))
 
+    def _tool_timeout(self, name: str, task: TaskRequest) -> float:
+        """tool 실행 상한 — per-tool 선언이 있으면 그것, 없으면 더 엄격한 쪽."""
+        declared = self._tools.timeout_for(name)
+        if declared:
+            return declared
+        return min(task.config.tool_timeout_s, self._config.tool_timeout_s)
+
     async def _run_tool(self, call: ToolCall, task: TaskRequest, ctx: SkillContext) -> Any:
         """단일 tool 을 상한 안에서 실행하고 실패를 변환한다."""
-        timeout = self._tools.timeout_for(call.name) or self._config.tool_timeout_s
+        timeout = self._tool_timeout(call.name, task)
         try:
             return await asyncio.wait_for(
                 self._tools.call(call.name, call.arguments, ctx), timeout=timeout
@@ -281,12 +305,49 @@ class Executor:
 
         태스크를 실행하며 진행 이벤트를 발행합니다 — 장시간 태스크의 소비 경로입니다.
 
+        ``execute`` 와 동일한 상한을 적용합니다: 태스크 timeout 을 넘기면
+        ``TO_001`` 이벤트로 끝냅니다. 스트리밍은 장시간 태스크의 경로라
+        멈춘 provider 를 만날 가능성이 가장 높습니다.
+
         Args:
             task: The task to run.
 
         Yields:
             Token, tool call/result, and terminal done/error events.
         """
+        deadline = asyncio.get_running_loop().time() + task.config.timeout_s
+        events = self._stream(task)
+
+        while True:
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                yield self._timeout_event(task)
+                return
+            try:
+                event = await asyncio.wait_for(anext(events), timeout=remaining)
+            except StopAsyncIteration:
+                return
+            except TimeoutError:
+                yield self._timeout_event(task)
+                return
+            yield event
+
+    def _timeout_event(self, task: TaskRequest) -> ErrorEvent:
+        """태스크 상한 초과를 종료 이벤트로 만든다."""
+        return ErrorEvent(
+            task_id=task.task_id,
+            error=MalkuthError(
+                category=ErrorCategory.TIMEOUT,
+                code=ErrorCode.TO_001,
+                message="task timeout exceeded",
+                agent=self._agent,
+                task_id=task.task_id,
+                retryable=True,
+            ).payload(),
+        )
+
+    async def _stream(self, task: TaskRequest) -> AsyncIterator[TaskEvent]:
+        """이벤트를 발행하며 루프를 돈다 (상한은 stream 이 적용)."""
         prompt = self._render(task)
         usage = ModelUsage()
         # 태스크가 기본값을 그대로 쓰면 executor 설정을 따른다 —
@@ -310,7 +371,6 @@ class Executor:
                     )
                     return
 
-                results = []
                 for call in response.tool_calls:
                     yield ToolCallEvent(
                         task_id=task.task_id,
@@ -318,27 +378,48 @@ class Executor:
                         arguments=dict(call.arguments),
                         turn=turn,
                     )
-                    started = time.monotonic()
-                    try:
-                        outcome = await self._run_tool(call, task, ctx)
-                    except MalkuthError as err:
+
+                # execute 와 동일하게 병렬 실행한다 — 순차로 돌면 스트리밍 경로만
+                # tool 개수만큼 느려지고 두 경로의 타이밍이 갈린다
+                started = time.monotonic()
+                outcomes = await asyncio.gather(
+                    *(self._run_tool(call, task, ctx) for call in response.tool_calls),
+                    return_exceptions=True,
+                )
+                elapsed_ms = int((time.monotonic() - started) * 1000)
+
+                results = []
+                failure: MalkuthError | None = None
+                for call, outcome in zip(response.tool_calls, outcomes, strict=True):
+                    if isinstance(outcome, BaseException):
+                        if isinstance(outcome, asyncio.CancelledError):
+                            raise outcome
+                        error = (
+                            outcome
+                            if isinstance(outcome, MalkuthError)
+                            else _tool_error(call.name, task, self._agent, outcome)
+                        )
+                        failure = failure or error
                         yield ToolResultEvent(
                             task_id=task.task_id,
                             tool=call.name,
                             turn=turn,
-                            duration_ms=int((time.monotonic() - started) * 1000),
-                            error=err.payload(),
+                            duration_ms=elapsed_ms,
+                            error=error.payload(),
                         )
-                        yield ErrorEvent(task_id=task.task_id, error=err.payload())
-                        return
+                        continue
                     yield ToolResultEvent(
                         task_id=task.task_id,
                         tool=call.name,
                         result=outcome,
                         turn=turn,
-                        duration_ms=int((time.monotonic() - started) * 1000),
+                        duration_ms=elapsed_ms,
                     )
                     results.append((call, outcome))
+
+                if failure is not None:
+                    yield ErrorEvent(task_id=task.task_id, error=failure.payload())
+                    return
 
                 prompt = self._extend(prompt, response, results)
         except asyncio.CancelledError:
@@ -353,6 +434,7 @@ class Executor:
                 message="max turns exceeded",
                 agent=self._agent,
                 task_id=task.task_id,
+                details={"max_turns": max_turns},
             ).payload(),
         )
 

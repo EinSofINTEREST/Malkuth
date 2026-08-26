@@ -171,12 +171,21 @@ async def test_independent_tools_run_in_parallel():
 
 
 async def test_all_parallel_tools_start_before_any_completes():
-    tools = FakeTools().script("a", delay=0.05).script("b", delay=0.05)
+    """이름대로 검증하려면 '완료 전에 모두 시작'을 봐야 한다.
+
+    실행 후 started 길이만 보면 순차 실행도 통과한다.
+    """
+    tools = FakeTools().script("a", delay=0.1).script("b", delay=0.1)
     executor, _, _ = make_executor([calls("a", "b"), text("done")], tools)
 
-    await executor.execute(make_task())
+    running = asyncio.create_task(executor.execute(make_task()))
+    await asyncio.sleep(0.05)  # 첫 tool 이 끝나기 전 시점
+    started_early = list(tools.started)
+    completed_early = list(tools.calls)
+    await running
 
-    assert len(tools.started) == 2
+    assert started_early == ["a", "b"]  # 둘 다 이미 시작
+    assert completed_early == []  # 아직 아무것도 완료되지 않음
 
 
 # --- usage 집계 -------------------------------------------------------------
@@ -360,3 +369,112 @@ async def test_task_can_tighten_the_limit_further():
     assert result.error is not None
     assert result.error.details["max_turns"] == 3
     assert model.turns == 3
+
+
+# --- 재시도 가능 실패는 캐싱하지 않는다 --------------------------------------
+
+
+async def test_retryable_failures_are_not_cached():
+    """재시도 가능 실패를 캐싱하면 이 계층의 재시도가 영원히 무효화된다."""
+    tools = FakeTools().script("slow", delay=5)
+    executor, _, _ = make_executor([calls("slow"), text("done")], tools)
+    task = make_task(task_id="retry-me", config=TaskConfig(timeout_s=0.05))
+
+    first = await executor.execute(task)
+    assert first.error is not None
+    assert first.error.retryable is True
+
+    # 같은 task_id 로 재시도하면 다시 실행돼야 한다
+    executor._model = FakeModel([text("recovered")])
+    second = await executor.execute(task)
+
+    assert second.status is TaskStatus.COMPLETED
+
+
+async def test_permanent_failures_stay_cached():
+    """영구 실패는 재실행해도 결과가 같으므로 캐싱한다."""
+    tools = FakeTools().fail("search", RuntimeError("boom"))
+    executor, model, _ = make_executor([calls("search"), text("done")], tools)
+    task = make_task(task_id="permanent")
+
+    first = await executor.execute(task)
+    turns_after_first = model.turns
+    second = await executor.execute(task)
+
+    assert first == second
+    assert model.turns == turns_after_first  # 재실행되지 않는다
+
+
+# --- 모델 예외 --------------------------------------------------------------
+
+
+async def test_unexpected_model_error_becomes_a_failed_result():
+    """provider 예외가 새어나가면 데몬이 죽는다."""
+    executor, _, _ = make_executor([RuntimeError("provider exploded")])
+
+    result = await executor.execute(make_task())
+
+    assert result.status is TaskStatus.FAILED
+    assert result.error is not None
+    assert result.error.code == "INTERNAL_001"
+    assert result.error.category is ErrorCategory.INTERNAL
+
+
+# --- tool timeout 우선순위 --------------------------------------------------
+
+
+async def test_task_tool_timeout_is_honored():
+    """TaskConfig.tool_timeout_s 가 무시되면 태스크별 설정이 무의미해진다."""
+    tools = FakeTools().script("slow", delay=5)
+    executor, _, _ = make_executor([calls("slow"), text("done")], tools)
+
+    result = await executor.execute(make_task(config=TaskConfig(tool_timeout_s=0.05)))
+
+    assert result.error is not None
+    assert result.error.code == "TO_002"
+
+
+async def test_per_tool_declaration_overrides_defaults():
+    """skillset 이 선언한 상한이 있으면 그것이 우선한다."""
+    tools = FakeTools().script("slow", delay=0.1).timeout("slow", 0.5)
+    executor, _, _ = make_executor([calls("slow"), text("done")], tools, tool_timeout_s=0.02)
+
+    result = await executor.execute(make_task())
+
+    assert result.status is TaskStatus.COMPLETED
+
+
+# --- stream 이 execute 와 같은 계약을 지킨다 ---------------------------------
+
+
+async def test_stream_applies_the_task_timeout():
+    """스트리밍은 장시간 태스크 경로라 멈춘 provider 를 만날 가능성이 가장 높다."""
+    tools = FakeTools().script("slow", delay=3)
+    executor, _, _ = make_executor([calls("slow"), text("done")], tools)
+
+    events = [e async for e in executor.stream(make_task(config=TaskConfig(timeout_s=0.15)))]
+
+    assert isinstance(events[-1], ErrorEvent)
+    assert events[-1].error.code == "TO_001"
+
+
+async def test_stream_runs_tools_in_parallel():
+    """두 경로가 같은 입력에 다른 타이밍을 내면 안 된다."""
+    tools = FakeTools().script("a", delay=0.1).script("b", delay=0.1).script("c", delay=0.1)
+    executor, _, _ = make_executor([calls("a", "b", "c"), text("done")], tools)
+
+    started = asyncio.get_running_loop().time()
+    [e async for e in executor.stream(make_task())]
+    elapsed = asyncio.get_running_loop().time() - started
+
+    assert elapsed < 0.25
+
+
+async def test_stream_max_turns_carries_the_same_details():
+    """스트리밍과 동기 경로의 에러 payload 가 갈리면 디버깅 맥락을 잃는다."""
+    tools = FakeTools().script("search")
+    executor, _, _ = make_executor([calls("search")], tools, max_turns=2)
+
+    events = [e async for e in executor.stream(make_task())]
+
+    assert events[-1].error.details["max_turns"] == 2

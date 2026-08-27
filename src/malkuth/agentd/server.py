@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING, Any
 
+from a2a.utils.constants import AGENT_CARD_WELL_KNOWN_PATH
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, status
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict
@@ -227,6 +228,15 @@ def create_app(runtime: AgentRuntime, *, token: str | None = None) -> FastAPI:
         """새 태스크 수락을 멈추고 진행 중 태스크를 기다린다."""
         await runtime.drain()
         return Acknowledgement(status="drained")
+
+    @app.get(AGENT_CARD_WELL_KNOWN_PATH, dependencies=[guard])
+    async def well_known_card() -> dict[str, Any]:
+        """A2A well-known AgentCard.
+
+        ``/v1/card`` 와 **같은 소스**를 돌려준다 — 두 곳을 따로 만들면 peer 가
+        보는 계약이 조용히 갈라진다 (03 AgentCard 1).
+        """
+        return runtime.card()
 
     app.include_router(router)
     return app

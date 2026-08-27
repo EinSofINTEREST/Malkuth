@@ -26,8 +26,11 @@ from malkuth.core.skill import SkillSpec
 from malkuth.core.tools import is_mcp_tool
 from malkuth.memory.tool import MEMORY_SEARCH_TOOL
 from malkuth.observability.metrics import DEFAULT_METRICS_PORT, Metrics
+from malkuth.protocols.a2a.card import build_card
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from fastapi import FastAPI
 
 CONTROL_PORT = 8080
@@ -92,7 +95,13 @@ def load_manifest(path: Path) -> AgentManifest:
         ) from err
 
 
-def build_app(manifest: AgentManifest, executor: Any, *, token: str | None = None) -> FastAPI:
+def build_app(
+    manifest: AgentManifest,
+    executor: Any,
+    *,
+    token: str | None = None,
+    tools: Sequence[Any] = (),
+) -> FastAPI:
     """Build the Control API app for a manifest.
 
     manifest 에 대한 Control API 앱을 만듭니다.
@@ -108,12 +117,10 @@ def build_app(manifest: AgentManifest, executor: Any, *, token: str | None = Non
     runtime = AgentRuntime(
         agent=manifest.name,
         executor=executor,
-        card={
-            "name": manifest.name,
-            "version": manifest.metadata.version,
-            "description": manifest.metadata.description,
-            "capabilities": {"streaming": manifest.spec.a2a.capabilities.streaming},
-        },
+        # card 는 manifest 와 **실제 로드된 tool** 로부터 생성한다 — 손으로 쓰면
+        # skill 목록이 빠지고 (03 AgentCard 1: 수동 작성 금지), peer 는 이
+        # 에이전트가 뭘 할 수 있는지 알 수 없다
+        card=build_card(manifest, tools).model_dump(mode="json"),
         health=lambda: HealthStatus(status=HealthState.HEALTHY),
         max_concurrent_tasks=manifest.spec.runtime.max_concurrent_tasks,
     )
@@ -280,7 +287,13 @@ def main() -> None:
     manifest = load_manifest(Path(os.environ.get(MANIFEST_ENV, DEFAULT_MANIFEST_PATH)))
     metrics = _setup_observability()
     executor = asyncio.run(build_executor(manifest, metrics=metrics))
-    app = build_app(manifest, executor, token=os.environ.get(TOKEN_ENV))
+    app = build_app(
+        manifest,
+        executor,
+        token=os.environ.get(TOKEN_ENV),
+        # 광고와 실행이 같은 목록을 봐야 peer 가 부를 수 없는 skill 을 보지 않는다
+        tools=getattr(executor, "_tool_schemas", ()),
+    )
 
     log.info(
         "agentd starting",

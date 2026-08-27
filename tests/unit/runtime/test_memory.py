@@ -69,16 +69,6 @@ def test_group_spaces_reach_members():
     assert token.resolve("knowledge") is not None
 
 
-def test_group_spaces_do_not_reach_non_members():
-    """비멤버는 그룹 선언을 받아도 닿을 수 없다 — 소속이 곧 경계다.
-
-    그룹을 넘기지 않고 확인하면 "안 넘겨서 없다" 를 검증하는 셈이라 무의미하다.
-    """
-    token = issue_token(manifest(**LOCAL), group=group("research", GROUP_SPACES))
-
-    assert token.resolve("knowledge") is None
-
-
 def test_direct_tasks_get_no_run_scope():
     """그래프 run 과 무관한 태스크가 run 의 기억을 건드리면 격리가 무너진다."""
     run_spaces = MemorySpec.model_validate(
@@ -188,3 +178,41 @@ async def test_appending_to_an_undeclared_space_is_denied(access):
         await adapter.append("secret", entry=entry(space_id, "내용"))
 
     assert exc_info.value.code == ErrorCode.MEM_001
+
+
+def test_mismatched_group_declaration_is_rejected():
+    """엉뚱한 그룹 선언을 조용히 무시하면 비멤버가 남의 권한을 얻는다."""
+    with pytest.raises(MalkuthError) as exc_info:
+        issue_token(manifest(group_name="research", **LOCAL), group=group("other", GROUP_SPACES))
+
+    assert exc_info.value.code == ErrorCode.MEM_001
+
+
+def test_group_declaration_for_an_unaffiliated_agent_is_rejected():
+    """비멤버는 그룹 선언을 받아도 닿을 수 없다 — 소속이 곧 경계다.
+
+    조용히 무시하지 않고 거부한다: 무시하면 호출자가 배선 실수를 모른 채
+    권한이 없는 상태로 계속 돈다.
+    """
+    with pytest.raises(MalkuthError) as exc_info:
+        issue_token(manifest(**LOCAL), group=group("research", GROUP_SPACES))
+
+    assert exc_info.value.code == ErrorCode.MEM_001
+
+
+async def test_scan_limit_applies_to_every_space(access, monkeypatch):
+    """comprehension 안에서 pop 하면 첫 space 만 값을 쓰고 나머지는 기본값이 된다."""
+    adapter, space_id, _registry = access
+    seen: list[int] = []
+    original = adapter.service.read
+
+    def spy(token, alias, **kwargs):
+        seen.append(kwargs.get("limit"))
+        return original(token, alias, **kwargs)
+
+    monkeypatch.setattr(adapter.service, "read", spy)
+
+    await adapter.search("무엇이든", spaces=["longterm", "longterm"], scan=7)
+
+    # 중복 별칭은 한 번만 보고, 그 한 번은 지정한 상한을 쓴다
+    assert seen == [7]

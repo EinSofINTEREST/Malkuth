@@ -86,3 +86,52 @@ async def test_recorded_metrics_reach_the_exposed_registry():
     scraped = generate_latest(registry).decode("utf-8")
     assert 'malkuth_agent_tasks_total{agent="researcher"' in scraped
     assert 'group="research"' in scraped
+
+
+# --- memory 접속 배선 ----------------------------------------------------------
+
+
+async def test_injected_endpoint_becomes_memory_access(monkeypatch):
+    """runtime 이 주입한 주소·토큰으로만 메모리에 닿는다 (09 Access Enforcement 1)."""
+    from malkuth.memory.http import MEMORY_TOKEN_ENV, MEMORY_URL_ENV
+    from malkuth.runtime.memory_http import HttpMemoryAccess
+
+    monkeypatch.setenv(MEMORY_URL_ENV, "http://memory:8080")
+    monkeypatch.setenv(MEMORY_TOKEN_ENV, "opaque")
+
+    executor = await build_executor(load_manifest(RESEARCHER))
+
+    assert isinstance(executor._tools.memory, HttpMemoryAccess)
+    assert executor._tools.memory.token == "opaque"
+
+
+async def test_without_an_endpoint_there_is_no_memory_access(monkeypatch):
+    """주입되지 않았는데 만들면 컨테이너가 저장소를 직접 열려 든다."""
+    from malkuth.memory.http import MEMORY_TOKEN_ENV, MEMORY_URL_ENV
+
+    monkeypatch.delenv(MEMORY_URL_ENV, raising=False)
+    monkeypatch.delenv(MEMORY_TOKEN_ENV, raising=False)
+
+    executor = await build_executor(load_manifest(RESEARCHER))
+
+    assert executor._tools.memory is None
+
+
+async def test_memory_search_is_advertised_once_access_exists(monkeypatch):
+    """노출과 실행이 일치해야 한다 — #112 에서 확인한 tool 에러 루프 방지."""
+    import yaml
+
+    from malkuth.core.manifest import AgentManifest
+    from malkuth.memory.http import MEMORY_TOKEN_ENV, MEMORY_URL_ENV
+    from malkuth.memory.tool import MEMORY_SEARCH_TOOL
+
+    monkeypatch.setenv(MEMORY_URL_ENV, "http://memory:8080")
+    monkeypatch.setenv(MEMORY_TOKEN_ENV, "opaque")
+    doc = yaml.safe_load(RESEARCHER.read_text("utf-8"))
+    doc["spec"]["memory"] = {
+        "spaces": [{"ref": "memorysets/agent-longterm@0.1.0", "as": "longterm"}]
+    }
+
+    executor = await build_executor(AgentManifest.model_validate(doc))
+
+    assert MEMORY_SEARCH_TOOL in {spec.name for spec in executor._tool_schemas}

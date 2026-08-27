@@ -18,6 +18,7 @@ import structlog
 from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
 from malkuth.memory.http import MEMORY_TOKEN_ENV, MEMORY_URL_ENV
 from malkuth.runtime.control import ControlClient
+from malkuth.runtime.ports import A2APortAllocator
 from malkuth.runtime.spec import build_container_spec
 from malkuth.runtime.tokens import TokenIssuer, authenticated_env
 
@@ -41,6 +42,9 @@ class LaunchedAgent:
     agent: str
     handle: ContainerHandle
     client: ControlClient
+    # 포트 회수는 **어느 레플리카였는지** 알아야 한다 — 기동 시점의 값을
+    # 들고 있지 않으면 정지가 엉뚱한 레플리카의 포트를 놓아준다
+    replica: int = 0
 
     async def aclose(self) -> None:
         """클라이언트 연결을 정리한다."""
@@ -76,10 +80,14 @@ class AgentLauncher:
         engine: Creates and starts the container.
         issuer: Mints the token injected into the container and presented by
             the client — **같은 발급자**여야 둘이 일치한다.
+        ports: Allocates the A2A port from the runtime's range (03 Rule 2).
+            None 이면 포트를 배정하지 않는다 — A2A 를 쓰지 않는 배포와,
+            포트를 밖에서 정해 넘기는 테스트가 그 경우다.
     """
 
     engine: DockerEngine
     issuer: TokenIssuer = field(default_factory=TokenIssuer)
+    ports: A2APortAllocator | None = None
     launched: dict[str, LaunchedAgent] = field(default_factory=dict)
 
     async def start(
@@ -101,7 +109,8 @@ class AgentLauncher:
             replica: Replica index for the container name.
             memory: Memory Service address and this agent's opaque token —
                 **DB 자격증명은 컨테이너에 넣지 않는다** (09 Access Enforcement 1).
-            a2a_port: A2A port assigned by the runtime, when enabled.
+            a2a_port: A2A port to use. 생략하면 할당기가 범위에서 고른다 —
+                03 은 포트를 runtime 이 준다고 규정한다.
 
         Returns:
             The launched agent — its client already carries the token.
@@ -117,6 +126,11 @@ class AgentLauncher:
                 agent=agent,
                 details={"replica": replica},
             )
+
+        # 03 Rule 2 — 포트는 runtime 이 준다. 호출자가 명시하면 그것을 존중하고,
+        # 아니면 범위에서 할당한다. A2A 가 꺼진 에이전트는 범위를 소비하지 않는다
+        if a2a_port is None and self.ports is not None and manifest.spec.a2a.enabled:
+            a2a_port = self.ports.allocate(agent, replica=replica)
 
         spec = build_container_spec(
             manifest,
@@ -134,7 +148,7 @@ class AgentLauncher:
             token=self.issuer.issue(agent),
         )
 
-        launched = LaunchedAgent(agent=agent, handle=handle, client=client)
+        launched = LaunchedAgent(agent=agent, handle=handle, client=client, replica=replica)
         self.launched[agent] = launched
         log.info(
             "agent launched",
@@ -160,6 +174,8 @@ class AgentLauncher:
         await self.engine.stop(launched.handle)
         del self.launched[agent]
         self.issuer.forget(agent)
+        if self.ports is not None:
+            self.ports.release(agent, replica=launched.replica)
 
     async def stop_all(self) -> None:
         """기동된 에이전트를 전부 정지한다 — 하나가 실패해도 나머지를 계속 정리한다."""

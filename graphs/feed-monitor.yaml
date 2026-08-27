@@ -27,17 +27,17 @@ spec:
 
   nodes:
     - id: watcher
-      agent: agents/researcher@0.1.0
+      agent: agents/researcher@0.2.0
       input_map: {feeds: state.feeds}
       output_map: {new_items: output.new_items}
 
     - id: classifier
-      agent: agents/planner@0.1.0
+      agent: agents/planner@0.2.0
       input_map: {new_items: state.new_items}
       output_map: {seen_ids: output.seen_ids}
 
     - id: notifier
-      agent: agents/writer@0.1.0
+      agent: agents/writer@0.2.0
       input_map: {new_items: state.new_items}
       output_map: {notified: output.notified}
 

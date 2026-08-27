@@ -89,9 +89,19 @@ class ValidationReport:
 
 def _agent_name(ref: str) -> str:
     """``agents/{name}@{version}`` 에서 이름만 뽑는다."""
+    return _agent_ref_parts(ref)[0]
+
+
+def _agent_ref_parts(ref: str) -> tuple[str, str]:
+    """``agents/{name}@{version}`` 을 이름과 버전으로 나눈다.
+
+    버전을 버리면 04 의 semver 고정이 무의미해진다 — 존재하지 않는 버전을
+    가리켜도 통과하고, 런타임에는 실제 manifest 가 떠서 선언과 실행이
+    어긋난 채 굴러간다.
+    """
     _, _, remainder = ref.partition("/")
-    name, _, _ = remainder.partition("@")
-    return name
+    name, _, version = remainder.partition("@")
+    return name, version
 
 
 @dataclass
@@ -160,8 +170,9 @@ class DeployValidator:
         for node in topology.spec.nodes:
             if node.agent is None:
                 continue
-            name = _agent_name(node.agent)
-            if name not in self.manifests:
+            name, version = _agent_ref_parts(node.agent)
+            manifest = self.manifests.get(name)
+            if manifest is None:
                 findings.append(
                     Finding(
                         check="agent_refs",
@@ -171,6 +182,28 @@ class DeployValidator:
                             "graph": topology.metadata.name,
                             "node_id": node.id,
                             "module_ref": node.agent,
+                        },
+                    )
+                )
+                continue
+
+            declared = manifest.metadata.version
+            if version != declared:
+                # 이름은 맞고 버전만 다른 경우를 따로 알린다 — "unknown agent" 로
+                # 뭉개면 오타인지 버전 드리프트인지 구분되지 않는다
+                findings.append(
+                    Finding(
+                        check="agent_refs",
+                        code=ErrorCode.MOD_002,
+                        message=(
+                            f"graph node references agent version {version!r} "
+                            f"but the manifest declares {declared!r}: {node.agent}"
+                        ),
+                        details={
+                            "graph": topology.metadata.name,
+                            "node_id": node.id,
+                            "module_ref": node.agent,
+                            "declared_version": declared,
                         },
                     )
                 )

@@ -310,6 +310,46 @@ def status_filters(text: str) -> set[tuple[str, str]]:
     return {(base_metric(metric), value) for metric, value in pattern.findall(text)}
 
 
+def emitted_status_values() -> set[str]:
+    """코드가 실제로 내는 status 값 — 05 의 허용 표와 대조하는 기준이다."""
+    from malkuth.agentd import telemetry as agent_telemetry
+    from malkuth.orchestrator import telemetry as orchestrator_telemetry
+    from malkuth.orchestrator.run import RunStatus
+
+    return {
+        agent_telemetry.STATUS_COMPLETED,
+        agent_telemetry.STATUS_FAILED,
+        orchestrator_telemetry.STATUS_COMPLETED,
+        orchestrator_telemetry.STATUS_FAILED,
+        # release 가 받는 종료 상태만 라벨이 된다 — running/draining 은 진행 상태다
+        *(
+            status.value
+            for status in RunStatus
+            if status not in (RunStatus.RUNNING, RunStatus.DRAINING)
+        ),
+        # memory 계층은 감사 로그와 같은 어휘를 쓴다
+        "ok",
+        "denied",
+        # 모델 provider 가 분류하는 값 — 바인딩(#77) 이후 executor 가 낸다
+        "rate_limited",
+    }
+
+
+def test_documented_status_values_match_what_the_code_emits():
+    """05 의 허용 표와 코드가 갈라지면 알림이 조용히 죽는다.
+
+    실제로 checkpoint 실패를 `failed` 로 기록했는데 알림은 `error` 를 보고 있어
+    영원히 침묵할 뻔했다 (#104).
+    """
+    text = (RULES / "05-error-handling.md").read_text(encoding="utf-8")
+    # status 허용 표만 본다 — 05 에는 로그 필드 표 등 다른 표도 있다
+    section = text.split("**`status` 라벨의 허용 값**", 1)[1].split("```", 1)[0]
+    documented = set(re.findall(r"^\| `([a-z_]+)` \|", section, re.MULTILINE))
+
+    assert documented, "05 의 status 허용 표를 찾지 못했다"
+    assert documented == emitted_status_values()
+
+
 def test_alerts_only_filter_on_status_values_the_code_emits():
     """알림이 코드가 내지 않는 값을 보면 **영원히 침묵한다**.
 
@@ -317,20 +357,7 @@ def test_alerts_only_filter_on_status_values_the_code_emits():
     실제로 checkpoint 실패를 `failed` 로 기록해 `status="error"` 알림이 죽어
     있었다.
     """
-    from malkuth.agentd import telemetry as agent_telemetry
-    from malkuth.orchestrator import telemetry as orchestrator_telemetry
-    from malkuth.orchestrator.run import RunStatus
-
-    emitted = {
-        agent_telemetry.STATUS_COMPLETED,
-        agent_telemetry.STATUS_FAILED,
-        orchestrator_telemetry.STATUS_COMPLETED,
-        orchestrator_telemetry.STATUS_FAILED,
-        orchestrator_telemetry.STATUS_ERROR,
-        *(status.value for status in RunStatus),
-        # 모델 provider 가 분류하는 값 — 바인딩(#77) 이후 executor 가 낸다
-        "rate_limited",
-    }
+    emitted = emitted_status_values()
 
     referenced = status_filters(ALERTS.read_text(encoding="utf-8"))
     unknown = sorted(

@@ -395,6 +395,20 @@ log = structlog.get_logger().bind(
 
 Prometheus (`prometheus-client`) 사용. 표준 메트릭:
 
+**`status` 라벨의 허용 값** — 알림이 특정 값으로 필터하므로, 코드가 내지 않는
+값을 알림이 보면 **영원히 침묵한다**. 실패는 한 이름으로만 부른다:
+
+| 값 | 의미 |
+|---|---|
+| `completed` | 정상 완료 |
+| `ok` | 정상 완료 (memory 연산 — 감사 로그와 같은 어휘) |
+| `failed` | 실패 — 모든 계층 공통 (`error` 같은 동의어 금지) |
+| `denied` | 권한 거부 (memory ACL) |
+| `rate_limited` | provider rate limit — 재시도 전략이 다르므로 분리 |
+| `halted` | service run 이 연속 실패 임계로 정지 (`GRAPH_005`) |
+| `stopped` | service run 이 drain 요청으로 정상 정지 |
+
+
 ```python
 # Task metrics — 에이전트 단위 메트릭은 group 라벨 포함 (그룹별 집계/quota 감시용)
 malkuth_agent_tasks_total{agent, group, graph, status}   # Counter
@@ -485,7 +499,7 @@ groups:
 
       - alert: CheckpointFailures
         expr: |
-          rate(malkuth_checkpoint_operations_total{status="error"}[5m]) > 0
+          rate(malkuth_checkpoint_operations_total{status="failed"}[5m]) > 0
         for: 5m
         labels: {severity: critical}
         annotations:

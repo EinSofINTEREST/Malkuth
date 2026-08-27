@@ -51,7 +51,7 @@ groups:
       - alert: CheckpointFailures
         expr: |
           sum without (status) (
-            rate(malkuth_checkpoint_operations_total{status="error"}[5m])
+            rate(malkuth_checkpoint_operations_total{status="failed"}[5m])
           ) > 0
         for: 5m
         labels: {severity: critical}

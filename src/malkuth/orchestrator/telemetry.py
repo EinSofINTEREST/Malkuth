@@ -17,11 +17,6 @@ if TYPE_CHECKING:
 STATUS_COMPLETED: Final = "completed"
 STATUS_FAILED: Final = "failed"
 
-# checkpoint 만 실패 값이 다르다 — CheckpointFailures 알림이 status="error" 를
-# 본다 (05, deployments/monitoring/alerts.yaml). 알림 규칙이 계약이므로 코드가
-# 맞춘다. 값 통일은 #104
-STATUS_ERROR: Final = "error"
-
 OPERATION_SAVE: Final = "save"
 OPERATION_LOAD: Final = "load"
 

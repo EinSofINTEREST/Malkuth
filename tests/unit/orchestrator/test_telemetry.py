@@ -221,14 +221,14 @@ async def test_successful_save_is_counted():
 
 
 async def test_failed_save_is_counted():
-    """CheckpointFailures 알림은 status="error" 를 본다 — 값이 어긋나면 침묵한다."""
+    """실패 값은 모든 계층이 failed 로 통일한다 (#104) — 알림도 그 값을 본다."""
     metrics = make_metrics()
 
     with pytest.raises(MalkuthError):
         await guarded_save(_boom, graph=GRAPH, run_id="run-1", metrics=metrics)
 
     assert (
-        value(metrics, "malkuth_checkpoint_operations_total", operation="save", status="error")
+        value(metrics, "malkuth_checkpoint_operations_total", operation="save", status="failed")
         == 1.0
     )
 

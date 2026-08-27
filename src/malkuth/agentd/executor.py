@@ -31,13 +31,12 @@ from malkuth.core.events import (
     ToolResultEvent,
 )
 from malkuth.core.skill import SkillContext
+from malkuth.core.tools import is_mcp_tool
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 
     from malkuth.agentd.telemetry import ExecutorTelemetry
-
-MCP_TOOL_PREFIX = "mcp__"
 
 
 @dataclass(frozen=True)
@@ -116,7 +115,7 @@ def _tool_error(name: str, task: TaskRequest, agent: str, err: BaseException) ->
     if isinstance(err, MalkuthError):
         return err
 
-    is_mcp = name.startswith(MCP_TOOL_PREFIX)
+    is_mcp = is_mcp_tool(name)
     return MalkuthError(
         category=ErrorCategory.MCP if is_mcp else ErrorCategory.MODULE,
         code=ErrorCode.MCP_003 if is_mcp else ErrorCode.SKILL_001,

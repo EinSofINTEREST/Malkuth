@@ -12,11 +12,11 @@ from malkuth.agentd.bootstrap import (
     Bootstrap,
     BootstrapResult,
     build_tool_registry,
-    namespaced,
 )
 from malkuth.core.agent import HealthState
 from malkuth.core.errors import ErrorCategory, MalkuthError
 from malkuth.core.skill import SkillSpec
+from malkuth.core.tools import namespaced
 from tests.fixtures.builders import make_manifest
 
 

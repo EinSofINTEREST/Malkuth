@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from malkuth.core.tools import MCP_TOOL_PREFIX, namespaced, split_namespaced
 from malkuth.protocols.mcp.errors import unknown_tool
 from malkuth.protocols.mcp.session import (
     DEFAULT_STARTUP_TIMEOUT_S,
@@ -28,30 +29,7 @@ if TYPE_CHECKING:
     from malkuth.observability.metrics import Metrics
     from malkuth.protocols.mcp.transport import TransportSelector
 
-MCP_TOOL_PREFIX = "mcp__"
-
 log = structlog.get_logger(__name__)
-
-
-def split_namespaced(name: str) -> tuple[str, str] | None:
-    """Split a namespaced MCP tool name into server and tool.
-
-    ``mcp__{server}__{tool}`` 를 서버와 tool 로 나눕니다. 형식이 아니면 None —
-    skillset tool 과 구분하는 판별에도 씁니다.
-
-    Args:
-        name: The possibly namespaced tool name.
-
-    Returns:
-        ``(server, tool)`` or None if the name is not an MCP tool.
-    """
-    if not name.startswith(MCP_TOOL_PREFIX):
-        return None
-    remainder = name[len(MCP_TOOL_PREFIX) :]
-    server, separator, tool = remainder.partition("__")
-    if not separator or not server or not tool:
-        return None
-    return server, tool
 
 
 @dataclass
@@ -161,7 +139,7 @@ class McpClient:
     def tools(self) -> dict[str, str]:
         """바인딩된 tool 전체 — 네임스페이스 이름에서 소유 서버로."""
         return {
-            f"{MCP_TOOL_PREFIX}{name}__{tool}": name
+            namespaced(name, tool): name
             for name, session in self.sessions.items()
             for tool in session.tools
         }

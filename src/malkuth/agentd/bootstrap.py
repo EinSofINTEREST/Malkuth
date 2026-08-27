@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from malkuth.core.agent import ComponentHealth, HealthState, HealthStatus
 from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
+from malkuth.core.tools import namespaced
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -21,7 +22,6 @@ if TYPE_CHECKING:
     from malkuth.modules.skillset import LoadedSkillset
 
 MCP_STARTUP_TIMEOUT_S = 15.0
-MCP_TOOL_PREFIX = "mcp__"
 
 
 @runtime_checkable
@@ -76,14 +76,6 @@ def _module_error(code: ErrorCode, message: str, agent: str, **details: Any) -> 
         agent=agent,
         details=details,
     )
-
-
-def namespaced(server: str, tool: str) -> str:
-    """Build the namespaced MCP tool name.
-
-    MCP tool 이름을 네임스페이스와 함께 만듭니다 — skillset tool 과 충돌 방지.
-    """
-    return f"{MCP_TOOL_PREFIX}{server}__{tool}"
 
 
 def build_tool_registry(

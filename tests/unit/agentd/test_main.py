@@ -181,3 +181,44 @@ def test_unknown_executor_selection_is_rejected(monkeypatch):
 
     assert exc_info.value.code == "CFG_001"
     assert exc_info.value.details["executor"] == "mystery"
+
+
+# --- runtime 발급 토큰과의 결합 -------------------------------------------------
+
+
+def test_runtime_issued_token_authorizes_the_agent():
+    """runtime 이 발급해 주입한 토큰으로만 Control API 가 열려야 한다."""
+    from malkuth.runtime.tokens import AGENT_TOKEN_ENV, TokenIssuer, authenticated_env
+
+    issuer = TokenIssuer()
+    manifest = load_manifest(ECHO_MANIFEST)
+    env = authenticated_env(issuer, manifest.name)
+    client = TestClient(build_app(manifest, EchoExecutor(), token=env[AGENT_TOKEN_ENV]))
+
+    body = make_task().model_dump(mode="json")
+
+    assert client.post("/v1/invoke", json=body).status_code == 401
+    authorized = client.post(
+        "/v1/invoke",
+        json=body,
+        headers={"authorization": f"Bearer {issuer.issue(manifest.name)}"},
+    )
+    assert authorized.status_code == 200
+
+
+def test_another_agents_token_is_rejected():
+    """한 에이전트의 토큰으로 다른 에이전트를 열 수 없다."""
+    from malkuth.runtime.tokens import TokenIssuer
+
+    issuer = TokenIssuer()
+    manifest = load_manifest(ECHO_MANIFEST)
+    client = TestClient(build_app(manifest, EchoExecutor(), token=issuer.issue(manifest.name)))
+
+    other = issuer.issue("someone-else")
+    response = client.post(
+        "/v1/invoke",
+        json=make_task().model_dump(mode="json"),
+        headers={"authorization": f"Bearer {other}"},
+    )
+
+    assert response.status_code == 401

@@ -23,6 +23,7 @@ from malkuth.orchestrator.topology import GraphTopology
 from malkuth.runtime.control import ControlClient
 from malkuth.runtime.nodes import ControlNodeRuntime
 from tests.e2e.test_stack import (
+    AGENT_TOKEN,
     COMPOSE_FILE,
     docker,
     requires_docker,
@@ -61,7 +62,7 @@ async def node_runtime(graph_stack: dict[str, int]):
     반드시 닫는다 — 안 닫으면 커넥션이 새고 unclosed-client 경고가 뜬다.
     """
     clients = {
-        name: ControlClient(f"http://127.0.0.1:{port}", agent=name)
+        name: ControlClient(f"http://127.0.0.1:{port}", agent=name, token=AGENT_TOKEN)
         for name, port in graph_stack.items()
     }
     try:
@@ -107,7 +108,7 @@ async def test_nodes_receive_the_run_id_over_the_wire(graph_stack):
     observed: list[tuple[str, str]] = []
 
     clients = {
-        name: ControlClient(f"http://127.0.0.1:{port}", agent=name)
+        name: ControlClient(f"http://127.0.0.1:{port}", agent=name, token=AGENT_TOKEN)
         for name, port in graph_stack.items()
     }
 

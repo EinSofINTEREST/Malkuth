@@ -385,3 +385,15 @@ def test_documented_memory_ops_match_what_the_code_emits():
         assert documented == emitted, (
             f"{rules.name}: 문서 {sorted(documented)} vs 코드 {sorted(emitted)}"
         )
+
+
+def test_the_documented_direct_graph_label_is_the_one_the_code_emits():
+    """05 가 문서화한 값과 코드가 갈라지면 direct 태스크 필터가 조용히 빈다.
+
+    #104 의 status 값과 같은 실패 방식이다 — 이름은 맞고 값만 어긋난다.
+    """
+    from malkuth.agentd.telemetry import DIRECT_GRAPH
+
+    text = (RULES / "05-error-handling.md").read_text(encoding="utf-8")
+
+    assert f'`"{DIRECT_GRAPH}"` 로 기록한다' in text

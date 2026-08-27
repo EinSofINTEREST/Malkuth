@@ -409,9 +409,17 @@ Prometheus (`prometheus-client`) 사용. 표준 메트릭:
 | `stopped` | service run 이 drain 요청으로 정상 정지 |
 
 
+**`graph` 라벨의 출처** — 에이전트는 자신의 배선을 **가정하지 않지만**
+(02 Rule 6), 오케스트레이터가 `TraceContext.graph` 로 **전달**해 준다.
+전달받는 것과 가정하는 것은 다르다: 에이전트는 이 값을 메트릭 라벨로만 쓰고
+동작을 바꾸지 않으며, A2A 위임 시에도 원래 그래프가 유지된다
+(`TraceContext.child()` 가 물려준다). 그래프 밖 태스크(direct 요청)는
+`"direct"` 로 기록한다 — 빈 문자열이면 "그래프 없음"과 "라벨을 못 채움"이
+구분되지 않는다.
+
 ```python
 # Task metrics — 에이전트 단위 메트릭은 group 라벨 포함 (그룹별 집계/quota 감시용)
-malkuth_agent_tasks_total{agent, group, graph, status}   # Counter
+malkuth_agent_tasks_total{agent, group, graph, status}   # Counter — graph: 그래프명 | "direct"
 malkuth_agent_task_duration_seconds{agent, group, graph} # Histogram
 
 # Model metrics

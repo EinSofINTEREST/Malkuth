@@ -199,8 +199,8 @@ async def build_executor(manifest: AgentManifest, *, metrics: Metrics | None = N
 def _telemetry_for(manifest: AgentManifest, metrics: Metrics | None) -> ExecutorTelemetry | None:
     """이 에이전트의 계측기 — 메트릭 미주입 시 None.
 
-    ``graph`` 라벨은 비워 둔다: 에이전트는 자신이 어느 그래프에 배선됐는지
-    알지 못하고(02 Rule 6), 그것을 전달할 경로도 아직 없다 (#113).
+    ``graph`` 는 여기서 정해지지 않는다: 태스크마다 다르므로 기록 시점에
+    ``TraceContext`` 에서 읽는다 (#113).
     """
     if metrics is None:
         return None

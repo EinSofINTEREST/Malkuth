@@ -212,7 +212,7 @@ class Executor:
                 ),
             )
 
-        self._record_task(result, duration_s=time.perf_counter() - started)
+        self._record_task(result, task=task, duration_s=time.perf_counter() - started)
 
         # 재시도 가능한 실패를 캐싱하면 이 계층이 유일한 재시도 계층인데도
         # 재시도가 영원히 무효화된다 — 성공과 영구 실패만 기억한다
@@ -220,11 +220,13 @@ class Executor:
             self._completed[task.task_id] = result
         return result
 
-    def _record_task(self, result: TaskResult, *, duration_s: float) -> None:
+    def _record_task(self, result: TaskResult, *, task: TaskRequest, duration_s: float) -> None:
         """태스크 종료를 메트릭에 남긴다 — telemetry 미주입 시 무동작."""
         if self._telemetry is None:
             return
-        self._telemetry.task_finished(status=result.status.value, duration_s=duration_s)
+        self._telemetry.task_finished(
+            status=result.status.value, duration_s=duration_s, graph=task.trace.graph
+        )
 
     async def _initial_prompt(self, task: TaskRequest) -> str:
         """Build the task-entry prompt, recalling memory once.

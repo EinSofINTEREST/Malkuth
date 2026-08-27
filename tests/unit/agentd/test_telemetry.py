@@ -11,7 +11,7 @@ from prometheus_client import CollectorRegistry
 
 from malkuth.agentd.executor import Executor, ExecutorConfig
 from malkuth.agentd.telemetry import ExecutorTelemetry, tool_source
-from malkuth.core.agent import TaskStatus
+from malkuth.core.agent import TaskStatus, TraceContext
 from malkuth.observability.metrics import Metrics
 from tests.fixtures.builders import make_task
 from tests.fixtures.fake_model import FakeModel, FakeTools, calls, text
@@ -41,7 +41,6 @@ def make_executor(
             metrics,
             agent="researcher",
             group="research",
-            graph="research-pipeline",
             provider="anthropic",
             model="claude-sonnet-5",
         )
@@ -57,6 +56,10 @@ def make_executor(
     return executor, registry
 
 
+GRAPH_TRACE = TraceContext(trace_id="trace-0001", graph="research-pipeline")
+"""그래프 run 이 만든 태스크 — 오케스트레이터가 graph 를 실어 보낸다 (#113)."""
+
+
 def value(metrics: Metrics, name: str, **labels: str) -> float:
     """해당 라벨 조합의 현재 값 — 미기록이면 0.0."""
     return metrics.registry.get_sample_value(name, labels) or 0.0
@@ -69,7 +72,7 @@ async def test_completed_task_is_counted_with_its_labels():
     metrics = make_metrics()
     executor, _ = make_executor([text("done")], metrics=metrics)
 
-    result = await executor.execute(make_task())
+    result = await executor.execute(make_task(trace=GRAPH_TRACE))
 
     assert result.status is TaskStatus.COMPLETED
     assert (
@@ -92,7 +95,7 @@ async def test_failed_task_is_counted_under_the_failed_status():
     tools.fail(SKILL_TOOL, RuntimeError("boom"))
     executor, _ = make_executor([calls(SKILL_TOOL)], metrics=metrics, tools=tools)
 
-    result = await executor.execute(make_task())
+    result = await executor.execute(make_task(trace=GRAPH_TRACE))
 
     assert result.status is TaskStatus.FAILED
     assert (
@@ -112,7 +115,7 @@ async def test_task_duration_is_observed_once_per_task():
     metrics = make_metrics()
     executor, _ = make_executor([text("done")], metrics=metrics)
 
-    await executor.execute(make_task())
+    await executor.execute(make_task(trace=GRAPH_TRACE))
 
     assert (
         value(
@@ -133,7 +136,7 @@ async def test_model_tokens_are_split_by_direction():
     metrics = make_metrics()
     executor, _ = make_executor([text("done", input_tokens=120, output_tokens=45)], metrics=metrics)
 
-    await executor.execute(make_task())
+    await executor.execute(make_task(trace=GRAPH_TRACE))
 
     assert (
         value(
@@ -162,7 +165,7 @@ async def test_each_model_turn_is_counted():
     metrics = make_metrics()
     executor, _ = make_executor([calls(SKILL_TOOL), text("done")], metrics=metrics)
 
-    await executor.execute(make_task())
+    await executor.execute(make_task(trace=GRAPH_TRACE))
 
     assert (
         value(
@@ -182,7 +185,7 @@ async def test_model_failure_is_counted_before_it_propagates():
     metrics = make_metrics()
     executor, _ = make_executor([RuntimeError("provider down")], metrics=metrics)
 
-    await executor.execute(make_task())
+    await executor.execute(make_task(trace=GRAPH_TRACE))
 
     assert (
         value(
@@ -212,7 +215,7 @@ async def test_skillset_and_mcp_tools_are_counted_separately():
     metrics = make_metrics()
     executor, _ = make_executor([calls(SKILL_TOOL, MCP_TOOL), text("done")], metrics=metrics)
 
-    await executor.execute(make_task())
+    await executor.execute(make_task(trace=GRAPH_TRACE))
 
     assert (
         value(
@@ -244,7 +247,7 @@ async def test_failed_tool_is_counted_as_failed():
     tools.fail(MCP_TOOL, RuntimeError("transport lost"))
     executor, _ = make_executor([calls(MCP_TOOL)], metrics=metrics, tools=tools)
 
-    await executor.execute(make_task())
+    await executor.execute(make_task(trace=GRAPH_TRACE))
 
     assert (
         value(
@@ -268,7 +271,7 @@ async def test_timed_out_tool_is_counted_as_failed():
         [calls(SKILL_TOOL)], metrics=metrics, tools=tools, tool_timeout_s=0.01
     )
 
-    await executor.execute(make_task())
+    await executor.execute(make_task(trace=GRAPH_TRACE))
 
     assert (
         value(
@@ -292,7 +295,7 @@ async def test_execution_works_without_any_metrics():
     tools.fail(SKILL_TOOL, RuntimeError("boom"))
     executor, _ = make_executor([calls(SKILL_TOOL), text("done")], tools=tools)
 
-    result = await executor.execute(make_task())
+    result = await executor.execute(make_task(trace=GRAPH_TRACE))
 
     assert result.status is TaskStatus.FAILED
 
@@ -313,7 +316,7 @@ async def test_sibling_tools_are_counted_when_one_fails():
     tools.script(MCP_TOOL, delay=0.05)
     executor, _ = make_executor([calls(SKILL_TOOL, MCP_TOOL)], metrics=metrics, tools=tools)
 
-    await executor.execute(make_task())
+    await executor.execute(make_task(trace=GRAPH_TRACE))
 
     recorded = value(
         metrics,
@@ -324,3 +327,58 @@ async def test_sibling_tools_are_counted_when_one_fails():
         status="completed",
     )
     assert recorded == 1.0
+
+
+# --- graph 라벨 (#113) ---------------------------------------------------------
+
+
+async def test_direct_requests_are_labelled_direct():
+    """빈 문자열이면 '그래프 없음'과 '라벨을 못 채움'이 구분되지 않는다."""
+    metrics = make_metrics()
+    executor, _ = make_executor([text("done")], metrics=metrics)
+
+    await executor.execute(make_task(node_id=None))
+
+    assert (
+        value(
+            metrics,
+            "malkuth_agent_tasks_total",
+            agent="researcher",
+            group="research",
+            graph="direct",
+            status="completed",
+        )
+        == 1.0
+    )
+
+
+async def test_the_graph_label_is_never_empty():
+    """빈 라벨은 대시보드의 그래프별 집계를 무의미하게 만든다 (#113)."""
+    metrics = make_metrics()
+    executor, _ = make_executor([text("done")], metrics=metrics)
+
+    await executor.execute(make_task())
+
+    assert (
+        value(
+            metrics,
+            "malkuth_agent_tasks_total",
+            agent="researcher",
+            group="research",
+            graph="",
+            status="completed",
+        )
+        == 0.0
+    )
+
+
+async def test_behaviour_does_not_depend_on_the_graph_name():
+    """02 Rule 6 — 에이전트는 배선을 가정하지 않는다. 라벨로만 쓴다."""
+    one, _ = make_executor([text("done")])
+    other, _ = make_executor([text("done")])
+
+    mine = await one.execute(make_task(trace=TraceContext(trace_id="t", graph="research-pipeline")))
+    theirs = await other.execute(make_task(trace=TraceContext(trace_id="t", graph="feed-monitor")))
+
+    assert mine.output == theirs.output
+    assert mine.status == theirs.status

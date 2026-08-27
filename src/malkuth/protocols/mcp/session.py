@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 import structlog
+from mcp.types.version import SUPPORTED_PROTOCOL_VERSIONS as _SDK_SUPPORTED_VERSIONS
 
 from malkuth.core.agent import ComponentHealth, HealthState
 from malkuth.core.errors import CircuitBreaker, ErrorCategory, ErrorCode, MalkuthError
@@ -34,8 +35,13 @@ DEFAULT_MAX_RECONNECTS = 3
 RECONNECT_INITIAL_DELAY_S = 1.0
 RECONNECT_MAX_DELAY_S = 30.0
 
-SUPPORTED_PROTOCOL_VERSIONS = ("2024-11-05", "2025-03-26", "2025-06-18")
-"""협상 가능한 MCP protocol version — 범위 밖이면 MCP_001 (silent degradation 금지)."""
+SUPPORTED_PROTOCOL_VERSIONS: tuple[str, ...] = _SDK_SUPPORTED_VERSIONS
+"""협상 가능한 MCP protocol version — 범위 밖이면 MCP_001 (silent degradation 금지).
+
+목록을 따로 들고 있으면 SDK 가 새 버전을 협상할 때 조용히 갈라져, 정상 서버가
+``MCP_001`` 로 거부된다. **SDK 가 정본**이고 그 버전은 lockfile 이 고정한다
+(03 Version Pinning).
+"""
 
 log = structlog.get_logger(__name__)
 
@@ -63,6 +69,8 @@ class Connection:
     tools: tuple[str, ...]
     protocol_version: str
     handle: Any = None
+    schemas: dict[str, dict[str, Any]] = field(default_factory=dict)
+    """tool 이름 → input schema. 이름만으로는 모델이 인자를 채울 수 없다."""
 
 
 @runtime_checkable
@@ -144,6 +152,20 @@ class McpSession:
         if self._connection is None:
             return ()
         return self._filtered(self._connection.tools)
+
+    @property
+    def schemas(self) -> dict[str, dict[str, Any]]:
+        """바인딩된 tool 의 input schema — ``tools`` 와 같은 필터가 적용된다.
+
+        이름만으로는 모델이 인자를 채울 수 없다. 필터를 따로 적용하면 차단한
+        tool 의 스키마가 새어 모델이 그것을 부르려 든다.
+        """
+        if self._connection is None:
+            return {}
+        allowed = set(self.tools)
+        return {
+            name: schema for name, schema in self._connection.schemas.items() if name in allowed
+        }
 
     async def initialize(self) -> tuple[str, ...]:
         """Establish the session and collect its tools.

@@ -285,12 +285,40 @@ async def test_every_advertised_tool_is_runnable(monkeypatch):
         assert spec.name in executor._tools._skills
 
 
-def test_mcp_entries_never_reach_the_tool_schemas():
-    """registry 는 MCP tool 을 **서버 이름 문자열**로 담는다.
+def test_mcp_tools_carry_their_schema():
+    """registry 가 스키마를 담아야 모델이 인자를 채울 수 있다.
 
-    그대로 넘기면 provider 가 ``to_tool_schema()`` 를 부르다 AttributeError 로
-    터진다 — #78 이 세션을 세워도 스키마 조회 경로가 따로 필요하다.
+    예전에는 서버 이름 문자열을 담아서, 그대로 넘기면 provider 가
+    ``to_tool_schema()`` 를 부르다 터졌다 (#115 에서 해소).
     """
+    from malkuth.agentd.__main__ import _executable_schemas
+    from malkuth.agentd.tools import AgentToolRegistry
+    from malkuth.core.skill import SkillSpec
+
+    mcp_spec = SkillSpec(
+        name="mcp__filesystem__read_file",
+        description="MCP tool from filesystem",
+        parameters={"type": "object", "properties": {"path": {"type": "string"}}},
+    )
+
+    class Result:
+        tools = {
+            "search": SkillSpec(name="search", description="d", parameters={}),
+            "mcp__filesystem__read_file": mcp_spec,
+        }
+
+    class LiveMcp:
+        async def call_tool(self, name, arguments):  # pragma: no cover - 도달 안 함
+            return None
+
+    schemas = _executable_schemas(Result(), AgentToolRegistry(agent="researcher", mcp=LiveMcp()))
+
+    assert all(isinstance(spec, SkillSpec) for spec in schemas)
+    assert {spec.name for spec in schemas} == {"search", "mcp__filesystem__read_file"}
+
+
+def test_mcp_tools_are_hidden_without_a_session():
+    """세션이 없으면 부를 수 없다 — 광고하면 tool 에러 루프에 빠진다."""
     from malkuth.agentd.__main__ import _executable_schemas
     from malkuth.agentd.tools import AgentToolRegistry
     from malkuth.core.skill import SkillSpec
@@ -298,16 +326,11 @@ def test_mcp_entries_never_reach_the_tool_schemas():
     class Result:
         tools = {
             "search": SkillSpec(name="search", description="d", parameters={}),
-            "mcp__filesystem__read_file": "filesystem",  # 서버 이름 문자열
+            "mcp__filesystem__read_file": SkillSpec(
+                name="mcp__filesystem__read_file", description="d", parameters={}
+            ),
         }
 
-    class LiveMcp:
-        async def call_tool(self, name, arguments):  # pragma: no cover - 도달 안 함
-            return None
+    schemas = _executable_schemas(Result(), AgentToolRegistry(agent="researcher"))
 
-    registry = AgentToolRegistry(agent="researcher", mcp=LiveMcp())
-
-    schemas = _executable_schemas(Result(), registry)
-
-    assert all(isinstance(spec, SkillSpec) for spec in schemas)
     assert [spec.name for spec in schemas] == ["search"]

@@ -15,12 +15,15 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any, Literal
 
+import structlog
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
 from malkuth.core.manifest import SemVer
 from malkuth.core.skill import SkillSpec, build_spec, get_spec
 from malkuth.modules.registry import ModulePath, ModuleRegistry, validation_error
+
+log = structlog.get_logger(__name__)
 
 DEFAULT_SKILL_TIMEOUT_S = 60.0
 
@@ -236,7 +239,9 @@ class SkillsetLoader:
             raise validation_error(ref, err) from err
 
         skills = tuple(self._bind(declaration, path, ref) for declaration in manifest.spec.skills)
-        return LoadedSkillset(ref=ref, manifest=manifest, skills=skills)
+        loaded = LoadedSkillset(ref=ref, manifest=manifest, skills=skills)
+        _warn_untyped(loaded)
+        return loaded
 
     def _bind(self, declaration: SkillDeclaration, path: ModulePath, ref: str) -> LoadedSkill:
         """선언된 entrypoint 를 실제 함수로 해석하고 스키마를 도출한다."""
@@ -269,6 +274,25 @@ class SkillsetLoader:
             spec = spec.model_copy(update={"description": declaration.description})
 
         return LoadedSkill(declaration=declaration, spec=spec, fn=fn)
+
+
+def _warn_untyped(loaded: LoadedSkillset) -> None:
+    """타입 없이 노출되는 파라미터를 로드 시점에 경고한다.
+
+    ``build_spec`` 의 경고는 ``@skill`` 데코레이터가 import 시점에 내므로 어느
+    skillset 에서 온 것인지 알 수 없다 — 그 맥락을 아는 것은 로더뿐이다.
+    리포트를 반환만 하면 호출자가 부르지 않는 한 아무도 모른다.
+    """
+    report = loaded.untyped_parameters()
+    if not report:
+        return
+    for tool, parameters in report.items():
+        log.warning(
+            "skill parameters have no type",
+            skillset=loaded.ref,
+            tool=tool,
+            parameters=list(parameters),
+        )
 
 
 def _register_packages(prefix: str, module_name: str, path: ModulePath) -> None:

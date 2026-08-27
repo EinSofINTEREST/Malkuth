@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 
 import yaml
 
+from malkuth.cli.control import DEFAULT_CONTROL_URL
 from malkuth.cli.integrity import (
     dangling_module_refs,
     ghost_containers,
@@ -392,6 +393,91 @@ def port_range(raw: str) -> tuple[int, int]:
     return int(low), int(high)
 
 
+def _control_client(args: argparse.Namespace) -> Any:
+    """이 명령이 말할 Control Plane — 주소는 플래그 또는 기본값."""
+    from malkuth.cli.control import ControlClient
+
+    return ControlClient(getattr(args, "control_url", None) or DEFAULT_CONTROL_URL)
+
+
+def _report_control_failure(err: MalkuthError, *, as_json: bool) -> int:
+    """조작 실패를 사람이 읽을 형태로 — 연결 거부를 그대로 던지지 않는다."""
+    emit(
+        {"status": "failed", "error_code": str(err.code), "message": err.message, **err.details},
+        as_json=as_json,
+    )
+    return EXIT_FAILED
+
+
+def cmd_run_list(args: argparse.Namespace) -> int:
+    """List runs the control plane knows about.
+
+    Control Plane 이 아는 run 목록을 보여줍니다 — 다른 프로세스가 띄운
+    run 도 포함됩니다.
+    """
+    try:
+        listed = _control_client(args).list_runs(mode=args.mode)
+    except MalkuthError as err:
+        return _report_control_failure(err, as_json=args.json)
+
+    emit(
+        {
+            "runs": [
+                {
+                    "run_id": run["run_id"],
+                    "graph": run["graph"],
+                    "mode": run["mode"],
+                    "status": run["status"],
+                    "iteration": run["iteration"],
+                    "drain_requested": run["drain_requested"],
+                }
+                for run in listed
+            ]
+        },
+        as_json=args.json,
+    )
+    return EXIT_OK
+
+
+def cmd_run_drain(args: argparse.Namespace) -> int:
+    """Ask a run to stop after its current iteration.
+
+    진행 중 iteration 을 마친 뒤 정지하도록 요청합니다 — **요청만 남기고
+    돌아옵니다.** 실제 정지는 구동 프로세스가 수행하므로, 이 명령이 성공해도
+    run 은 아직 돌고 있을 수 있습니다.
+    """
+    try:
+        result = _control_client(args).drain(args.run_id)
+    except MalkuthError as err:
+        return _report_control_failure(err, as_json=args.json)
+
+    emit(
+        {
+            "run_id": result["run_id"],
+            "status": result["status"],
+            "drain_requested": result["drain_requested"],
+            "note": "the run stops after its current iteration",
+        },
+        as_json=args.json,
+    )
+    return EXIT_OK
+
+
+def cmd_run_resume(args: argparse.Namespace) -> int:
+    """Restart a halted run from its last iteration.
+
+    ``GRAPH_005`` 로 정지한 run 을 마지막 iteration **다음**부터 재개합니다
+    (05 Incident Response).
+    """
+    try:
+        result = _control_client(args).resume(args.run_id)
+    except MalkuthError as err:
+        return _report_control_failure(err, as_json=args.json)
+
+    emit({"run_id": result["run_id"], "status": result.get("status", "resumed")}, as_json=args.json)
+    return EXIT_OK
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the CLI argument parser.
 
@@ -448,6 +534,28 @@ def build_parser() -> argparse.ArgumentParser:
         help="stop a service run after N iterations (default: until interrupted)",
     )
     run.set_defaults(handler=cmd_run)
+
+    # 다른 프로세스의 run 을 조작하는 명령 — 별도 subcommand 로 둔다.
+    # `run` 아래 subparser 로 넣으면 기존 `malkuth run <graph>` 형태가 깨진다
+    for name, handler, helptext in (
+        ("run-list", cmd_run_list, "list runs the control plane knows about"),
+        ("run-drain", cmd_run_drain, "ask a run to stop after its current iteration"),
+        ("run-resume", cmd_run_resume, "resume a halted run from its last iteration"),
+    ):
+        command = subcommands.add_parser(name, help=helptext)
+        if name != "run-list":
+            command.add_argument("run_id", help="the run to operate on")
+        else:
+            command.add_argument(
+                "--mode", default=None, choices=["mission", "service"], help="narrow by run mode"
+            )
+        command.add_argument(
+            "--control-url",
+            default=None,
+            dest="control_url",
+            help=f"control plane address (default: {DEFAULT_CONTROL_URL})",
+        )
+        command.set_defaults(handler=handler)
 
     check = subcommands.add_parser("check", help="report integrity discrepancies")
     check.add_argument("state", help="path to a yaml document describing observed state")

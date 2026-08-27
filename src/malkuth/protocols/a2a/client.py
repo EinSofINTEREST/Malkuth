@@ -17,7 +17,7 @@ from malkuth.core.agent import TaskStatus
 from malkuth.core.errors import CircuitBreaker, ErrorCategory, ErrorCode, MalkuthError
 from malkuth.observability.circuit import CircuitTelemetry
 from malkuth.protocols.a2a.errors import submit_failed, task_rejected, unreachable
-from malkuth.protocols.telemetry import STATUS_COMPLETED, STATUS_FAILED
+from malkuth.protocols.telemetry import STATUS_COMPLETED, STATUS_FAILED, A2aTelemetry
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -25,7 +25,6 @@ if TYPE_CHECKING:
     from malkuth.core.agent import TaskRequest, TaskResult
     from malkuth.observability.metrics import Metrics
     from malkuth.protocols.a2a.allowlist import Allowlist
-    from malkuth.protocols.telemetry import A2aTelemetry
 
 DEFAULT_CALL_TIMEOUT_S = 120.0
 
@@ -94,8 +93,14 @@ class A2AClient:
     transport: PeerTransport
     timeout_s: float = DEFAULT_CALL_TIMEOUT_S
     breakers: dict[str, CircuitBreaker] = field(default_factory=dict)
-    telemetry: A2aTelemetry | None = None
+    # 주입 지점은 하나다 — telemetry 와 metrics 를 따로 받으면 한쪽만 주입됐을 때
+    # 계측이 조용히 반쪽이 되거나 서로 다른 registry 로 흩어진다
     metrics: Metrics | None = None
+    _telemetry: A2aTelemetry | None = field(default=None, init=False)
+
+    def __post_init__(self) -> None:
+        if self.metrics is not None:
+            self._telemetry = A2aTelemetry(self.metrics, caller=self.agent)
 
     def peers(self) -> tuple[str, ...]:
         """Peers this agent may call.
@@ -196,8 +201,8 @@ class A2AClient:
 
     def _record(self, callee: str, *, status: str) -> None:
         """peer 호출을 메트릭에 남긴다 — telemetry 미주입 시 무동작."""
-        if self.telemetry is not None:
-            self.telemetry.call_finished(callee=callee, status=status)
+        if self._telemetry is not None:
+            self._telemetry.call_finished(callee=callee, status=status)
 
     async def _send(self, callee: str, task: TaskRequest, token: str) -> TaskResult:
         """전송 예외를 A2A 코드로 변환한다."""

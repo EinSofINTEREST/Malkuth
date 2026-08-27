@@ -15,7 +15,9 @@ from malkuth.observability.circuit import CircuitTelemetry
 from malkuth.observability.metrics import Metrics
 from malkuth.protocols.a2a.allowlist import Allowlist, Edge
 from malkuth.protocols.a2a.client import A2AClient
-from malkuth.protocols.telemetry import A2aTelemetry, McpTelemetry
+from malkuth.protocols.mcp.client import McpClient
+from malkuth.protocols.mcp.session import ToolResult
+from malkuth.protocols.telemetry import McpTelemetry
 from tests.fixtures.builders import make_task
 
 SECRET = b"runtime-secret"
@@ -81,7 +83,6 @@ def make_a2a_client(
         agent="researcher",
         allowlist=allowlist,
         transport=transport or FakePeer(),
-        telemetry=None if metrics is None else A2aTelemetry(metrics, caller="researcher"),
         metrics=metrics,
     )
 
@@ -230,3 +231,72 @@ def test_breaker_works_without_an_observer():
     breaker.record_failure()
 
     assert breaker.state is CircuitState.OPEN
+
+
+# --- MCP 배선 (계측 클래스가 아니라 실제 호출 경로) ---------------------------
+
+
+class FakeSession:
+    """tool 결과를 스크립트하는 세션 대역."""
+
+    def __init__(self, error: Exception | None = None) -> None:
+        self._error = error
+
+    async def call_tool(self, tool: str, arguments):
+        if self._error is not None:
+            raise self._error
+        return ToolResult(content=tool)
+
+
+def make_mcp_client(metrics: Metrics | None, *, error: Exception | None = None) -> McpClient:
+    client = McpClient(agent="researcher", transports=None, metrics=metrics)  # type: ignore[arg-type]
+    client.sessions["filesystem"] = FakeSession(error)  # type: ignore[assignment]
+    return client
+
+
+async def test_call_tool_counts_a_successful_call():
+    """계측 클래스만 테스트하면 배선을 지워도 통과한다 — 경로로 검증한다."""
+    metrics = make_metrics()
+    client = make_mcp_client(metrics)
+
+    await client.call_tool("mcp__filesystem__read_file", {"path": "a"})
+
+    assert (
+        value(
+            metrics,
+            "malkuth_mcp_tool_calls_total",
+            agent="researcher",
+            server="filesystem",
+            tool="read_file",
+            status="completed",
+        )
+        == 1.0
+    )
+
+
+async def test_call_tool_counts_a_failed_call():
+    metrics = make_metrics()
+    client = make_mcp_client(metrics, error=RuntimeError("transport lost"))
+
+    with pytest.raises(RuntimeError):
+        await client.call_tool("mcp__filesystem__read_file", {})
+
+    assert (
+        value(
+            metrics,
+            "malkuth_mcp_tool_calls_total",
+            agent="researcher",
+            server="filesystem",
+            tool="read_file",
+            status="failed",
+        )
+        == 1.0
+    )
+
+
+async def test_call_tool_works_without_metrics():
+    client = make_mcp_client(None)
+
+    result = await client.call_tool("mcp__filesystem__read_file", {})
+
+    assert result.content == "read_file"

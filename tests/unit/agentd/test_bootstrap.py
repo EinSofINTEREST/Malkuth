@@ -77,6 +77,16 @@ class FakeMcp:
             raise error
         return self._tools.get(spec.name, [])
 
+    def schemas(self) -> dict[str, dict]:
+        """네임스페이스가 붙은 tool 이름 → input schema (``McpLauncher`` 계약)."""
+        from malkuth.core.tools import namespaced
+
+        return {
+            namespaced(server, tool): {"type": "object", "properties": {"path": {}}}
+            for server, tools in self._tools.items()
+            for tool in tools
+        }
+
 
 def manifest_with(**spec_extra):
     """mcp/skillsets 만 바꿔 쓰는 manifest."""

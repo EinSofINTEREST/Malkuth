@@ -81,6 +81,18 @@ class McpClient:
         self.sessions[spec.name] = session
         return tools
 
+    def schemas(self) -> dict[str, dict[str, Any]]:
+        """Namespaced tool name to its input schema.
+
+        네임스페이스가 붙은 tool 이름 → input schema. 이름만으로는 모델이 인자를
+        채울 수 없으므로, 기동이 이것을 tool registry 로 흘려보냅니다.
+        """
+        return {
+            namespaced(server, tool): schema
+            for server, session in self.sessions.items()
+            for tool, schema in session.schemas.items()
+        }
+
     async def call_tool(self, name: str, arguments: Mapping[str, Any]) -> ToolResult:
         """Call a namespaced MCP tool.
 

@@ -11,14 +11,14 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from malkuth.core.agent import ComponentHealth, HealthState, HealthStatus
 from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
+from malkuth.core.skill import SkillSpec
 from malkuth.core.tools import namespaced
 from malkuth.memory.tool import MEMORY_SEARCH_SPEC, MEMORY_SEARCH_TOOL
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
     from malkuth.core.manifest import AgentManifest, McpServerSpec
-    from malkuth.core.skill import SkillSpec
     from malkuth.modules.promptset import LoadedPromptset
     from malkuth.modules.skillset import LoadedSkillset
 
@@ -36,6 +36,14 @@ class McpLauncher(Protocol):
         """서버를 기동하고 노출 tool 이름 목록을 반환한다."""
         ...
 
+    def schemas(self) -> dict[str, dict[str, Any]]:
+        """네임스페이스가 붙은 tool 이름 → input schema.
+
+        이름만으로는 모델이 인자를 채울 수 없다 — 기동이 이것을 tool registry 로
+        흘려보낸다.
+        """
+        ...
+
 
 @dataclass
 class BootstrapResult:
@@ -46,7 +54,9 @@ class BootstrapResult:
 
     promptset: LoadedPromptset | None = None
     skillsets: tuple[LoadedSkillset, ...] = ()
-    tools: dict[str, SkillSpec | str] = field(default_factory=dict)
+    tools: dict[str, SkillSpec] = field(default_factory=dict)
+    """tool 이름 → 스키마. MCP tool 도 spec 이다 — 문자열을 담으면 provider 가
+    to_tool_schema() 를 부르다 터진다."""
     mcp_servers: dict[str, tuple[str, ...]] = field(default_factory=dict)
     degraded: tuple[str, ...] = ()
     """기동은 됐지만 optional 자원이 빠진 목록 — health 가 degraded 로 보고한다."""
@@ -85,7 +95,8 @@ def build_tool_registry(
     *,
     agent: str,
     with_memory: bool = False,
-) -> dict[str, SkillSpec | str]:
+    mcp_schemas: Mapping[str, Mapping[str, Any]] | None = None,
+) -> dict[str, SkillSpec]:
     """Merge skillset and MCP tools into one registry.
 
     skillset tool 과 MCP tool 을 하나의 registry 로 합칩니다.
@@ -96,14 +107,17 @@ def build_tool_registry(
         agent: Agent name for error context.
         with_memory: Register the framework ``memory_search`` tool — memory 가
             붙지 않았는데 노출하면 모델이 부를 수 없는 tool 을 본다.
+        mcp_schemas: Namespaced tool name to its input schema — 이름만 담으면
+            모델이 인자를 채울 수 없다.
 
     Returns:
-        Tool name to its spec (skillset) or owning server (MCP).
+        Tool name to its spec — MCP tool 도 스키마를 담은 spec 이다.
 
     Raises:
         MalkuthError: MODULE/``MOD_002`` if two sources claim the same tool name.
     """
-    registry: dict[str, SkillSpec | str] = {}
+    registry: dict[str, SkillSpec] = {}
+    schemas = mcp_schemas or {}
 
     for skillset in skillsets:
         for spec in skillset.tools():
@@ -128,7 +142,11 @@ def build_tool_registry(
                     tool=name,
                     mcp_server=server,
                 )
-            registry[name] = server
+            registry[name] = SkillSpec(
+                name=name,
+                description=f"MCP tool from {server}",
+                parameters=dict(schemas.get(name, {})),
+            )
 
     if with_memory:
         if MEMORY_SEARCH_TOOL in registry:
@@ -197,6 +215,8 @@ class Bootstrap:
             agent=agent,
             # memory space 를 선언한 에이전트만 memory_search 를 본다
             with_memory=bool(self._manifest.spec.memory.spaces),
+            # 스키마를 흘리지 않으면 모델이 MCP tool 의 인자를 채울 수 없다
+            mcp_schemas=self._mcp.schemas() if self._mcp is not None else None,
         )
 
         return BootstrapResult(

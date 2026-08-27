@@ -215,17 +215,15 @@ def _executable_schemas(result: Any, tools: AgentToolRegistry) -> list[SkillSpec
     지금 빠지는 것:
 
     - ``memory_search`` — ``MemoryAccess`` 주입 경로가 아직 없습니다 (#111)
-    - MCP tool — 전송 구현과 **스키마 조회 경로**가 아직 없습니다 (#78)
+    - MCP tool — 세션이 없으면 부를 수 없습니다
     """
     runnable: list[SkillSpec] = []
     for name, spec in result.tools.items():
         if name == MEMORY_SEARCH_TOOL and tools.memory is None:
             continue
-        if is_mcp_tool(name):
-            # registry 는 MCP tool 을 **서버 이름 문자열**로 담는다 — 스키마는
-            # 세션이 갖고 있고, 그 전송 바인딩은 #78 이 세운다. 문자열을 그대로
-            # 넘기면 provider 가 to_tool_schema() 를 부르다 AttributeError 로
-            # 터진다
+        if is_mcp_tool(name) and tools.mcp is None:
+            # 세션이 없으면 부를 수 없다 — 실행할 수 없는 tool 을 광고하면
+            # 모델이 고를 때마다 거부되어 루프에 빠진다
             continue
         runnable.append(spec)
     return runnable

@@ -278,9 +278,14 @@ def cmd_run(args: argparse.Namespace) -> int:
         return EXIT_FAILED
 
     # 에이전트 주소는 runtime 이 제공한다 — CLI 가 포트를 추측하지 않는다
+    from malkuth.observability.metrics import Metrics
+
+    # CLI 는 단발 실행이라 scrape 대상이 아니다 — 서버는 띄우지 않고 registry 만
+    # 물려 각 계층의 집계가 실제로 돌게 한다 (상주 프로세스는 agentd 쪽)
     submitter = RunSubmitter(
         runtime=ControlNodeRuntime(clients=_control_clients(args)),
         checkpointer=build_checkpointer(args.checkpointer),
+        metrics=Metrics(),
     )
 
     if getattr(args, "service", False):

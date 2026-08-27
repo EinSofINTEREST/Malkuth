@@ -27,6 +27,7 @@ if TYPE_CHECKING:
 
     from langgraph.checkpoint.base import BaseCheckpointSaver
 
+    from malkuth.observability.metrics import Metrics
     from malkuth.orchestrator.builder import NodeRuntime
     from malkuth.orchestrator.topology import GraphTopology
 
@@ -98,6 +99,15 @@ class RunSubmitter:
     manager: RunManager = field(default_factory=RunManager)
     checkpointer: BaseCheckpointSaver[Any] | None = None
     node_timeout_s: float = DEFAULT_NODE_TIMEOUT_S
+    metrics: Metrics | None = None
+    """계측 registry — 여기서 넘기지 않으면 각 계층의 집계 로직이 무동작이다."""
+
+    def __post_init__(self) -> None:
+        # 기본 manager 는 registry 를 모른 채 만들어진다 — 슬롯 게이지만 빠지면
+        # run 수가 영원히 0 으로 보이므로 같은 registry 를 물려준다
+        if self.metrics is not None:
+            self.manager.use_metrics(self.metrics)
+
     # 구동 중인 service 루프 — fire-and-forget 을 막기 위해 소유자를 명시한다 (07 Async 5)
     services: dict[str, asyncio.Task[RunHandle]] = field(default_factory=dict)
 
@@ -244,8 +254,10 @@ class RunSubmitter:
                 self.runtime,
                 checkpointer=self.checkpointer,
                 node_timeout_s=self.node_timeout_s,
+                metrics=self.metrics,
             ),
             sleep=sleep,
+            metrics=self.metrics,
         )
         task = asyncio.create_task(
             runner.run(
@@ -387,6 +399,7 @@ class RunSubmitter:
             self.runtime,
             checkpointer=self.checkpointer,
             node_timeout_s=self.node_timeout_s,
+            metrics=self.metrics,
         )
         bound = log.bind(graph=topology.metadata.name, run_id=handle.run_id)
         outcome = RunStatus.FAILED

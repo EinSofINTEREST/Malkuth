@@ -17,6 +17,7 @@ import uvicorn
 import yaml
 
 from malkuth.agentd.server import AgentRuntime, create_app
+from malkuth.agentd.telemetry import ExecutorTelemetry
 from malkuth.agentd.tools import AgentToolRegistry
 from malkuth.core.agent import HealthState, HealthStatus
 from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
@@ -24,6 +25,7 @@ from malkuth.core.manifest import AgentManifest
 from malkuth.core.skill import SkillSpec
 from malkuth.core.tools import is_mcp_tool
 from malkuth.memory.tool import MEMORY_SEARCH_TOOL
+from malkuth.observability.metrics import DEFAULT_METRICS_PORT, Metrics
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
@@ -44,6 +46,11 @@ DEFAULT_ROOT = "/app"
 
 ANTHROPIC_PROVIDER = "anthropic"
 """이 이미지가 바인딩한 모델 provider — 다른 provider 선언은 CFG_001 로 거부한다."""
+
+LOG_LEVEL_ENV = "MALKUTH_LOG_LEVEL"
+LOG_FORMAT_ENV = "MALKUTH_LOG_FORMAT"
+METRICS_PORT_ENV = "MALKUTH_METRICS_PORT"
+"""관측 설정 — 컨테이너 안이라 env 로 받는다 (01 Multi-Environment Support)."""
 """테스트 이미지가 선택하는 대역 — base 이미지의 기본값이 되어서는 안 된다."""
 
 log = structlog.get_logger(__name__)
@@ -113,7 +120,7 @@ def build_app(manifest: AgentManifest, executor: Any, *, token: str | None = Non
     return create_app(runtime, token=token)
 
 
-async def build_executor(manifest: AgentManifest) -> Any:
+async def build_executor(manifest: AgentManifest, *, metrics: Metrics | None = None) -> Any:
     """Select the executor this image should serve.
 
     이 이미지가 서빙할 실행기를 고릅니다. 기본은 manifest 기반 표준 실행기이고,
@@ -178,6 +185,24 @@ async def build_executor(manifest: AgentManifest) -> Any:
         tools=registry_tools,
         render=lambda task: _render(result, task),
         tool_schemas=_executable_schemas(result, registry_tools),
+        telemetry=_telemetry_for(manifest, metrics),
+    )
+
+
+def _telemetry_for(manifest: AgentManifest, metrics: Metrics | None) -> ExecutorTelemetry | None:
+    """이 에이전트의 계측기 — 메트릭 미주입 시 None.
+
+    ``graph`` 라벨은 비워 둔다: 에이전트는 자신이 어느 그래프에 배선됐는지
+    알지 못하고(02 Rule 6), 그것을 전달할 경로도 아직 없다 (#113).
+    """
+    if metrics is None:
+        return None
+    return ExecutorTelemetry(
+        metrics,
+        agent=manifest.name,
+        group=manifest.metadata.group or "",
+        provider=manifest.spec.model.provider,
+        model=manifest.spec.model.name,
     )
 
 
@@ -222,13 +247,41 @@ def _render(result: Any, task: Any) -> str:
     return rendered
 
 
+def _setup_observability() -> Metrics:
+    """Configure logging and expose metrics for this process.
+
+    로깅을 설정하고 메트릭을 노출합니다. 계측 로직이 있어도 여기서 registry 를
+    만들어 주입하지 않으면 **런타임에서는 아무 것도 흐르지 않습니다** (#95).
+
+    Returns:
+        The process-wide metric registry.
+    """
+    from malkuth.observability.logging import configure
+    from malkuth.observability.metrics import Metrics, start_metrics_server
+
+    configure(
+        level=os.environ.get(LOG_LEVEL_ENV, "INFO"),
+        json_output=os.environ.get(LOG_FORMAT_ENV, "json") == "json",
+    )
+
+    metrics = Metrics()
+    # registry 를 함께 넘겨야 한다 — 빠뜨리면 prometheus 기본 registry 를
+    # 노출하게 되고, 우리가 채우는 것과 **다른 곳**이라 endpoint 가 늘 비어 있다
+    start_metrics_server(
+        int(os.environ.get(METRICS_PORT_ENV, DEFAULT_METRICS_PORT)),
+        registry=metrics.registry,
+    )
+    return metrics
+
+
 def main() -> None:
     """Run the agent daemon.
 
     에이전트 데몬을 실행합니다 — manifest 로드 → 실행기 선택 → Control API 서빙.
     """
     manifest = load_manifest(Path(os.environ.get(MANIFEST_ENV, DEFAULT_MANIFEST_PATH)))
-    executor = asyncio.run(build_executor(manifest))
+    metrics = _setup_observability()
+    executor = asyncio.run(build_executor(manifest, metrics=metrics))
     app = build_app(manifest, executor, token=os.environ.get(TOKEN_ENV))
 
     log.info(

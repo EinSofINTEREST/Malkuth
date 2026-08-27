@@ -306,3 +306,104 @@ def test_a_missing_run_is_still_reported_as_not_found(served):
         ControlClient(url).get_run("never-existed")
 
     assert exc_info.value.code == ErrorCode.NF_001
+
+
+# --- CLI 로 재개 (#125 세 번째 완료 조건) --------------------------------------------
+
+
+class FailingRuntime:
+    """항상 실패하는 runtime 대역 — GRAPH_005 로 정지시키기 위해."""
+
+    async def invoke(self, node, task):
+        from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
+
+        raise MalkuthError(
+            category=ErrorCategory.GRAPH,
+            code=ErrorCode.GRAPH_002,
+            message="node execution failed",
+        )
+
+
+async def test_a_cli_resume_continues_from_the_next_iteration(tmp_path):
+    """#125 완료 조건 — 재개가 **마지막 iteration 다음부터** 이어져야 한다.
+
+    실패한 회차를 다시 돌리면 부수효과가 겹친다. 그것을 checkpoint thread 로
+    확인한다 — 상태 값만 보면 이어졌는지 다시 돌았는지 구분되지 않는다.
+
+    구동 프로세스(submitter)와 CLI 는 **실제 HTTP** 로만 이어진다.
+    """
+    import asyncio
+
+    import uvicorn
+    from langgraph.checkpoint.memory import MemorySaver
+
+    from malkuth.orchestrator.run import RunStatus
+    from malkuth.orchestrator.submit import RunSubmitter
+    from tests.fixtures.topologies import make_service
+
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    topology = make_service(
+        service={"idle": {"min_delay_s": 1, "max_delay_s": 2}, "max_failure_streak": 1}
+    )
+    checkpointer = MemorySaver()
+    submitter = RunSubmitter(runtime=FailingRuntime(), checkpointer=checkpointer)
+
+    halted = await submitter.start_service(
+        topology, {"feeds": []}, run_id="svc-cli", max_iterations=5, sleep=no_sleep
+    )
+    await asyncio.wait_for(submitter.services[halted.run_id], timeout=10)
+    assert halted.status is RunStatus.HALTED
+
+    # 원인이 해소된 상태로 재개한다 (05 Incident Response)
+    submitter.runtime = EchoRuntime()
+
+    async def resume(run_id: str):
+        return await submitter.resume_service(
+            topology, run_id, max_iterations=halted.iteration + 1, sleep=no_sleep
+        )
+
+    store = InMemoryRunStore()
+    store.upsert(record(halted.run_id, mode="service", status="halted"))
+
+    # 서버는 이 테스트의 루프에서 돌고, CLI 는 별도 스레드에서 동기 HTTP 로 부른다 —
+    # resume 핸들러가 submitter 와 같은 루프에 있어야 태스크를 이어받을 수 있다
+    config = uvicorn.Config(
+        create_app(store, resume=resume), host="127.0.0.1", port=0, log_level="warning"
+    )
+    server = uvicorn.Server(config)
+    serving = asyncio.create_task(server.serve())
+    try:
+        deadline = time.monotonic() + 10
+        # uvicorn 은 기동 완료를 bool 로만 노출한다 — 기다릴 Event 가 없다
+        while not server.started and time.monotonic() < deadline:  # noqa: ASYNC110
+            await asyncio.sleep(0.02)
+        assert server.started
+        port = server.servers[0].sockets[0].getsockname()[1]
+
+        code = await asyncio.to_thread(
+            main, ["run-resume", halted.run_id, "--control-url", f"http://127.0.0.1:{port}"]
+        )
+        assert code == 0
+
+        # 완료된 run 은 services 에서 pop 된다 — 인덱싱하면 빨리 끝난 회차에서
+        # KeyError 로 간헐 실패한다. 남아 있을 때만 기다린다
+        resumed_id = f"{halted.run_id}:resumed"
+        running = submitter.services.get(resumed_id)
+        if running is not None:
+            await asyncio.wait_for(running, timeout=10)
+    finally:
+        server.should_exit = True
+        await asyncio.wait_for(serving, timeout=10)
+
+    resumed = submitter.manager.get(resumed_id)
+    assert resumed.iteration == halted.iteration + 1
+
+    # 재개분이 연 checkpoint thread 는 실패했던 회차 **다음** 이어야 한다
+    threads = {
+        item.config["configurable"]["thread_id"]
+        for item in checkpointer.list(None)
+        if item.config.get("configurable", {}).get("thread_id", "").startswith(resumed_id)
+    }
+    assert threads == {f"{resumed_id}:{halted.iteration}"}

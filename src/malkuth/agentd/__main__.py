@@ -8,6 +8,8 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
+import inspect
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -128,6 +130,68 @@ def build_app(
     return create_app(runtime, token=token)
 
 
+def load_entrypoint(manifest: AgentManifest) -> Any:
+    """Load the custom executor a manifest declares.
+
+    manifest 가 선언한 커스텀 실행기를 로드합니다 (02 Registering Agents 2).
+
+    해석에 실패하면 **기동을 거부합니다** — 조용히 기본 실행기로 떨어지면
+    운영자는 자기 코드가 도는 줄 알지만 실제로는 표준 루프가 돕니다.
+
+    Args:
+        manifest: The validated agent manifest.
+
+    Returns:
+        The custom executor instance.
+
+    Raises:
+        MalkuthError: CONFIG/``CFG_001`` if the reference cannot be resolved or
+            the loaded object does not satisfy the executor contract.
+    """
+    reference = manifest.spec.entrypoint or ""
+    module_name, _, class_name = reference.partition(":")
+    if not module_name or not class_name:
+        raise _entrypoint_error(
+            manifest, reference, reason="entrypoint must be in 'module:Class' format"
+        )
+
+    try:
+        module = importlib.import_module(module_name)
+        loaded = getattr(module, class_name)
+    except (ImportError, AttributeError) as err:
+        raise _entrypoint_error(manifest, reference, reason=type(err).__name__) from err
+
+    instance = loaded(manifest) if _wants_manifest(loaded) else loaded()
+
+    # 계약을 확인하지 않으면 첫 태스크에서야 AttributeError 로 터진다
+    for required in ("execute", "stream"):
+        if not callable(getattr(instance, required, None)):
+            raise _entrypoint_error(manifest, reference, reason=f"executor is missing {required}()")
+
+    log.info("custom executor loaded", agent=manifest.name, entrypoint=reference)
+    return instance
+
+
+def _wants_manifest(loaded: Any) -> bool:
+    """생성자가 manifest 를 받는지 — 받지 않는 실행기도 허용한다."""
+    try:
+        signature = inspect.signature(loaded)
+    except (TypeError, ValueError):  # pragma: no cover - 내장 타입 방어
+        return False
+    return len(signature.parameters) > 0
+
+
+def _entrypoint_error(manifest: AgentManifest, reference: str, *, reason: str) -> MalkuthError:
+    """entrypoint 해석 실패 — 기동을 막는다."""
+    return MalkuthError(
+        category=ErrorCategory.CONFIG,
+        code=ErrorCode.CFG_001,
+        message="agent entrypoint could not be loaded",
+        agent=manifest.name,
+        details={"entrypoint": reference, "reason": reason},
+    )
+
+
 async def build_executor(manifest: AgentManifest, *, metrics: Metrics | None = None) -> Any:
     """Select the executor this image should serve.
 
@@ -144,6 +208,10 @@ async def build_executor(manifest: AgentManifest, *, metrics: Metrics | None = N
     Raises:
         MalkuthError: CONFIG/``CFG_001`` if the declared executor is unknown.
     """
+    # manifest 가 커스텀 실행기를 선언했으면 그것이 이 이미지의 실행기다
+    if manifest.spec.entrypoint:
+        return load_entrypoint(manifest)
+
     declared = os.environ.get(EXECUTOR_ENV, "").strip().lower()
 
     if declared == ECHO_EXECUTOR:

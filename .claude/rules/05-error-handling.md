@@ -172,6 +172,9 @@ RT_003:  OOM killed
 RT_004:  이미지 빌드/풀 실패
 RT_005:  Drain timeout
 RT_006:  그룹 리소스 quota 초과 — 기동 거부
+RT_007:  불법 lifecycle 상태 전이 (프로그래밍 오류)
+RT_008:  재시작 상한 초과 — Failed 전환
+RT_009:  라우팅 가능한 레플리카 없음
 
 GRAPH_001: 토폴로지 검증 실패
 GRAPH_002: Node 실행 실패 (에이전트 에러 wrapping)
@@ -192,12 +195,19 @@ MEM_004: 검색 실패 / 인덱스 손상
 VAL_001: 필수 필드 누락
 VAL_002: 필드 형식 오류
 
+NF_001: 대상 리소스 미존재 (run, 에이전트 등)
+
+ART_001: Artifact 스코프 미선언 / 접근 거부
+ART_002: Artifact quota 초과 — 저장 거부
+
 STOR_001: Checkpoint 저장 실패
 STOR_002: Checkpoint 복원 실패
 STOR_003: Registry 저장소 오류
 
 CFG_001: 설정 파싱/검증 실패
 CFG_002: 그룹 정의 오류 / 스코프 해석 실패 (secrets 미해석 포함)
+
+INTERNAL_001: 예상치 못한 내부 오류 — 최상위 boundary 가 변환
 ```
 
 ## Retry Logic

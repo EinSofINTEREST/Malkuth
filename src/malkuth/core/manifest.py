@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 from enum import StrEnum
 from pathlib import PurePosixPath
-from typing import Annotated, Any, Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -27,6 +27,14 @@ _SHELL_BASENAMES = frozenset(
     {"sh", "bash", "zsh", "dash", "ash", "ksh", "fish", "csh", "tcsh", "env"}
 )
 _RESOURCE_MEMORY_PATTERN = re.compile(r"^\d+(?:Ki|Mi|Gi|Ti)$")
+
+_BYTE_UNITS = {"Ki": 1024, "Mi": 1024**2, "Gi": 1024**3, "Ti": 1024**4}
+
+
+def parse_bytes(value: str) -> int:
+    """``"50Gi"`` 같은 표기를 바이트로 — 검증을 통과한 값만 들어온다."""
+    return int(value[:-2]) * _BYTE_UNITS[value[-2:]]
+
 
 ModuleRefStr = Annotated[str, Field(pattern=_MODULE_REF_PATTERN.pattern)]
 """모듈 참조 문자열 — ``{type}/{name}@{version}``. ``latest`` 등 비고정 참조 금지."""
@@ -329,9 +337,33 @@ class ResourceSpec(BaseModel):
     @property
     def memory_bytes(self) -> int:
         """바이트 단위 메모리 — quota 합산에 사용."""
-        units = {"Ki": 1024, "Mi": 1024**2, "Gi": 1024**3, "Ti": 1024**4}
-        suffix = self.memory[-2:]
-        return int(self.memory[:-2]) * units[suffix]
+        return parse_bytes(self.memory)
+
+
+class ArtifactSpec(BaseModel):
+    """Artifact storage declared for a scope.
+
+    스코프에 선언된 artifact 저장 정책. ``dict[str, Any]`` 로 두면 오타가
+    조용히 통과하고 quota 가 강제되지 않는다.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    quota: str | None = None
+    """저장 상한 (예: ``"50Gi"``). 미선언 시 상한 없음."""
+
+    @field_validator("quota")
+    @classmethod
+    def _valid_quota(cls, value: str | None) -> str | None:
+        """quota 는 Ki/Mi/Gi/Ti 접미사 — resources.memory 와 같은 표기."""
+        if value is not None and not _RESOURCE_MEMORY_PATTERN.match(value):
+            raise ValueError("quota must be an integer with Ki/Mi/Gi/Ti suffix, e.g. '50Gi'")
+        return value
+
+    @property
+    def quota_bytes(self) -> int | None:
+        """바이트 단위 상한 — 미선언 시 None."""
+        return None if self.quota is None else parse_bytes(self.quota)
 
 
 class VolumeSpec(BaseModel):
@@ -511,7 +543,7 @@ class GroupSpec(BaseModel):
     quotas: GroupQuotas = Field(default_factory=GroupQuotas)
     secrets: tuple[str, ...] = ()
     memory: MemorySpec = Field(default_factory=MemorySpec)
-    artifacts: dict[str, Any] = Field(default_factory=dict)
+    artifacts: ArtifactSpec = Field(default_factory=ArtifactSpec)
 
 
 class GroupManifest(BaseModel):

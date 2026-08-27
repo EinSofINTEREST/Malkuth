@@ -110,6 +110,66 @@ def test_unknown_agent_ref_is_reported():
     assert "MOD_001" in [str(c) for c in report.codes()]
 
 
+def test_an_agent_ref_with_a_stale_version_is_reported():
+    """버전을 안 보면 04 의 semver 고정이 무의미해진다.
+
+    실제로 에이전트를 0.2.0 으로 bump 했는데 다른 그래프 두 개가 0.1.0 을
+    가리킨 채 검증을 통과했다 (#149). 런타임에는 실제 manifest 가 떠서
+    선언과 실행이 어긋난 채 굴러간다.
+    """
+    stale = GraphTopology.model_validate(
+        mission_dict(
+            nodes=[{"id": "planner", "agent": "agents/planner@9.9.9"}],
+            edges=[{"from": "START", "to": "planner"}, {"from": "planner", "to": "END"}],
+        )
+    )
+
+    report = run([stale])
+
+    assert not report.ok
+    assert "agent_refs" in report.checks()
+    assert "MOD_002" in [str(c) for c in report.codes()]
+
+
+def test_a_stale_version_is_distinguished_from_an_unknown_agent():
+    """둘을 뭉개면 오타인지 버전 드리프트인지 구분되지 않는다."""
+    stale = GraphTopology.model_validate(
+        mission_dict(
+            nodes=[{"id": "planner", "agent": "agents/planner@9.9.9"}],
+            edges=[{"from": "START", "to": "planner"}, {"from": "planner", "to": "END"}],
+        )
+    )
+
+    codes = {str(c) for c in run([stale]).codes()}
+    unknown = {str(c) for c in run([make_topology(["absent"])]).codes()}
+
+    assert "MOD_002" in codes
+    assert "MOD_001" not in codes
+    assert "MOD_001" in unknown
+
+
+def test_the_stale_finding_names_the_declared_version():
+    """무엇으로 고쳐야 하는지 없으면 운영자가 manifest 를 뒤져야 한다."""
+    stale = GraphTopology.model_validate(
+        mission_dict(
+            nodes=[{"id": "planner", "agent": "agents/planner@9.9.9"}],
+            edges=[{"from": "START", "to": "planner"}, {"from": "planner", "to": "END"}],
+        )
+    )
+
+    finding = next(f for f in run([stale]).findings if f.check == "agent_refs")
+
+    assert finding.details["declared_version"] == "0.1.0"
+    assert "9.9.9" in finding.message
+
+
+def test_a_matching_version_passes():
+    """정합한 참조까지 걸리면 아무도 이 검증을 켜두지 않는다."""
+    report = run([make_topology(["planner"])])
+
+    assert "agent_refs" not in report.checks()
+
+
 # --- 2. 모듈 ref --------------------------------------------------------------
 
 

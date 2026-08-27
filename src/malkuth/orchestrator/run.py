@@ -110,6 +110,16 @@ class RunManager:
         """추적 중인 run 목록 (run_id → handle)."""
         return dict(self._runs)
 
+    def use_metrics(self, metrics: Metrics) -> None:
+        """Attach a metric registry after construction.
+
+        생성 뒤에 registry 를 물립니다 — 조립하는 쪽(``RunSubmitter``)이
+        registry 를 알고, 기본 manager 는 그것을 모른 채 만들어지기 때문입니다.
+        이미 물려 있으면 바꾸지 않습니다 (호출자 의도 존중).
+        """
+        if self._metrics is None:
+            self._metrics = metrics
+
     def active(self, mode: GraphMode) -> int:
         """해당 모드로 진행 중인 run 수."""
         return sum(

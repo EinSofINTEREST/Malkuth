@@ -254,3 +254,47 @@ async def _ok() -> str:
 
 async def _boom() -> str:
     raise RuntimeError("disk full")
+
+
+# --- 조립 지점의 주입 ------------------------------------------------------------
+
+
+def test_submitter_shares_its_registry_with_the_manager():
+    """슬롯 게이지만 빠지면 run 수가 영원히 0 으로 보인다."""
+    from malkuth.orchestrator.submit import RunSubmitter
+
+    metrics = make_metrics()
+    submitter = RunSubmitter(runtime=EchoRuntime(), metrics=metrics)
+
+    submitter.manager.acquire(make_mission())
+
+    assert value(metrics, "malkuth_runs_active", graph=GRAPH, mode="mission") == 1.0
+
+
+def test_an_explicitly_given_manager_keeps_its_own_registry():
+    """호출자가 물린 registry 를 덮어쓰면 그쪽 집계가 사라진다."""
+    from malkuth.orchestrator.submit import RunSubmitter
+
+    theirs = make_metrics()
+    ours = make_metrics()
+    manager = RunManager(metrics=theirs)
+
+    RunSubmitter(runtime=EchoRuntime(), manager=manager, metrics=ours)
+    manager.acquire(make_mission())
+
+    assert value(theirs, "malkuth_runs_active", graph=GRAPH, mode="mission") == 1.0
+    assert value(ours, "malkuth_runs_active", graph=GRAPH, mode="mission") == 0.0
+
+
+async def test_node_metrics_flow_through_the_submitter():
+    """build_graph 에 registry 가 닿지 않으면 노드 latency 가 비어 있다."""
+    from malkuth.orchestrator.submit import RunSubmitter
+
+    metrics = make_metrics()
+    submitter = RunSubmitter(runtime=EchoRuntime(), metrics=metrics)
+
+    await submitter.submit(make_mission(), {"query": "q"})
+
+    assert (
+        value(metrics, "malkuth_node_duration_seconds_count", graph=GRAPH, node_id="planner") == 1.0
+    )

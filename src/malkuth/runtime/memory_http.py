@@ -51,12 +51,17 @@ class HttpMemoryAccess:
         """요청에 쓸 클라이언트 — 주입하지 않으면 매 호출마다 만든다."""
         return self.client or httpx.AsyncClient(timeout=self.timeout_s)
 
-    async def _post(self, path: str, payload: dict[str, Any]) -> Any:
-        """서비스에 요청하고 실패를 구조화 에러로 옮긴다."""
+    async def _request(self, method: str, path: str, payload: dict[str, Any] | None = None) -> Any:
+        """서비스에 요청하고 실패를 구조화 에러로 옮긴다.
+
+        모든 호출이 이 하나를 지납니다 — 메서드마다 따로 변환하면 한쪽이
+        빠져 같은 장애가 어떤 창구를 썼는지에 따라 다른 타입으로 나옵니다.
+        """
         owned = self.client is None
         http = self._http()
         try:
-            response = await http.post(
+            response = await http.request(
+                method,
                 f"{self.base_url.rstrip('/')}{path}",
                 json=payload,
                 headers={"authorization": f"Bearer {self.token}"},
@@ -76,6 +81,10 @@ class HttpMemoryAccess:
         if response.status_code >= 400:
             raise _service_error(response.status_code, _detail(response))
         return response.json()
+
+    async def _post(self, path: str, payload: dict[str, Any]) -> Any:
+        """POST 요청 — 변환은 ``_request`` 가 맡는다."""
+        return await self._request("POST", path, payload)
 
     async def search(self, query: str, **kwargs: Any) -> list[ScoredEntry]:
         """Search the spaces this agent may read.
@@ -113,21 +122,34 @@ class HttpMemoryAccess:
         )
         return MemoryEntry.model_validate(stored)
 
+    async def read(self, space: str, **kwargs: Any) -> list[MemoryEntry]:
+        """Read a declared space, newest first.
+
+        선언된 space 를 최신순으로 읽습니다 — 검색 없이 훑는 창구입니다.
+
+        Args:
+            space: The space alias to read.
+            **kwargs: ``limit`` / ``kinds``.
+
+        Returns:
+            Stored entries, newest first.
+        """
+        payload: dict[str, Any] = {"space": space}
+        for key in ("limit", "kinds"):
+            if kwargs.get(key) is not None:
+                payload[key] = kwargs[key]
+
+        found = await self._post("/v1/read", payload)
+        return [MemoryEntry.model_validate(item) for item in found]
+
+    async def latest(self, space: str, entry_id: str) -> MemoryEntry | None:
+        """정정 체인의 최신 항목 — 대체된 기억을 그대로 읽지 않기 위해서."""
+        found = await self._post("/v1/latest", {"space": space, "entry_id": entry_id})
+        return MemoryEntry.model_validate(found) if found is not None else None
+
     async def spaces(self) -> Sequence[dict[str, str]]:
         """이 에이전트가 닿을 수 있는 space — 자기 범위를 확인하는 창구."""
-        owned = self.client is None
-        http = self._http()
-        try:
-            response = await http.get(
-                f"{self.base_url.rstrip('/')}/v1/spaces",
-                headers={"authorization": f"Bearer {self.token}"},
-            )
-        finally:
-            if owned:
-                await http.aclose()
-        if response.status_code >= 400:
-            raise _service_error(response.status_code, _detail(response))
-        listed: list[dict[str, str]] = response.json()
+        listed: list[dict[str, str]] = await self._request("GET", "/v1/spaces")
         return listed
 
 

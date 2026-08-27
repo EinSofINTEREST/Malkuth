@@ -20,8 +20,10 @@ from pydantic import BaseModel, ConfigDict
 
 from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
 from malkuth.memory.entry import MemoryEntry
+from malkuth.modules.memoryset import ChunkSpec, MemoryKind
 
 if TYPE_CHECKING:
+    from malkuth.memory.index import IndexRegistry
     from malkuth.memory.recall import Recall
     from malkuth.memory.service import AccessToken, MemoryService
 
@@ -102,7 +104,33 @@ class AppendRequest(BaseModel):
     entry: MemoryEntry
 
 
-def create_app(service: MemoryService, recall: Recall, tokens: TokenRegistry) -> FastAPI:
+class ReadRequest(BaseModel):
+    """space 훑기 요청."""
+
+    model_config = ConfigDict(frozen=True)
+
+    space: str
+    limit: int = 100
+    kinds: tuple[MemoryKind, ...] | None = None
+
+
+class LatestRequest(BaseModel):
+    """정정 체인의 최신 항목 요청."""
+
+    model_config = ConfigDict(frozen=True)
+
+    space: str
+    entry_id: str
+
+
+def create_app(
+    service: MemoryService,
+    recall: Recall,
+    tokens: TokenRegistry,
+    *,
+    indexer: IndexRegistry | None = None,
+    chunk: ChunkSpec | None = None,
+) -> FastAPI:
     """Build the Memory Service HTTP app.
 
     메모리 서비스의 HTTP 표면을 만듭니다.
@@ -111,10 +139,14 @@ def create_app(service: MemoryService, recall: Recall, tokens: TokenRegistry) ->
         service: The framework-side memory gateway.
         recall: Hybrid search over the space indexes.
         tokens: Opaque token registry.
+        indexer: Index registry the write path feeds — 없으면 저장만 하고
+            색인하지 않습니다 (읽기 전용 배치용).
+        chunk: Chunking policy for indexed entries.
 
     Returns:
         The FastAPI application.
     """
+    spec = chunk or ChunkSpec()
     app = FastAPI(title="Malkuth Memory Service")
 
     @app.exception_handler(MalkuthError)
@@ -169,10 +201,31 @@ def create_app(service: MemoryService, recall: Recall, tokens: TokenRegistry) ->
 
     @app.post("/v1/append")
     async def append(request: AppendRequest, http_request: Request) -> dict[str, Any]:
-        """rw 권한이 있는 space 에만 추가합니다."""
+        """rw 권한이 있는 space 에만 추가합니다.
+
+        색인은 **저장과 분리된 큐**로 넘깁니다 (09 Write Path) — 여기서
+        embedding 을 기다리면 append 지연이 모델 호출만큼 길어집니다.
+        """
         token = granted(http_request)
         stored = service.append(token, request.space, request.entry)
+        if indexer is not None:
+            # 저장만 하고 색인하지 않으면 그 기억은 검색에서 영원히 사라진다
+            indexer.submit(stored, spec)
         return stored.model_dump(mode="json")
+
+    @app.post("/v1/read")
+    async def read(request: ReadRequest, http_request: Request) -> list[dict[str, Any]]:
+        """선언된 space 를 최신순으로 읽습니다 — 검색 없이 훑는 창구."""
+        token = granted(http_request)
+        found = service.read(token, request.space, limit=request.limit, kinds=request.kinds)
+        return [entry.model_dump(mode="json") for entry in found]
+
+    @app.post("/v1/latest")
+    async def latest(request: LatestRequest, http_request: Request) -> dict[str, Any] | None:
+        """``supersedes`` 체인의 최신 항목 — 정정된 기억을 그대로 읽지 않기 위해서."""
+        token = granted(http_request)
+        found = service.latest(token, request.space, request.entry_id)
+        return found.model_dump(mode="json") if found is not None else None
 
     @app.get("/v1/spaces")
     async def spaces(http_request: Request) -> list[dict[str, str]]:
@@ -198,6 +251,8 @@ __all__ = [
     "MEMORY_TOKEN_ENV",
     "MEMORY_URL_ENV",
     "AppendRequest",
+    "LatestRequest",
+    "ReadRequest",
     "SearchRequest",
     "TokenRegistry",
     "create_app",

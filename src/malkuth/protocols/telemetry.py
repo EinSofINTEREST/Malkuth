@@ -6,20 +6,13 @@ MCP/A2A 원격 호출과 circuit breaker 상태의 메트릭 집계. 주입하�
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Final, cast
-
-from prometheus_client import Counter
+from typing import TYPE_CHECKING, Final
 
 if TYPE_CHECKING:
     from malkuth.observability.metrics import Metrics
 
 STATUS_COMPLETED: Final = "completed"
 STATUS_FAILED: Final = "failed"
-
-
-def _counter(metrics: Metrics, name: str) -> Counter:
-    """카운터 조회 — ``Metrics.__getitem__`` 이 union 을 돌려주기 때문."""
-    return cast("Counter", metrics[name])
 
 
 class McpTelemetry:
@@ -35,7 +28,7 @@ class McpTelemetry:
 
     def tool_called(self, *, server: str, tool: str, status: str) -> None:
         """tool 호출 결과를 집계한다."""
-        _counter(self._metrics, "malkuth_mcp_tool_calls_total").labels(
+        self._metrics.counter("malkuth_mcp_tool_calls_total").labels(
             agent=self._agent, server=server, tool=tool, status=status
         ).inc()
 
@@ -53,6 +46,6 @@ class A2aTelemetry:
 
     def call_finished(self, *, callee: str, status: str) -> None:
         """peer 호출 결과를 집계한다 — allowlist 거부도 실패로 남긴다."""
-        _counter(self._metrics, "malkuth_a2a_calls_total").labels(
+        self._metrics.counter("malkuth_a2a_calls_total").labels(
             caller=self._caller, callee=callee, status=status
         ).inc()

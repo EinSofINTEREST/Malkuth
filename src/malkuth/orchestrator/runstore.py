@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
@@ -132,10 +133,16 @@ class SqliteRunStore:
 
     path: str | Path = ":memory:"
     _conn: sqlite3.Connection = field(init=False)
+    _lock: threading.Lock = field(default_factory=threading.Lock, init=False)
 
     def __post_init__(self) -> None:
         try:
-            self._conn = sqlite3.connect(str(self.path), isolation_level=None)
+            # Control Plane 은 별도 스레드에서 서빙된다 — 기본값(스레드 고정)이면
+            # 서버 스레드의 첫 질의가 ProgrammingError 로 죽는다. 쓰기는 아래
+            # 락으로 직렬화한다
+            self._conn = sqlite3.connect(
+                str(self.path), isolation_level=None, check_same_thread=False
+            )
             self._conn.row_factory = sqlite3.Row
             self._conn.execute(_SCHEMA)
         except sqlite3.Error as err:
@@ -144,8 +151,9 @@ class SqliteRunStore:
     def upsert(self, record: RunRecord) -> None:
         """기록을 남긴다 — 기존 drain 요청은 보존한다."""
         try:
-            self._conn.execute(
-                """
+            with self._lock:
+                self._conn.execute(
+                    """
                 INSERT INTO runs (run_id, graph, mode, status, iteration,
                                   failure_streak, drain, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -158,40 +166,43 @@ class SqliteRunStore:
                     drain = MAX(runs.drain, excluded.drain),
                     updated_at = excluded.updated_at
                 """,
-                (
-                    record.run_id,
-                    record.graph,
-                    record.mode,
-                    record.status,
-                    record.iteration,
-                    record.failure_streak,
-                    int(record.drain),
-                    _now(),
-                ),
-            )
+                    (
+                        record.run_id,
+                        record.graph,
+                        record.mode,
+                        record.status,
+                        record.iteration,
+                        record.failure_streak,
+                        int(record.drain),
+                        _now(),
+                    ),
+                )
         except sqlite3.Error as err:
             raise _storage_error("run record could not be stored", run_id=record.run_id) from err
 
     def get(self, run_id: str) -> RunRecord | None:
         """기록 조회 — 다른 프로세스가 쓴 것도 보인다."""
-        row = self._conn.execute("SELECT * FROM runs WHERE run_id = ?", (run_id,)).fetchone()
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM runs WHERE run_id = ?", (run_id,)).fetchone()
         return _record(row) if row is not None else None
 
     def list(self, *, mode: str | None = None) -> Sequence[RunRecord]:
         """기록 목록 — 최근 갱신 순."""
-        if mode is None:
-            rows = self._conn.execute("SELECT * FROM runs ORDER BY updated_at DESC").fetchall()
-        else:
-            rows = self._conn.execute(
-                "SELECT * FROM runs WHERE mode = ? ORDER BY updated_at DESC", (mode,)
-            ).fetchall()
+        with self._lock:
+            if mode is None:
+                rows = self._conn.execute("SELECT * FROM runs ORDER BY updated_at DESC").fetchall()
+            else:
+                rows = self._conn.execute(
+                    "SELECT * FROM runs WHERE mode = ? ORDER BY updated_at DESC", (mode,)
+                ).fetchall()
         return [_record(row) for row in rows]
 
     def request_drain(self, run_id: str) -> bool:
         """drain 요청을 남긴다 — 구동 프로세스가 iteration 경계에서 읽는다."""
-        cursor = self._conn.execute(
-            "UPDATE runs SET drain = 1, updated_at = ? WHERE run_id = ?", (_now(), run_id)
-        )
+        with self._lock:
+            cursor = self._conn.execute(
+                "UPDATE runs SET drain = 1, updated_at = ? WHERE run_id = ?", (_now(), run_id)
+            )
         return cursor.rowcount > 0
 
     def close(self) -> None:

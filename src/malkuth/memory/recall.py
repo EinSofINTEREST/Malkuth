@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 
-from malkuth.memory.telemetry import IndexTelemetry
+from malkuth.memory.telemetry import OP_RECALL, OP_SEARCH, IndexTelemetry
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -176,9 +176,12 @@ class Recall:
         return tuple(results[:k])
 
     def _record_search(self, space: str, *, duration_s: float) -> None:
-        """검색 지연을 메트릭에 남긴다 — 메트릭 미주입 시 무동작."""
-        if self.metrics is not None:
-            IndexTelemetry(self.metrics).search_finished(space=space, duration_s=duration_s)
+        """검색 지연과 연산 카운터를 남긴다 — 메트릭 미주입 시 무동작."""
+        if self.metrics is None:
+            return
+        telemetry = IndexTelemetry(self.metrics)
+        telemetry.search_finished(space=space, duration_s=duration_s)
+        telemetry.operation(space=space, op=OP_SEARCH)
 
 
 def resolve_corrections(
@@ -288,6 +291,7 @@ class AutoRecall:
             return ()
 
         self.invocations += 1
+        self._record_recall(spaces)
         found = self.recall.search(query, spaces=spaces, k=self.policy.k, entries=entries)
         current = resolve_corrections(found, superseded)
         selected = apply_budget(
@@ -305,6 +309,15 @@ class AutoRecall:
             injected=len(selected),
         )
         return selected
+
+    def _record_recall(self, spaces: Sequence[str]) -> None:
+        """자동 회상 1회를 space 별로 센다 — 메트릭 미주입 시 무동작."""
+        metrics = self.recall.metrics
+        if metrics is None:
+            return
+        telemetry = IndexTelemetry(metrics)
+        for space in spaces:
+            telemetry.operation(space=space, op=OP_RECALL)
 
 
 __all__ = [

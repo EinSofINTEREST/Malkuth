@@ -563,3 +563,39 @@ def test_index_layer_works_without_metrics():
     registry.submit(entry("메트릭 없이"), spec())
 
     assert registry.drain() == 1
+
+
+def test_search_is_counted_as_an_operation():
+    """09 는 search 도 집계 대상으로 둔다 — MemoryService 를 거치지 않으므로 여기서 센다."""
+    metrics = make_metrics()
+    index = index_with(entry("mcp sidecar 는 태그 고정이 필요하다"))
+    recall = Recall(indexes={SPACE: index}, metrics=metrics)
+
+    recall.search("sidecar", spaces=[SPACE], k=3)
+
+    assert (
+        metrics.registry.get_sample_value(
+            "malkuth_memory_operations_total", {"space": SPACE, "op": "search", "status": "ok"}
+        )
+        == 1.0
+    )
+
+
+def test_auto_recall_is_counted_as_an_operation():
+    """recall 은 프롬프트 주입량과 직결된다 — 얼마나 자주 도는지 보여야 한다."""
+    from malkuth.memory.recall import AutoRecall
+    from malkuth.modules.memoryset import RecallSpec
+
+    metrics = make_metrics()
+    item = entry("mcp sidecar 는 태그 고정이 필요하다")
+    recall = Recall(indexes={SPACE: index_with(item)}, metrics=metrics)
+    auto = AutoRecall(recall=recall, policy=RecallSpec(auto=True, k=3, min_score=0.0))
+
+    auto.for_task("sidecar", spaces=[SPACE], entries={item.entry_id: item})
+
+    assert (
+        metrics.registry.get_sample_value(
+            "malkuth_memory_operations_total", {"space": SPACE, "op": "recall", "status": "ok"}
+        )
+        == 1.0
+    )

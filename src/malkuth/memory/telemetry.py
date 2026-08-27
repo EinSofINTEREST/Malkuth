@@ -6,10 +6,14 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 if TYPE_CHECKING:
     from malkuth.observability.metrics import Metrics
+
+OP_SEARCH: Final = "search"
+OP_RECALL: Final = "recall"
+STATUS_OK: Final = "ok"
 
 
 class IndexTelemetry:
@@ -21,6 +25,17 @@ class IndexTelemetry:
 
     def __init__(self, metrics: Metrics) -> None:
         self._metrics = metrics
+
+    def operation(self, *, space: str, op: str, status: str = STATUS_OK) -> None:
+        """검색/회상 연산을 감사 카운터에 남긴다.
+
+        ``MemoryService._record`` 는 저장소 경유 연산(append/read/latest)만
+        지나간다 — search/recall 은 인덱스를 직접 쓰므로 여기서 센다.
+        09 는 세 계열을 모두 집계 대상으로 둔다.
+        """
+        self._metrics.counter("malkuth_memory_operations_total").labels(
+            space=space, op=op, status=status
+        ).inc()
 
     def search_finished(self, *, space: str, duration_s: float) -> None:
         """space 하나에 대한 검색 지연 — 느려지면 recall 예산이 태스크를 잡아먹는다."""

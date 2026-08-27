@@ -21,6 +21,7 @@ ALERTS = MONITORING / "alerts.yaml"
 DASHBOARDS = sorted((MONITORING / "dashboards").glob("*.json"))
 RUNBOOKS_EN = REPO_ROOT / "docs" / "en" / "runbooks"
 RUNBOOKS_KO = REPO_ROOT / "docs" / "ko" / "runbooks"
+RULES = REPO_ROOT / ".claude" / "rules"
 
 REGISTERED = {spec.name for spec in METRIC_SPECS}
 
@@ -337,3 +338,23 @@ def test_alerts_only_filter_on_status_values_the_code_emits():
     )
 
     assert unknown == [], f"알림이 코드가 내지 않는 status 를 본다: {unknown}"
+
+
+def test_documented_memory_ops_match_what_the_code_emits():
+    """05/09 가 나열한 ``op`` 값과 코드가 내는 값이 같아야 한다.
+
+    어긋나면 둘 중 하나를 고쳐야 하는데, **문서를 코드에 맞추는 쪽이 언제나
+    쉬워서** 계약이 조용히 코드를 따라가게 된다. 그 순환을 막는다.
+    """
+    from malkuth.memory.telemetry import OP_RECALL, OP_SEARCH
+
+    emitted = {"append", "read", "latest", OP_SEARCH, OP_RECALL}
+    pattern = re.compile(r"malkuth_memory_operations_total\{[^}]*\}\s*#\s*op:\s*([\w|]+)")
+
+    for rules in (RULES / "05-error-handling.md", RULES / "09-memory-context.md"):
+        match = pattern.search(rules.read_text(encoding="utf-8"))
+        assert match, f"{rules.name}: op 값 주석을 찾지 못했다"
+        documented = set(match.group(1).split("|"))
+        assert documented == emitted, (
+            f"{rules.name}: 문서 {sorted(documented)} vs 코드 {sorted(emitted)}"
+        )

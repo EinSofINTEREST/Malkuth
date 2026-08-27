@@ -21,6 +21,7 @@ dependencies = [
     "docker>=7.1.0",
     "a2a-sdk>=0.2.0",
     "mcp>=1.1.0",
+    "psycopg[binary]>=3.2.0",
 ]
 
 [dependency-groups]
@@ -32,6 +33,7 @@ dev = [
     "pytest-cov>=6.0.0",
     "pytest-benchmark>=5.1.0",
     "types-pyyaml>=6.0.12",
+    "testcontainers[postgres]>=4.8.0",
 ]
 
 [project.scripts]

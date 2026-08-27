@@ -8,16 +8,18 @@ from __future__ import annotations
 
 import pytest
 
-from malkuth.config import MemoryConfig
-from malkuth.memory.backend import create_store
-from malkuth.memory.postgres import APPEND_ONLY_MESSAGE, PostgresMemoryStore
-
-# 계약 테스트를 이 모듈로 수집시킨다 — pytest 는 import 된 테스트 함수도 모은다
-from tests.fixtures.store_contract import *  # noqa: F403
-from tests.fixtures.store_contract import make_entry
-
+# 드라이버 확인이 먼저다 — malkuth.memory.postgres 가 psycopg 를 import 하므로,
+# 아래로 내리면 의존성 부재 시 skip 이 아니라 수집 단계에서 그대로 실패한다
 psycopg = pytest.importorskip("psycopg")
 postgres_module = pytest.importorskip("testcontainers.postgres")
+
+from malkuth.config import MemoryConfig  # noqa: E402
+from malkuth.memory.backend import create_store  # noqa: E402
+from malkuth.memory.postgres import APPEND_ONLY_MESSAGE, PostgresMemoryStore  # noqa: E402
+
+# 계약 테스트를 이 모듈로 수집시킨다 — pytest 는 import 된 테스트 함수도 모은다
+from tests.fixtures.store_contract import *  # noqa: E402, F403
+from tests.fixtures.store_contract import make_entry  # noqa: E402
 
 pytestmark = pytest.mark.integration
 

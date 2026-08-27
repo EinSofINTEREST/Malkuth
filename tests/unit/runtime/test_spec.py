@@ -10,6 +10,7 @@ import pytest
 
 from malkuth.core.errors import MalkuthError
 from malkuth.runtime.spec import (
+    A2A_HOST_ENV,
     A2A_PORT_ENV,
     DEFAULT_CONTROL_PORT,
     DEFAULT_NETWORK,
@@ -83,6 +84,25 @@ def test_the_assigned_a2a_port_reaches_the_container():
 
     assert spec.env[A2A_PORT_ENV] == "9137"
     assert any(port.name == "a2a" for port in spec.ports)
+
+
+def test_the_advertised_host_matches_the_container_name():
+    """peer 는 이 이름으로 접속한다 — 해석되지 않으면 카드가 무의미하다.
+
+    컨테이너 이름은 ``malkuth-{agent}-{replica}`` 라 ``manifest.name`` 을
+    광고하면 Docker DNS 가 풀지 못한다.
+    """
+    spec = build_container_spec(agent_manifest(a2a={"enabled": True}), a2a_port=9137)
+
+    assert spec.env[A2A_HOST_ENV] == spec.name
+
+
+def test_the_advertised_host_follows_the_replica():
+    """레플리카마다 컨테이너가 다르다 — 0번만 맞으면 나머지가 닿지 않는다."""
+    spec = build_container_spec(agent_manifest(a2a={"enabled": True}), a2a_port=9137, replica=2)
+
+    assert spec.env[A2A_HOST_ENV] == spec.name
+    assert spec.name.endswith("-2")
 
 
 def test_no_a2a_port_is_injected_when_not_declared():

@@ -70,6 +70,8 @@ services:
     # 앵커 뒤에 두어 포트만 덮어쓴다
     environment: &reference-env
       MALKUTH_A2A_PORT: "19102"
+      # peer 는 **컨테이너 네트워크에서** 이 이름으로 닿는다
+      MALKUTH_A2A_ADVERTISED_HOST: agent-planner
       MALKUTH_AGENT_TOKEN: ${MALKUTH_AGENT_TOKEN:-e2e-token}
       # SDK 가 이 값을 읽는다 — 코드 변경 없이 대역으로 향한다
       ANTHROPIC_BASE_URL: http://fake-provider:8000
@@ -78,9 +80,6 @@ services:
       # runtime 이 배포 시 주입하는 것을 여기서는 compose 가 대신한다
       MALKUTH_A2A_EDGES: researcher>planner
       MALKUTH_A2A_SECRET: ${MALKUTH_A2A_SECRET:-e2e-a2a-secret}
-      # 테스트가 호스트에서 부르므로 loopback 을 광고한다 —
-      # 배포에서는 runtime 이 컨테이너 DNS 이름을 주입한다
-      MALKUTH_A2A_ADVERTISED_HOST: 127.0.0.1
 
   agent-researcher:
     <<: *agent-defaults
@@ -97,6 +96,8 @@ services:
     environment:
       <<: *reference-env
       MALKUTH_A2A_PORT: "19103"
+      # peer 는 **컨테이너 네트워크에서** 이 이름으로 닿는다
+      MALKUTH_A2A_ADVERTISED_HOST: agent-researcher
 
   agent-writer:
     <<: *agent-defaults
@@ -113,6 +114,8 @@ services:
     environment:
       <<: *reference-env
       MALKUTH_A2A_PORT: "19104"
+      # peer 는 **컨테이너 네트워크에서** 이 이름으로 닿는다
+      MALKUTH_A2A_ADVERTISED_HOST: agent-writer
 
 networks:
   malkuth-e2e-net:

@@ -7,10 +7,13 @@ RRF 병합과 컨텍스트 주입 예산. 관련 없는 기억은 노이즈이�
 from __future__ import annotations
 
 import math
+import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import structlog
+
+from malkuth.memory.telemetry import IndexTelemetry
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -18,6 +21,7 @@ if TYPE_CHECKING:
     from malkuth.memory.entry import MemoryEntry
     from malkuth.memory.index import Hit, SpaceIndex
     from malkuth.modules.memoryset import HybridSpec, MemoryKind, RecallSpec
+    from malkuth.observability.metrics import Metrics
 
 RRF_K = 60
 """RRF 상수 — 상위 순위의 영향력을 과도하게 키우지 않는 표준값."""
@@ -114,6 +118,7 @@ class Recall:
 
     indexes: dict[str, SpaceIndex]
     hybrid: HybridSpec | None = None
+    metrics: Metrics | None = None
     latest_resolver: object | None = None
     """``supersedes`` 체인의 최신 항목을 찾는 store — 없으면 정정을 반영하지 않는다."""
 
@@ -152,6 +157,7 @@ class Recall:
             if index is None:
                 continue
 
+            started = time.perf_counter()
             fused = reciprocal_rank_fusion(
                 [
                     index.search_vector(query, k=k, kinds=kinds, tags=tags),
@@ -159,6 +165,8 @@ class Recall:
                 ],
                 weights=[vector_weight, lexical_weight],
             )
+            self._record_search(space, duration_s=time.perf_counter() - started)
+
             for entry_id, score in normalize_scores(fused).items():
                 entry = lookup.get(entry_id)
                 if entry is not None:
@@ -166,6 +174,11 @@ class Recall:
 
         results.sort(key=lambda r: (-r.score, r.entry.entry_id))
         return tuple(results[:k])
+
+    def _record_search(self, space: str, *, duration_s: float) -> None:
+        """검색 지연을 메트릭에 남긴다 — 메트릭 미주입 시 무동작."""
+        if self.metrics is not None:
+            IndexTelemetry(self.metrics).search_finished(space=space, duration_s=duration_s)
 
 
 def resolve_corrections(

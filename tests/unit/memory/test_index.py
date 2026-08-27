@@ -18,6 +18,7 @@ from malkuth.memory.index import (
     SpaceIndex,
     split_chunks,
 )
+from malkuth.memory.recall import Recall
 from malkuth.modules.memoryset import ChunkSpec, MemoryKind
 
 SPACE = "local:researcher:longterm"
@@ -452,3 +453,73 @@ def test_cosine_of_orthogonal_vectors_is_zero():
 
 def test_cosine_with_a_zero_vector_is_zero():
     assert cosine([0.0, 0.0], [1.0, 0.0]) == 0.0
+
+
+# --- 메트릭 배선 ---------------------------------------------------------------
+
+
+def make_metrics():
+    """이 테스트만의 registry — 프로세스 전역을 오염시키지 않는다."""
+    from prometheus_client import CollectorRegistry
+
+    from malkuth.observability.metrics import Metrics
+
+    return Metrics(registry=CollectorRegistry())
+
+
+def gauge_value(metrics, name: str, **labels) -> float:
+    return metrics.registry.get_sample_value(name, labels) or 0.0
+
+
+def test_draining_reports_the_space_size():
+    """무한 성장은 검색 품질과 비용을 함께 망친다 — 크기를 봐야 한다."""
+    metrics = make_metrics()
+    registry = IndexRegistry(metrics=metrics)
+    registry.submit(entry("첫 항목"), spec())
+    registry.submit(entry("둘째 항목"), spec())
+
+    registry.drain()
+
+    assert gauge_value(metrics, "malkuth_memory_entries", space=SPACE) == 2.0
+
+
+def test_pending_entries_report_their_age_in_seconds():
+    """09 의 목표 지연이 초 단위이므로 개수가 아니라 시간이어야 한다."""
+    from datetime import UTC, datetime, timedelta
+
+    metrics = make_metrics()
+    registry = IndexRegistry(metrics=metrics)
+    old = entry("오래 대기", created_at=datetime.now(UTC) - timedelta(seconds=30))
+    registry.submit(old, spec())
+
+    lag = registry.queue.lag_seconds(now=old.created_at + timedelta(seconds=30))
+
+    assert lag[SPACE] == pytest.approx(30.0)
+
+
+def test_drained_space_reports_zero_lag():
+    """해소된 지연이 게이지에 남아 있으면 계속 밀린 것처럼 보인다."""
+    metrics = make_metrics()
+    registry = IndexRegistry(metrics=metrics)
+    registry.submit(entry("색인 대상"), spec())
+
+    registry.drain()
+
+    assert gauge_value(metrics, "malkuth_memory_index_lag_seconds", space=SPACE) == 0.0
+
+
+def test_search_duration_is_observed_per_space():
+    metrics = make_metrics()
+    index = index_with(entry("mcp sidecar 는 태그 고정이 필요하다"))
+    recall = Recall(indexes={SPACE: index}, metrics=metrics)
+
+    recall.search("sidecar", spaces=[SPACE], k=3)
+
+    assert gauge_value(metrics, "malkuth_memory_search_duration_seconds_count", space=SPACE) == 1.0
+
+
+def test_index_layer_works_without_metrics():
+    registry = IndexRegistry()
+    registry.submit(entry("메트릭 없이"), spec())
+
+    assert registry.drain() == 1

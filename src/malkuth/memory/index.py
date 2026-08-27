@@ -12,12 +12,14 @@ from __future__ import annotations
 import math
 from collections import defaultdict
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import structlog
 
 from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
 from malkuth.memory.embedding import HashEmbedder, cosine, tokenize
+from malkuth.memory.telemetry import IndexTelemetry
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
@@ -25,6 +27,7 @@ if TYPE_CHECKING:
     from malkuth.memory.embedding import Embedder
     from malkuth.memory.entry import MemoryEntry
     from malkuth.modules.memoryset import ChunkSpec, MemoryKind
+    from malkuth.observability.metrics import Metrics
 
 DEFAULT_MAX_INDEX_FAILURES = 3
 """연속 인덱싱 실패 상한 — 넘으면 숨기지 않고 MEM_003 으로 드러낸다."""
@@ -274,6 +277,25 @@ class IndexQueue:
         """아직 색인되지 않은 항목 수 — 지연 관측 지표."""
         return len(self.pending)
 
+    def lag_seconds(self, *, now: datetime | None = None) -> dict[str, float]:
+        """space 별 가장 오래된 미색인 항목의 나이.
+
+        09 는 목표 지연(``index_lag_target_s``)을 초 단위로 둔다 — 목표를 지키는지
+        보려면 개수가 아니라 시간이어야 한다. 시간 판정은 주입 가능하게 둔다.
+
+        Args:
+            now: Reference time; the current UTC time when omitted.
+
+        Returns:
+            Space name to the age of its oldest pending entry, in seconds.
+        """
+        reference = now or datetime.now(UTC)
+        oldest: dict[str, float] = {}
+        for entry, _spec in self.pending:
+            age = (reference - entry.created_at).total_seconds()
+            oldest[entry.space] = max(oldest.get(entry.space, 0.0), age)
+        return oldest
+
     def drain(self, indexes: dict[str, SpaceIndex]) -> int:
         """Index everything queued.
 
@@ -354,6 +376,7 @@ class IndexRegistry:
     embedder: Embedder = field(default_factory=HashEmbedder)
     indexes: dict[str, SpaceIndex] = field(default_factory=dict)
     queue: IndexQueue = field(default_factory=IndexQueue)
+    metrics: Metrics | None = None
 
     def index_for(self, space: str) -> SpaceIndex:
         """space 의 인덱스 — 없으면 만든다."""
@@ -367,8 +390,24 @@ class IndexRegistry:
         self.queue.submit(entry, spec)
 
     def drain(self) -> int:
-        """큐를 비운다."""
-        return self.queue.drain(self.indexes)
+        """큐를 비우고 space 별 크기·지연을 관측한다."""
+        indexed = self.queue.drain(self.indexes)
+        self._observe()
+        return indexed
+
+    def _observe(self, *, now: datetime | None = None) -> None:
+        """space 크기와 인덱싱 지연을 게이지에 반영한다 — 메트릭 미주입 시 무동작."""
+        if self.metrics is None:
+            return
+
+        telemetry = IndexTelemetry(self.metrics)
+        for space, index in self.indexes.items():
+            telemetry.entries(space=space, count=len(index.metadata))
+
+        lag = self.queue.lag_seconds(now=now)
+        # 큐가 빈 space 는 지연이 0 이다 — 값을 남겨두면 해소된 지연이 계속 보인다
+        for space in self.indexes:
+            telemetry.index_lag(space=space, seconds=lag.get(space, 0.0))
 
     def reindex(
         self, space: str, entries: Iterable[MemoryEntry], spec: ChunkSpec, *, embedder: Embedder

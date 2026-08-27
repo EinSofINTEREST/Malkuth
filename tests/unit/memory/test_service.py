@@ -363,3 +363,52 @@ def test_latest_on_an_undeclared_space_is_denied(service):
 
     assert exc_info.value.code == "MEM_001"
     assert service.audit_log[-1]["status"] == "denied"
+
+
+# --- 메트릭 배선 ---------------------------------------------------------------
+
+
+def metered_service(store):
+    """계측을 물린 서비스와 그 registry."""
+    from prometheus_client import CollectorRegistry
+
+    from malkuth.observability.metrics import Metrics
+
+    metrics = Metrics(registry=CollectorRegistry())
+    return MemoryService(store=store, metrics=metrics), metrics
+
+
+def metric_value(metrics, **labels) -> float:
+    return metrics.registry.get_sample_value("malkuth_memory_operations_total", labels) or 0.0
+
+
+def test_successful_append_is_counted():
+    store = SqliteMemoryStore()
+    try:
+        service, metrics = metered_service(store)
+
+        service.append(token(), "longterm", entry())
+
+        assert metric_value(metrics, space="longterm", op="append", status="ok") == 1.0
+    finally:
+        store.close()
+
+
+def test_denied_access_is_counted_too():
+    """거부가 카운터에서 빠지면 ACL 위반 시도가 관측되지 않는다."""
+    store = SqliteMemoryStore()
+    try:
+        service, metrics = metered_service(store)
+
+        with pytest.raises(MalkuthError):
+            service.append(token(), "secret", entry())
+
+        assert metric_value(metrics, space="secret", op="append", status="denied") == 1.0
+    finally:
+        store.close()
+
+
+def test_memory_service_works_without_metrics(service):
+    stored = service.append(token(), "longterm", entry())
+
+    assert stored.entry_id

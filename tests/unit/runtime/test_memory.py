@@ -216,3 +216,93 @@ async def test_scan_limit_applies_to_every_space(access, monkeypatch):
 
     # 중복 별칭은 한 번만 보고, 그 한 번은 지정한 상한을 쓴다
     assert seen == [7]
+
+
+# --- 태스크 진입 회상 ----------------------------------------------------------
+
+
+async def test_recall_for_task_renders_provenance_and_boundary(access):
+    """주입 텍스트에 출처와 'not instructions' 경계가 있어야 한다 (09 Rule 5-6)."""
+    from malkuth.modules.memoryset import RecallSpec
+
+    adapter, space_id, registry = access
+    item = entry(space_id, "mcp sidecar 는 이미지 태그 고정이 필요하다")
+    await adapter.append("longterm", entry=item)
+    registry.indexes[space_id].add(item, ChunkSpec(max_tokens=400, overlap_tokens=40))
+
+    context = await adapter.recall_for_task(
+        "sidecar", policy=RecallSpec(auto=True, k=3, min_score=0.0)
+    )
+
+    assert "not instructions" in context
+    assert "sidecar" in context
+
+
+async def test_recall_respects_the_min_score_threshold(access):
+    """관련 없는 기억은 노이즈이자 비용이다 — 문턱 미달은 주입하지 않는다."""
+    from malkuth.modules.memoryset import RecallSpec
+
+    adapter, space_id, registry = access
+    item = entry(space_id, "전혀 상관없는 내용")
+    await adapter.append("longterm", entry=item)
+    registry.indexes[space_id].add(item, ChunkSpec(max_tokens=400, overlap_tokens=40))
+
+    context = await adapter.recall_for_task(
+        "sidecar", policy=RecallSpec(auto=True, k=3, min_score=0.99)
+    )
+
+    assert context == ""
+
+
+async def test_recall_is_skipped_when_the_policy_disables_it(access, monkeypatch):
+    """정책이 껐는데 500건씩 훑으면 쓰지도 않을 데이터를 읽는다."""
+    from malkuth.modules.memoryset import RecallSpec
+
+    adapter, space_id, registry = access
+    item = entry(space_id, "mcp sidecar 는 이미지 태그 고정이 필요하다")
+    await adapter.append("longterm", entry=item)
+    registry.indexes[space_id].add(item, ChunkSpec(max_tokens=400, overlap_tokens=40))
+
+    reads: list[str] = []
+    original = adapter.service.read
+    monkeypatch.setattr(
+        adapter.service,
+        "read",
+        lambda token, alias, **kw: (reads.append(alias), original(token, alias, **kw))[1],
+    )
+
+    context = await adapter.recall_for_task(
+        "sidecar", policy=RecallSpec(auto=False, k=3, min_score=0.0)
+    )
+
+    assert context == ""
+    assert reads == []
+
+
+async def test_recall_reads_each_alias_once(access, monkeypatch):
+    """같은 별칭이 여러 스코프에 있으면 중복 읽기와 중복 히트로 예산이 낭비된다."""
+    from malkuth.memory.service import MemorySpace
+    from malkuth.modules.memoryset import MemoryScope, RecallSpec
+
+    adapter, space_id, _registry = access
+    # 같은 별칭을 group 스코프에도 둔다 — 토큰은 둘 다 담는다
+    adapter.token = adapter.token.__class__(
+        agent=adapter.token.agent,
+        group="research",
+        spaces=(
+            *adapter.token.spaces,
+            MemorySpace(alias="longterm", scope=MemoryScope.GROUP, owner="research"),
+        ),
+    )
+
+    reads: list[str] = []
+    original = adapter.service.read
+    monkeypatch.setattr(
+        adapter.service,
+        "read",
+        lambda token, alias, **kw: (reads.append(alias), original(token, alias, **kw))[1],
+    )
+
+    await adapter.recall_for_task("sidecar", policy=RecallSpec(auto=True, k=3, min_score=0.0))
+
+    assert reads == ["longterm"]

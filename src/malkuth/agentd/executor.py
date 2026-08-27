@@ -34,9 +34,12 @@ from malkuth.core.skill import SkillContext
 from malkuth.core.tools import is_mcp_tool
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+    from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 
     from malkuth.agentd.telemetry import ExecutorTelemetry
+
+    TaskRecall = Callable[[TaskRequest], Awaitable[str]]
+    """태스크 진입 시 1회 회상해 프롬프트에 붙일 텍스트를 만드는 콜러블."""
 
 
 @dataclass(frozen=True)
@@ -143,8 +146,10 @@ class Executor:
         config: ExecutorConfig | None = None,
         on_cleanup: Callable[[], None] | None = None,
         telemetry: ExecutorTelemetry | None = None,
+        recall: TaskRecall | None = None,
     ) -> None:
         self._agent = agent
+        self._recall = recall
         self._telemetry = telemetry
         self._model = model
         self._tools = tools
@@ -221,9 +226,28 @@ class Executor:
             return
         self._telemetry.task_finished(status=result.status.value, duration_s=duration_s)
 
+    async def _initial_prompt(self, task: TaskRequest) -> str:
+        """Build the task-entry prompt, recalling memory once.
+
+        09 Context Assembly 의 구성 순서를 따릅니다:
+        ``system(promptset) + task input + recalled memory``.
+
+        회상은 **태스크당 1회**입니다 — tool loop 가 N 턴 돌아도 다시 검색하지
+        않습니다 (09 Rule 7). 추가 탐색은 모델이 ``memory_search`` 를 명시
+        호출합니다.
+        """
+        prompt = self._render(task)
+        if self._recall is None:
+            return prompt
+
+        context = await self._recall(task)
+        if not context:
+            return prompt
+        return f"{prompt}\n\n{context}"
+
     async def _run(self, task: TaskRequest) -> TaskResult:
         """모델과 tool 을 오가며 루프를 돈다."""
-        prompt = self._render(task)
+        prompt = await self._initial_prompt(task)
         usage = ModelUsage()
         # 태스크가 기본값을 그대로 쓰면 executor 설정을 따른다 —
         # `or` 로 고르면 TaskConfig 의 기본값(20)이 항상 이겨 설정이 무시된다
@@ -382,6 +406,18 @@ class Executor:
                 return
             yield event
 
+    def _recall_failure(self, err: BaseException) -> MalkuthError:
+        """회상 실패를 구조화 에러로 만든다 — 기억이 없다고 태스크가 죽지는 않는다."""
+        if isinstance(err, MalkuthError):
+            return err
+        return MalkuthError(
+            category=ErrorCategory.MEMORY,
+            code=ErrorCode.MEM_004,
+            message="auto-recall failed",
+            agent=self._agent,
+            details={"cause": type(err).__name__},
+        )
+
     def _timeout_event(self, task: TaskRequest) -> ErrorEvent:
         """태스크 상한 초과를 종료 이벤트로 만든다."""
         return ErrorEvent(
@@ -398,7 +434,16 @@ class Executor:
 
     async def _stream(self, task: TaskRequest) -> AsyncIterator[TaskEvent]:
         """이벤트를 발행하며 루프를 돈다 (상한은 stream 이 적용)."""
-        prompt = self._render(task)
+        try:
+            prompt = await self._initial_prompt(task)
+        except asyncio.CancelledError:
+            self._cleanup()
+            raise
+        except Exception as err:
+            # 같은 실패가 execute 에서는 TaskResult 인데 stream 에서만 예외로
+            # 새어나가면 소비자가 두 경로를 다르게 다뤄야 한다
+            yield ErrorEvent(task_id=task.task_id, error=self._recall_failure(err).payload())
+            return
         usage = ModelUsage()
         # 태스크가 기본값을 그대로 쓰면 executor 설정을 따른다 —
         # `or` 로 고르면 TaskConfig 의 기본값(20)이 항상 이겨 설정이 무시된다

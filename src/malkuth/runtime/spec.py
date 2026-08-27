@@ -21,7 +21,12 @@ DEFAULT_CONTROL_PORT: Final = 8080
 DEFAULT_PID_LIMIT: Final = 256
 DEFAULT_BASE_IMAGE: Final = "malkuth/agent-base:0.1.0"
 
-# 컨테이너가 쓸 수 있어야 하는 임시 경로 — read-only rootfs 위의 tmpfs
+# 컨테이너가 쓸 수 있어야 하는 임시 경로 — read-only rootfs 위의 tmpfs.
+#
+# **작업대이지 출력함이 아니다**: tmpfs 라 재시작 시 소멸하고, 다음 노드는
+# 다른 컨테이너라 여기 남긴 파일을 보지 못한다. 산출물은 graph state 또는
+# artifact 저장소로 간다 (02 Statelessness / Output Discipline). 정당한 용도는
+# 태스크 한 번 안의 scratch 뿐 — 02 가 허용하는 "재시작 시 소실 전제" 범위다
 _WRITABLE_TMPFS: Final = ("/tmp", "/workspace")  # noqa: S108 - 컨테이너 내부 경로
 
 TMPFS_OPTIONS: Final = "mode=1777"

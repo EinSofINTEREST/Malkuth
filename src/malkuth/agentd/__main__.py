@@ -161,7 +161,12 @@ def load_entrypoint(manifest: AgentManifest) -> Any:
     except (ImportError, AttributeError) as err:
         raise _entrypoint_error(manifest, reference, reason=type(err).__name__) from err
 
-    instance = loaded(manifest) if _wants_manifest(loaded) else loaded()
+    try:
+        instance = loaded(manifest) if _wants_manifest(loaded) else loaded()
+    except Exception as err:
+        # 생성자가 터지면 데몬이 구조화되지 않은 예외로 죽는다 — 운영자는
+        # 설정 문제인지 코드 버그인지 구분할 단서를 잃는다
+        raise _entrypoint_error(manifest, reference, reason=type(err).__name__) from err
 
     # 계약을 확인하지 않으면 첫 태스크에서야 AttributeError 로 터진다
     for required in ("execute", "stream"):
@@ -208,8 +213,10 @@ async def build_executor(manifest: AgentManifest, *, metrics: Metrics | None = N
     Raises:
         MalkuthError: CONFIG/``CFG_001`` if the declared executor is unknown.
     """
-    # manifest 가 커스텀 실행기를 선언했으면 그것이 이 이미지의 실행기다
-    if manifest.spec.entrypoint:
+    # manifest 가 커스텀 실행기를 선언했으면 그것이 이 이미지의 실행기다.
+    # truthiness 로 보면 `entrypoint: ""` 가 **미선언과 같아져** 조용히 표준
+    # 실행기로 떨어진다 — 선언한 이상 해석 실패로 거부해야 한다
+    if manifest.spec.entrypoint is not None:
         return load_entrypoint(manifest)
 
     declared = os.environ.get(EXECUTOR_ENV, "").strip().lower()

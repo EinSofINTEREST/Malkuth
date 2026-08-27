@@ -42,3 +42,30 @@ class NotCallableExecute:
 
     async def stream(self, task: Any) -> Any:
         yield {}
+
+
+class NeedsMoreThanManifest:
+    """생성자가 manifest 외 인자를 더 요구하는 실행기 — 인스턴스화가 실패한다."""
+
+    def __init__(self, manifest: Any, extra: Any) -> None:  # pragma: no cover - 호출 실패용
+        self.manifest = manifest
+        self.extra = extra
+
+    async def execute(self, task: Any) -> Any:  # pragma: no cover
+        return {}
+
+    async def stream(self, task: Any) -> Any:  # pragma: no cover
+        yield {}
+
+
+class ExplodingConstructor:
+    """생성자가 도메인 예외를 던지는 실행기."""
+
+    def __init__(self, manifest: Any) -> None:
+        raise RuntimeError("boom")
+
+    async def execute(self, task: Any) -> Any:  # pragma: no cover
+        return {}
+
+    async def stream(self, task: Any) -> Any:  # pragma: no cover
+        yield {}

@@ -81,6 +81,35 @@ def test_a_malformed_reference_is_rejected(reference):
     assert exc_info.value.code == ErrorCode.CFG_001
 
 
+@pytest.mark.parametrize("reference", ["bogus", ":Thing", "module:", ""])
+async def test_a_malformed_reference_is_rejected_on_the_startup_path(reference, monkeypatch):
+    """``load_entrypoint`` 직접 호출은 **프로덕션 경로를 건너뛴다**.
+
+    truthiness 로 보면 `entrypoint: ""` 가 미선언과 같아져 조용히 표준
+    실행기로 떨어진다 — 그것을 잡으려면 기동 경로로 들어가야 한다.
+    """
+    monkeypatch.setenv("MALKUTH_EXECUTOR", "echo")
+
+    with pytest.raises(MalkuthError) as exc_info:
+        await build_executor(manifest_with(reference))
+
+    assert exc_info.value.code == ErrorCode.CFG_001
+
+
+@pytest.mark.parametrize(
+    "reference",
+    [f"{FIXTURES}:NeedsMoreThanManifest", f"{FIXTURES}:ExplodingConstructor"],
+)
+async def test_a_failing_constructor_is_reported_as_a_config_failure(reference):
+    """생성자가 터지면 데몬이 구조화되지 않은 예외로 죽는다 — 설정 문제인지
+    코드 버그인지 구분할 단서를 잃는다."""
+    with pytest.raises(MalkuthError) as exc_info:
+        await build_executor(manifest_with(reference))
+
+    assert exc_info.value.code == ErrorCode.CFG_001
+    assert exc_info.value.details["reason"] in ("TypeError", "RuntimeError")
+
+
 @pytest.mark.parametrize(
     "reference",
     [f"{FIXTURES}:MissingStream", f"{FIXTURES}:NotCallableExecute"],

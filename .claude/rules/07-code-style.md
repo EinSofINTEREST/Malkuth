@@ -241,7 +241,11 @@ async def resolve(self, ref: str) -> ModulePath:
 3. **의존 방향**: `core` ← 나머지 전부. 역방향 import 금지
    - `orchestrator` ↛ `runtime.docker` (runtime 추상 계약만 의존)
    - `protocols` ↛ `orchestrator`
-4. `__init__.py` 는 공개 심볼 re-export 만 — 로직 금지
+4. `__init__.py` 는 공개 심볼 re-export 만 — 로직 금지.
+   **하위 모듈과 이름이 겹치는 심볼은 re-export 하지 않는다** — 겹치면 그 모듈이
+   가려져 `malkuth.core.skill` 이 모듈이 아니라 함수로 잡히고, monkeypatch·mock
+   대상 지정이 직관과 어긋난다. 겹치는 심볼은 모듈에서 직접 import 한다
+   (`from malkuth.core.skill import skill`)
 5. 모듈 레벨 부수효과 금지 (import 시 연결/기동 금지) — 명시적 팩토리/생성자로
 
 ```python

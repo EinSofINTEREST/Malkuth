@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sys
 from enum import StrEnum
 from typing import Any
 
@@ -292,9 +291,7 @@ def _captured_warnings(monkeypatch) -> list[dict]:
     def capture(event: str, **fields: object) -> None:
         recorded.append({"event": event, **fields})
 
-    # malkuth.core.__init__ 이 skill *함수* 를 re-export 해 모듈명을 가린다 —
-    # sys.modules 로 실제 모듈을 잡는다
-    monkeypatch.setattr(sys.modules["malkuth.core.skill"].log, "warning", capture)
+    monkeypatch.setattr("malkuth.core.skill.log.warning", capture)
     return recorded
 
 

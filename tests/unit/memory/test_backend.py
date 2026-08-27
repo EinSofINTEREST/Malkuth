@@ -20,7 +20,7 @@ def test_sqlite_backend_builds_a_sqlite_store():
     try:
         assert isinstance(store, SqliteMemoryStore)
     finally:
-        store.close()  # type: ignore[union-attr]
+        store.close()
 
 
 def test_sqlite_backend_honours_the_configured_path(tmp_path):
@@ -31,7 +31,7 @@ def test_sqlite_backend_honours_the_configured_path(tmp_path):
     try:
         assert db.exists()
     finally:
-        store.close()  # type: ignore[union-attr]
+        store.close()
 
 
 def test_postgres_without_a_dsn_is_rejected_when_the_store_is_opened():

@@ -91,4 +91,4 @@ def test_config_backend_builds_a_live_postgres_store(postgres_dsn):
         entry = store.append(make_entry())
         assert store.get(entry.entry_id) == entry
     finally:
-        store.close()  # type: ignore[union-attr]
+        store.close()

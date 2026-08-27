@@ -85,6 +85,10 @@ class MemoryStore(Protocol):
         """retention 정책 전용 삭제 — 일반 경로에서 호출 금지."""
         ...
 
+    def close(self) -> None:
+        """연결을 정리한다 — 백엔드가 살아있는 연결을 소유할 수 있다."""
+        ...
+
 
 def validate_entry(entry: MemoryEntry) -> None:
     """Check the storage invariants before writing.

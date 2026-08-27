@@ -1,0 +1,226 @@
+"""Cross-process run registry.
+
+``RunHandle`` 은 run 을 구동하는 **프로세스의 메모리에만** 있다. 그래서 다른
+프로세스는 그 run 을 조회할 수도, drain 을 요청할 수도 없다 (#102).
+
+이 저장소는 그 격차만 메운다 — **state 는 담지 않는다**. state 는 checkpointer
+소관이고, 두 곳에 두면 어느 쪽이 진실인지 모호해진다.
+"""
+
+from __future__ import annotations
+
+import sqlite3
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
+
+from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+    from pathlib import Path
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS runs (
+    run_id         TEXT PRIMARY KEY,
+    graph          TEXT NOT NULL,
+    mode           TEXT NOT NULL,
+    status         TEXT NOT NULL,
+    iteration      INTEGER NOT NULL DEFAULT 0,
+    failure_streak INTEGER NOT NULL DEFAULT 0,
+    drain          INTEGER NOT NULL DEFAULT 0,
+    updated_at     TEXT NOT NULL
+);
+"""
+
+
+def _storage_error(message: str, **details: str) -> MalkuthError:
+    """Run 레지스트리 실패를 STORAGE 카테고리로 옮긴다."""
+    return MalkuthError(
+        category=ErrorCategory.STORAGE,
+        code=ErrorCode.STOR_003,
+        message=message,
+        details=details,
+    )
+
+
+@dataclass(frozen=True)
+class RunRecord:
+    """One run as other processes can see it.
+
+    다른 프로세스가 볼 수 있는 run 한 건. ``drain`` 은 **요청 플래그**이고,
+    실제 정지는 구동 프로세스가 iteration 경계에서 수행한다.
+    """
+
+    run_id: str
+    graph: str
+    mode: str
+    status: str
+    iteration: int = 0
+    failure_streak: int = 0
+    drain: bool = False
+    updated_at: str = ""
+
+
+@runtime_checkable
+class RunStore(Protocol):
+    """Where run records live so other processes can reach them."""
+
+    def upsert(self, record: RunRecord) -> None:
+        """run 기록을 남긴다 (없으면 생성, 있으면 갱신)."""
+        ...
+
+    def get(self, run_id: str) -> RunRecord | None:
+        """run 기록 — 없으면 None."""
+        ...
+
+    def list(self, *, mode: str | None = None) -> Sequence[RunRecord]:
+        """기록된 run 목록 — mode 로 좁힐 수 있다."""
+        ...
+
+    def request_drain(self, run_id: str) -> bool:
+        """drain 요청을 남긴다 — 미지의 run 이면 False."""
+        ...
+
+
+@dataclass
+class InMemoryRunStore:
+    """A run store for a single process.
+
+    한 프로세스 안에서만 쓰는 저장소 — 테스트와 dev 용입니다.
+    """
+
+    _records: dict[str, RunRecord] = field(default_factory=dict, init=False)
+
+    def upsert(self, record: RunRecord) -> None:
+        """기록을 남긴다 — drain 요청은 보존한다."""
+        existing = self._records.get(record.run_id)
+        # 구동 프로세스의 갱신이 다른 프로세스의 drain 요청을 지우면
+        # 그 요청은 영원히 전달되지 않는다
+        drain = record.drain or (existing.drain if existing else False)
+        self._records[record.run_id] = RunRecord(
+            **{**record.__dict__, "drain": drain, "updated_at": _now()}
+        )
+
+    def get(self, run_id: str) -> RunRecord | None:
+        """기록 조회."""
+        return self._records.get(run_id)
+
+    def list(self, *, mode: str | None = None) -> Sequence[RunRecord]:
+        """기록 목록."""
+        found = list(self._records.values())
+        return [record for record in found if mode is None or record.mode == mode]
+
+    def request_drain(self, run_id: str) -> bool:
+        """drain 요청 플래그를 세운다."""
+        existing = self._records.get(run_id)
+        if existing is None:
+            return False
+        self._records[run_id] = RunRecord(
+            **{**existing.__dict__, "drain": True, "updated_at": _now()}
+        )
+        return True
+
+
+@dataclass
+class SqliteRunStore:
+    """A run store other processes can read.
+
+    같은 파일을 여는 프로세스끼리 run 을 공유합니다 — #102 의 cross-process
+    조작이 성립하는 지점입니다.
+    """
+
+    path: str | Path = ":memory:"
+    _conn: sqlite3.Connection = field(init=False)
+
+    def __post_init__(self) -> None:
+        try:
+            self._conn = sqlite3.connect(str(self.path), isolation_level=None)
+            self._conn.row_factory = sqlite3.Row
+            self._conn.execute(_SCHEMA)
+        except sqlite3.Error as err:
+            raise _storage_error("run store could not be opened", path=str(self.path)) from err
+
+    def upsert(self, record: RunRecord) -> None:
+        """기록을 남긴다 — 기존 drain 요청은 보존한다."""
+        try:
+            self._conn.execute(
+                """
+                INSERT INTO runs (run_id, graph, mode, status, iteration,
+                                  failure_streak, drain, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(run_id) DO UPDATE SET
+                    status = excluded.status,
+                    iteration = excluded.iteration,
+                    failure_streak = excluded.failure_streak,
+                    -- 구동 프로세스의 갱신이 다른 프로세스의 drain 요청을
+                    -- 덮어쓰면 그 요청은 영원히 전달되지 않는다
+                    drain = MAX(runs.drain, excluded.drain),
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    record.run_id,
+                    record.graph,
+                    record.mode,
+                    record.status,
+                    record.iteration,
+                    record.failure_streak,
+                    int(record.drain),
+                    _now(),
+                ),
+            )
+        except sqlite3.Error as err:
+            raise _storage_error("run record could not be stored", run_id=record.run_id) from err
+
+    def get(self, run_id: str) -> RunRecord | None:
+        """기록 조회 — 다른 프로세스가 쓴 것도 보인다."""
+        row = self._conn.execute("SELECT * FROM runs WHERE run_id = ?", (run_id,)).fetchone()
+        return _record(row) if row is not None else None
+
+    def list(self, *, mode: str | None = None) -> Sequence[RunRecord]:
+        """기록 목록 — 최근 갱신 순."""
+        if mode is None:
+            rows = self._conn.execute("SELECT * FROM runs ORDER BY updated_at DESC").fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM runs WHERE mode = ? ORDER BY updated_at DESC", (mode,)
+            ).fetchall()
+        return [_record(row) for row in rows]
+
+    def request_drain(self, run_id: str) -> bool:
+        """drain 요청을 남긴다 — 구동 프로세스가 iteration 경계에서 읽는다."""
+        cursor = self._conn.execute(
+            "UPDATE runs SET drain = 1, updated_at = ? WHERE run_id = ?", (_now(), run_id)
+        )
+        return cursor.rowcount > 0
+
+    def close(self) -> None:
+        """연결을 닫는다."""
+        self._conn.close()
+
+
+def _record(row: sqlite3.Row) -> RunRecord:
+    """저장 행을 기록으로."""
+    return RunRecord(
+        run_id=row["run_id"],
+        graph=row["graph"],
+        mode=row["mode"],
+        status=row["status"],
+        iteration=row["iteration"],
+        failure_streak=row["failure_streak"],
+        drain=bool(row["drain"]),
+        updated_at=row["updated_at"],
+    )
+
+
+def _now() -> str:
+    """갱신 시각 — 정렬과 관측에 쓴다."""
+    return datetime.now(UTC).isoformat()
+
+
+__all__ = [
+    "InMemoryRunStore",
+    "RunRecord",
+    "RunStore",
+    "SqliteRunStore",
+]

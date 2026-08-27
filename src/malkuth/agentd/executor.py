@@ -9,6 +9,7 @@ agentd 의 실행 루프. 모델과 tool 사이를 오가며 태스크를 완수
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol
@@ -149,11 +150,14 @@ class Executor:
         telemetry: ExecutorTelemetry | None = None,
         recall: TaskRecall | None = None,
         artifacts: ArtifactStore | None = None,
+        output_keys: Sequence[str] = (),
     ) -> None:
         self._agent = agent
         # 미주입 시 skill 은 ctx.artifacts is None 을 받는다 — 지금까지 **항상**
         # 그랬고, 그래서 02 Output Discipline 의 참조 전달 경로가 죽어 있었다
         self._artifacts = artifacts
+        # 미선언이면 기존대로 content 하나 — 선언한 에이전트만 이름 있는 출력을 낸다
+        self._output_keys = tuple(output_keys)
         self._recall = recall
         self._telemetry = telemetry
         self._model = model
@@ -233,6 +237,47 @@ class Executor:
             status=result.status.value, duration_s=duration_s, graph=task.trace.graph
         )
 
+    def _shape_output(self, content: str) -> dict[str, Any]:
+        """Build the task output from the model's final response.
+
+        선언된 키가 없으면 기존대로 ``{"content": ...}`` 하나입니다.
+
+        선언이 있으면 응답을 JSON 으로 읽어 그 키들만 옮깁니다 — 여분 키는
+        버립니다 (선언되지 않은 값이 state 로 흘러가면 02 Rule 5 의 출력
+        규율이 깨집니다).
+
+        Raises:
+            MalkuthError: MODEL/``LLM_004`` if the response is not JSON or a
+                declared key is missing — 조용히 빈 출력으로 떨어지면 그래프가
+                다음 노드에서야 GRAPH_003 으로 실패해 원인이 멀어집니다.
+        """
+        if not self._output_keys:
+            return {"content": content}
+
+        try:
+            parsed = json.loads(content)
+        except json.JSONDecodeError as err:
+            raise self._output_error("model response is not json", content) from err
+
+        if not isinstance(parsed, dict):
+            raise self._output_error("model response is not a json object", content)
+
+        missing = [key for key in self._output_keys if key not in parsed]
+        if missing:
+            raise self._output_error(f"declared output keys missing: {missing}", content)
+
+        return {key: parsed[key] for key in self._output_keys}
+
+    def _output_error(self, message: str, content: str) -> MalkuthError:
+        """출력 계약 위반 — 응답 꼬리를 남겨 promptset 드리프트를 추적한다."""
+        return MalkuthError(
+            category=ErrorCategory.MODEL,
+            code=ErrorCode.LLM_004,
+            message=message,
+            agent=self._agent,
+            details={"declared": ",".join(self._output_keys), "content": content[-300:]},
+        )
+
     async def _initial_prompt(self, task: TaskRequest) -> str:
         """Build the task-entry prompt, recalling memory once.
 
@@ -267,7 +312,7 @@ class Executor:
 
                 if response.is_final:
                     return TaskResult.completed(
-                        task, output={"content": response.content}, usage=usage
+                        task, output=self._shape_output(response.content), usage=usage
                     )
 
                 results = await self._run_tools(response.tool_calls, task, turn)

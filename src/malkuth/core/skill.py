@@ -21,12 +21,15 @@ from typing import (
     runtime_checkable,
 )
 
+import structlog
 from pydantic import BaseModel, ConfigDict
 
 if TYPE_CHECKING:
     from malkuth.core.agent import SecretsProvider
 
 SKILL_ATTR = "__malkuth_skill__"
+
+log = structlog.get_logger(__name__)
 
 
 @runtime_checkable
@@ -187,7 +190,19 @@ def build_spec(fn: Callable[..., Any], *, name: str | None = None) -> SkillSpec:
 
     try:
         hints = get_type_hints(fn)
-    except Exception:  # noqa: BLE001 - 해석 불가한 힌트는 스키마 없이 진행
+    except Exception as err:  # noqa: BLE001 - 해석 불가한 힌트는 스키마 없이 진행
+        # 조용히 넘기면 **모델이 타입 없는 tool 을 본다** — 어떤 값을 넣어야
+        # 할지 알 수 없는 계약이 된다. 흔한 원인은 SkillContext 를
+        # TYPE_CHECKING 뒤에 두어 런타임에 이름이 없는 경우다.
+        # 동적 정의 skill 을 막지 않기 위해 에러 대신 경고로 드러낸다
+        log.warning(
+            "skill type hints could not be resolved",
+            # 노출되는 이름을 쓴다 — fn.__name__ 을 쓰면 @skill(name=...) 로
+            # 바꾼 경우 운영자가 로그의 이름으로 tool 을 찾을 수 없다
+            tool=name or fn.__name__,
+            reason=type(err).__name__,
+            detail=str(err),
+        )
         hints = {}
 
     # 첫 파라미터는 반드시 SkillContext — 어긋나면 런타임 주입 계약이 조용히 깨진다.
@@ -201,6 +216,7 @@ def build_spec(fn: Callable[..., Any], *, name: str | None = None) -> SkillSpec:
 
     properties: dict[str, Any] = {}
     required: list[str] = []
+    untyped: list[str] = []
 
     for param in params[1:]:
         if param.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
@@ -211,7 +227,18 @@ def build_spec(fn: Callable[..., Any], *, name: str | None = None) -> SkillSpec:
             required.append(param.name)
         else:
             schema = {**schema, "default": param.default}
+        if not schema.get("type") and "anyOf" not in schema:
+            untyped.append(param.name)
         properties[param.name] = schema
+
+    if untyped:
+        # 타입 없는 파라미터를 모델에게 주면 어떤 값을 넣어야 할지 알 수 없다.
+        # 스키마 자체는 그대로 두고(동적 skill 허용) 경고로만 드러낸다
+        log.warning(
+            "skill parameters have no type",
+            tool=name or fn.__name__,
+            parameters=untyped,
+        )
 
     parameters: dict[str, Any] = {
         "type": "object",

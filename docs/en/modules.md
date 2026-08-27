@@ -43,6 +43,24 @@ async def search(ctx: SkillContext, query: str, max_results: int = 10) -> list[d
 Key rules: async-first, access secrets/logging via `SkillContext` only, timeouts declared
 in `skillset.yaml`, failures raised as exceptions (converted at the agentd boundary).
 
+**Import `SkillContext` at runtime, not under `TYPE_CHECKING`.** The tool schema is
+derived from your signature via `get_type_hints()`. If a name in the annotations cannot
+be resolved at runtime, that call raises and the framework falls back to *no* schema —
+the model then sees untyped parameters and cannot tell what to pass:
+
+```python
+# Wrong — get_type_hints() raises NameError, every parameter loses its type
+if TYPE_CHECKING:
+    from malkuth.core.skill import SkillContext
+
+# Right
+from malkuth.core.skill import SkillContext, skill
+```
+
+The framework warns (`skill type hints could not be resolved` /
+`skill parameters have no type`) rather than failing, so dynamically defined skills stay
+possible. `LoadedSkillset.untyped_parameters()` reports the same thing per tool.
+
 ## Promptsets
 
 Templates are selected by graph `node_id` (or `default` for direct requests). Variables

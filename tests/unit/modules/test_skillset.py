@@ -269,3 +269,77 @@ def test_skillset_supports_intra_package_imports(tmp_path):
     loaded = SkillsetLoader(ModuleRegistry(roots)).load("skillsets/web-search@0.1.0")
 
     assert [s.name for s in loaded.skills] == ["search"]
+
+
+# --- 타입 없는 파라미터 리포트 ---------------------------------------------------
+
+
+def test_reference_skillset_has_no_untyped_parameters(tmp_path):
+    """배포되는 스킬셋이 타입 없는 tool 을 모델에 노출하면 안 된다."""
+    from pathlib import Path
+
+    from malkuth.modules.registry import ModuleRegistry
+
+    repo_root = Path(__file__).resolve().parents[3]
+    loaded = SkillsetLoader(ModuleRegistry.under(repo_root)).load("skillsets/web-search@0.2.0")
+
+    assert loaded.untyped_parameters() == {}
+
+
+def _captured_loader_warnings(monkeypatch) -> list[dict]:
+    """skillset 로더의 WARN 을 가로챈다."""
+    recorded: list[dict] = []
+
+    def capture(event: str, **fields: object) -> None:
+        recorded.append({"event": event, **fields})
+
+    monkeypatch.setattr("malkuth.modules.skillset.log.warning", capture)
+    return recorded
+
+
+def test_loader_warns_with_the_skillset_ref(tmp_path, monkeypatch):
+    """어느 skillset 에서 왔는지는 로더만 안다 — 데코레이터 시점엔 ref 가 없다."""
+    recorded = _captured_loader_warnings(monkeypatch)
+    loader = _write_skillset(
+        tmp_path,
+        yaml_body=HEADER + "    - name: loose\n      entrypoint: skills.loose:loose\n",
+        modules={
+            "loose": (
+                "from malkuth.core.skill import SkillContext, skill\n"
+                "@skill\n"
+                "async def loose(ctx: SkillContext, thing, count: int = 1) -> str:\n"
+                '    """설명."""\n'
+                "    return 'x'\n"
+            )
+        },
+    )
+
+    loader.load("skillsets/custom@0.1.0")
+
+    warned = [r for r in recorded if "have no type" in r["event"]]
+    assert warned, "로더가 타입 없는 파라미터를 경고하지 않았다"
+    assert warned[0]["skillset"] == "skillsets/custom@0.1.0"
+    assert warned[0]["tool"] == "loose"
+    assert warned[0]["parameters"] == ["thing"]
+
+
+def test_loader_stays_quiet_when_every_parameter_is_typed(tmp_path, monkeypatch):
+    """오탐이 나면 운영자가 이 경고를 무시하게 된다."""
+    recorded = _captured_loader_warnings(monkeypatch)
+    loader = _write_skillset(
+        tmp_path,
+        yaml_body=HEADER + "    - name: tidy\n      entrypoint: skills.tidy:tidy\n",
+        modules={
+            "tidy": (
+                "from malkuth.core.skill import SkillContext, skill\n"
+                "@skill\n"
+                "async def tidy(ctx: SkillContext, query: str) -> str:\n"
+                '    """설명."""\n'
+                "    return 'x'\n"
+            )
+        },
+    )
+
+    loader.load("skillsets/custom@0.1.0")
+
+    assert [r for r in recorded if "have no type" in r["event"]] == []

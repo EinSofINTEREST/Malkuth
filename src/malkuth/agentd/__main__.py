@@ -17,9 +17,12 @@ import uvicorn
 import yaml
 
 from malkuth.agentd.server import AgentRuntime, create_app
+from malkuth.agentd.tools import AgentToolRegistry
 from malkuth.core.agent import HealthState, HealthStatus
 from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
 from malkuth.core.manifest import AgentManifest
+from malkuth.core.tools import is_mcp_tool
+from malkuth.memory.tool import MEMORY_SEARCH_TOOL
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
@@ -154,7 +157,6 @@ async def build_executor(manifest: AgentManifest) -> Any:
     from malkuth.agentd.bootstrap import Bootstrap
     from malkuth.agentd.executor import Executor
     from malkuth.agentd.providers.anthropic import AnthropicModel
-    from malkuth.agentd.tools import AgentToolRegistry
     from malkuth.modules.promptset import PromptsetLoader
     from malkuth.modules.registry import ModuleRegistry
     from malkuth.modules.skillset import SkillsetLoader
@@ -166,13 +168,36 @@ async def build_executor(manifest: AgentManifest) -> Any:
         skillset_loader=SkillsetLoader(registry),
     ).run()
 
+    registry_tools = AgentToolRegistry(agent=manifest.name, skillsets=result.skillsets)
+
     return Executor(
         agent=manifest.name,
         model=AnthropicModel(config=manifest.spec.model, agent=manifest.name),
-        tools=AgentToolRegistry(agent=manifest.name, skillsets=result.skillsets),
+        tools=registry_tools,
         render=lambda task: _render(result, task),
-        tool_schemas=list(result.tools.values()),
+        tool_schemas=_executable_schemas(result, registry_tools),
     )
+
+
+def _executable_schemas(result: Any, tools: AgentToolRegistry) -> list[Any]:
+    """Advertise only the tools this executor can actually run.
+
+    실행할 수 없는 tool 을 모델에게 보이면 **tool 에러 루프**에 빠집니다 —
+    모델이 고를 때마다 거부되고, 그 실패를 보고 다시 고릅니다.
+
+    지금 빠지는 것:
+
+    - ``memory_search`` — ``MemoryAccess`` 주입 경로가 아직 없습니다 (#111)
+    - MCP tool — 전송 구현이 아직 없습니다 (#78)
+    """
+    runnable = []
+    for name, spec in result.tools.items():
+        if name == MEMORY_SEARCH_TOOL and tools.memory is None:
+            continue
+        if is_mcp_tool(name) and tools.mcp is None:
+            continue
+        runnable.append(spec)
+    return runnable
 
 
 def _render(result: Any, task: Any) -> str:

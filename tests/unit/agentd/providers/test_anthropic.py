@@ -246,3 +246,13 @@ def test_sdk_retries_are_disabled():
     )
 
     assert provider.client.max_retries == 0
+
+
+async def test_malformed_tool_arguments_are_llm_004():
+    """input 이 매핑이 아니면 ValueError 가 executor 로 그대로 샌다."""
+    provider = model(Message([Block(type="tool_use", id="tu-1", name="search", input=["query"])]))
+
+    with pytest.raises(MalkuthError) as exc_info:
+        await provider.run("prompt", [])
+
+    assert exc_info.value.code == ErrorCode.LLM_004

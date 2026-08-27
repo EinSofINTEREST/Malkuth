@@ -144,7 +144,7 @@ class AnthropicModel:
                 input_tokens=message.usage.input_tokens,
                 output_tokens=message.usage.output_tokens,
             )
-        except (AttributeError, TypeError) as err:
+        except (AttributeError, TypeError, ValueError) as err:
             # 응답 모양이 계약과 다르면 그대로 흘려보내지 않는다 — 조용히 빈
             # 응답으로 처리하면 태스크가 성공한 것처럼 끝난다
             raise _model_error(

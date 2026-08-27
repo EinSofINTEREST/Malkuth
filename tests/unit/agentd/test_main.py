@@ -245,3 +245,41 @@ def test_another_agents_token_is_rejected():
     )
 
     assert response.status_code == 401
+
+
+# --- 노출과 실행의 일치 ---------------------------------------------------------
+
+
+async def researcher_with_memory(monkeypatch):
+    """memory space 를 선언한 researcher manifest."""
+    import yaml
+
+    from malkuth.core.manifest import AgentManifest
+
+    monkeypatch.delenv(EXECUTOR_ENV, raising=False)
+    monkeypatch.setenv("MALKUTH_ROOT", str(REPO_ROOT))
+    doc = yaml.safe_load((REPO_ROOT / "agents" / "researcher" / "manifest.yaml").read_text("utf-8"))
+    doc["spec"]["memory"] = {
+        "spaces": [{"ref": "memorysets/agent-longterm@0.1.0", "as": "longterm"}]
+    }
+    return await build_executor(AgentManifest.model_validate(doc))
+
+
+async def test_unrunnable_tools_are_not_advertised(monkeypatch):
+    """실행할 수 없는 tool 을 보이면 모델이 고를 때마다 거부되어 루프에 빠진다."""
+    from malkuth.memory.tool import MEMORY_SEARCH_TOOL
+
+    executor = await researcher_with_memory(monkeypatch)
+
+    advertised = {spec.name for spec in executor._tool_schemas}
+    assert MEMORY_SEARCH_TOOL not in advertised
+    assert "search" in advertised
+
+
+async def test_every_advertised_tool_is_runnable(monkeypatch):
+    """노출과 실행이 어긋나면 그 자체가 결함이다."""
+    executor = await researcher_with_memory(monkeypatch)
+
+    for spec in executor._tool_schemas:
+        assert executor._tools.timeout_for(spec.name) >= 0.0
+        assert spec.name in executor._tools._skills

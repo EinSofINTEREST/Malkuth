@@ -52,6 +52,9 @@ build: ## 에이전트 base image + 테스트 echo image 빌드
 	docker build -t malkuth/agent-echo:$(IMAGE_TAG) \
 		--build-arg BASE_TAG=$(IMAGE_TAG) \
 		-f $(DOCKER_DIR)/agent-echo.Dockerfile .
+	docker build -t malkuth/agent-claude-code:$(IMAGE_TAG) \
+		--build-arg BASE_TAG=$(IMAGE_TAG) \
+		-f $(DOCKER_DIR)/agent-claude-code.Dockerfile .
 
 up: ## 개발 스택 기동
 	IMAGE_TAG=$(IMAGE_TAG) docker compose -f $(DOCKER_DIR)/compose.yaml up -d

@@ -1,0 +1,28 @@
+apiVersion: malkuth/v1
+kind: Agent
+metadata:
+  name: claude-code
+  version: 0.1.0
+  description: Claude Code CLI 를 실행기로 쓰는 에이전트
+
+spec:
+  model:
+    provider: anthropic
+    name: claude-opus-5
+
+  promptset:
+    ref: promptsets/claude-code@0.1.0
+
+  # 02 Custom Agent — 이 클래스가 agentd 의 기본 루프를 대신한다
+  entrypoint: agent:ClaudeCodeExecutor
+
+  a2a:
+    enabled: false
+
+  runtime:
+    image: malkuth/agent-claude-code:0.1.0
+    resources:
+      cpu: "1.0"
+      memory: 2Gi
+    env_allowlist:
+      - ANTHROPIC_API_KEY

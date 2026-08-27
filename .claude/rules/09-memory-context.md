@@ -327,7 +327,7 @@ MEM_004: 검색 실패 / 인덱스 손상
 메트릭:
 
 ```python
-malkuth_memory_operations_total{space, op, status}     # op: append|search|recall
+malkuth_memory_operations_total{space, op, status}     # op: append|read|latest
 malkuth_memory_search_duration_seconds{space}
 malkuth_memory_entries{space}                          # Gauge
 malkuth_memory_index_lag_seconds{space}                # 인덱싱 큐 지연

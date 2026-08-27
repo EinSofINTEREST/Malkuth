@@ -254,16 +254,19 @@ class GraphBuilder:
             update = merge_output(node, result.output, schema=self._schema)
             return self._with_iteration(state, node.id, update)
 
+        if self._telemetry is None:
+            # 계측이 없으면 래퍼도 두지 않는다 — 선택적 경로가 상시 비용을 내면 안 된다
+            return run
+
+        telemetry = self._telemetry
+
         async def timed(state: dict[str, Any]) -> dict[str, Any]:
             """노드 latency 를 남긴다 — 실패한 노드도 관측 대상이다."""
             started = time.perf_counter()
             try:
                 return await run(state)
             finally:
-                if self._telemetry is not None:
-                    self._telemetry.node_finished(
-                        node_id=node.id, duration_s=time.perf_counter() - started
-                    )
+                telemetry.node_finished(node_id=node.id, duration_s=time.perf_counter() - started)
 
         return timed
 

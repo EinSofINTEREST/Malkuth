@@ -298,3 +298,42 @@ def test_runbooks_reference_real_cli_commands():
     }
 
     assert referenced <= documented, f"undocumented commands: {sorted(referenced - documented)}"
+
+
+# --- 알림이 기대하는 status 값 --------------------------------------------------
+
+
+def status_filters(text: str) -> set[tuple[str, str]]:
+    """알림 표현식에서 ``metric{status="value"}`` 쌍을 뽑는다."""
+    pattern = re.compile(r"(malkuth_\w+)\{[^}]*status\s*=\s*\"([^\"]+)\"")
+    return {(base_metric(metric), value) for metric, value in pattern.findall(text)}
+
+
+def test_alerts_only_filter_on_status_values_the_code_emits():
+    """알림이 코드가 내지 않는 값을 보면 **영원히 침묵한다**.
+
+    라벨 이름 검사는 이 오류를 잡지 못한다 — 이름은 맞고 값만 어긋나기 때문이다.
+    실제로 checkpoint 실패를 `failed` 로 기록해 `status="error"` 알림이 죽어
+    있었다.
+    """
+    from malkuth.agentd import telemetry as agent_telemetry
+    from malkuth.orchestrator import telemetry as orchestrator_telemetry
+    from malkuth.orchestrator.run import RunStatus
+
+    emitted = {
+        agent_telemetry.STATUS_COMPLETED,
+        agent_telemetry.STATUS_FAILED,
+        orchestrator_telemetry.STATUS_COMPLETED,
+        orchestrator_telemetry.STATUS_FAILED,
+        orchestrator_telemetry.STATUS_ERROR,
+        *(status.value for status in RunStatus),
+        # 모델 provider 가 분류하는 값 — 바인딩(#77) 이후 executor 가 낸다
+        "rate_limited",
+    }
+
+    referenced = status_filters(ALERTS.read_text(encoding="utf-8"))
+    unknown = sorted(
+        f"{metric}{{status={value!r}}}" for metric, value in referenced if value not in emitted
+    )
+
+    assert unknown == [], f"알림이 코드가 내지 않는 status 를 본다: {unknown}"

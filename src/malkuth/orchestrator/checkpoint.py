@@ -16,7 +16,7 @@ from malkuth.orchestrator.telemetry import (
     OPERATION_LOAD,
     OPERATION_SAVE,
     STATUS_COMPLETED,
-    STATUS_FAILED,
+    STATUS_ERROR,
     CheckpointTelemetry,
 )
 
@@ -133,11 +133,11 @@ async def _guarded(
         result = await action()
     except MalkuthError:
         if telemetry is not None:
-            telemetry.operation(operation=operation, status=STATUS_FAILED)
+            telemetry.operation(operation=operation, status=STATUS_ERROR)
         raise
     except Exception as err:
         if telemetry is not None:
-            telemetry.operation(operation=operation, status=STATUS_FAILED)
+            telemetry.operation(operation=operation, status=STATUS_ERROR)
         raise _storage_error(code, message, graph=graph, run_id=run_id) from err
 
     if telemetry is not None:

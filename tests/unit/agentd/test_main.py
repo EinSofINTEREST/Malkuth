@@ -25,7 +25,8 @@ from malkuth.core.errors import MalkuthError
 from malkuth.core.manifest import AgentManifest
 from tests.fixtures.builders import make_task
 
-ECHO_MANIFEST = Path(__file__).resolve().parents[3] / "agents" / "echo" / "manifest.yaml"
+REPO_ROOT = Path(__file__).resolve().parents[3]
+ECHO_MANIFEST = REPO_ROOT / "agents" / "echo" / "manifest.yaml"
 
 
 def write(tmp_path: Path, body: str) -> Path:
@@ -154,30 +155,52 @@ async def test_echo_streams_token_then_done():
 # --- 실행기 선택 --------------------------------------------------------------
 
 
-def test_echo_executor_is_opt_in(monkeypatch):
+async def test_echo_executor_is_opt_in(monkeypatch):
     """테스트 이미지만 echo 대역을 쓴다."""
     monkeypatch.setenv(EXECUTOR_ENV, ECHO_EXECUTOR)
 
-    executor = build_executor(load_manifest(ECHO_MANIFEST))
+    executor = await build_executor(load_manifest(ECHO_MANIFEST))
 
     assert isinstance(executor, EchoExecutor)
 
 
-def test_base_image_does_not_default_to_echo(monkeypatch):
-    """base 이미지가 echo 로 돌면 모든 에이전트가 대역이 된다 — 조용히 떨어지지 않는다."""
+async def test_base_image_does_not_default_to_echo(monkeypatch):
+    """base 이미지가 echo 로 돌면 모든 에이전트가 대역이 된다.
+
+    이제 표준 경로는 실 provider 를 세운다 — echo 로 조용히 떨어지지 않는다.
+    """
     monkeypatch.delenv(EXECUTOR_ENV, raising=False)
+    monkeypatch.setenv("MALKUTH_ROOT", str(REPO_ROOT))
+
+    executor = await build_executor(load_manifest(ECHO_MANIFEST))
+
+    assert not isinstance(executor, EchoExecutor)
+
+
+async def test_unbound_provider_is_rejected(monkeypatch):
+    """바인딩 없는 provider 를 조용히 넘기면 운영에서 가짜 응답이 나간다."""
+    monkeypatch.delenv(EXECUTOR_ENV, raising=False)
+    manifest = load_manifest(ECHO_MANIFEST)
+    other = manifest.model_copy(
+        update={
+            "spec": manifest.spec.model_copy(
+                update={"model": manifest.spec.model.model_copy(update={"provider": "openai"})}
+            )
+        }
+    )
 
     with pytest.raises(MalkuthError) as exc_info:
-        build_executor(load_manifest(ECHO_MANIFEST))
+        await build_executor(other)
 
     assert exc_info.value.code == "CFG_001"
+    assert exc_info.value.details["provider"] == "openai"
 
 
-def test_unknown_executor_selection_is_rejected(monkeypatch):
+async def test_unknown_executor_selection_is_rejected(monkeypatch):
     monkeypatch.setenv(EXECUTOR_ENV, "mystery")
 
     with pytest.raises(MalkuthError) as exc_info:
-        build_executor(load_manifest(ECHO_MANIFEST))
+        await build_executor(load_manifest(ECHO_MANIFEST))
 
     assert exc_info.value.code == "CFG_001"
     assert exc_info.value.details["executor"] == "mystery"

@@ -366,6 +366,35 @@ class ArtifactSpec(BaseModel):
         return None if self.quota is None else parse_bytes(self.quota)
 
 
+class OutputSpec(BaseModel):
+    """The named output keys an agent produces.
+
+    선언형 에이전트가 이름 있는 출력을 만들 수 있게 하는 계약. 미선언 시
+    실행기는 ``{"content": ...}`` 하나만 돌려주며, 그러면 그래프의
+    ``output_map`` 이 ``output.content`` 밖을 가리킬 수 없다.
+
+    **지시는 promptset 이 한다** — 여기서는 무엇이 와야 하는지만 선언하고,
+    실행기는 그 선언과 실제 응답이 어긋나면 실패시킨다 (04 는 프롬프트를
+    모듈에 두라고 규정하므로 실행기가 지시문을 덧붙이지 않는다).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    keys: tuple[str, ...] = ()
+    """응답에서 뽑아 ``TaskResult.output`` 으로 옮길 키."""
+
+    @field_validator("keys")
+    @classmethod
+    def _named_keys(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        """키는 state schema 필드명과 맞물리므로 식별자 모양이어야 한다."""
+        for key in value:
+            if not key.isidentifier():
+                raise ValueError(f"output key must be an identifier: {key!r}")
+        if len(set(value)) != len(value):
+            raise ValueError("output keys must be unique")
+        return value
+
+
 class VolumeSpec(BaseModel):
     """An explicitly declared volume mount.
 
@@ -429,6 +458,7 @@ class AgentSpec(BaseModel):
     a2a: A2ASpec = Field(default_factory=A2ASpec)
     runtime: RuntimeSpec = Field(default_factory=RuntimeSpec)
     entrypoint: str | None = None
+    output: OutputSpec = Field(default_factory=OutputSpec)
 
     @field_validator("promptset")
     @classmethod

@@ -1,0 +1,173 @@
+"""Declared output key tests.
+
+executor 는 늘 `{"content": ...}` 하나만 돌려줬다. 그래서 그래프의
+`output_map` 이 `output.content` 밖을 가리킬 수 없었고, 레퍼런스 그래프가
+`GRAPH_003` 으로 실패했다 (#146 / #142).
+"""
+
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from malkuth.agentd.executor import Executor
+from malkuth.core.agent import TaskStatus
+from malkuth.core.errors import ErrorCode
+from tests.fixtures.builders import make_task
+from tests.fixtures.fake_model import FakeModel, FakeTools, text
+
+
+async def run_with(content: str, keys=()):
+    executor = Executor(
+        agent="planner",
+        model=FakeModel([text(content)]),
+        tools=FakeTools(),
+        render=lambda _task: "prompt",
+        output_keys=keys,
+    )
+    return await executor.execute(make_task())
+
+
+# --- 선언 없음: 기존 동작 ----------------------------------------------------------
+
+
+async def test_without_declared_keys_the_output_is_content():
+    """미선언 에이전트의 동작이 바뀌면 기존 그래프가 전부 깨진다."""
+    result = await run_with("prose answer")
+
+    assert result.output == {"content": "prose answer"}
+
+
+async def test_without_declared_keys_json_is_not_unwrapped():
+    """선언하지 않았는데 파싱하면 평문을 쓰던 에이전트가 놀란다."""
+    result = await run_with('{"plan": "x"}')
+
+    assert result.output == {"content": '{"plan": "x"}'}
+
+
+# --- 선언 있음 -----------------------------------------------------------------
+
+
+async def test_declared_keys_become_the_output():
+    """#146 의 핵심 — 이름 있는 키가 state 로 갈 수 있어야 한다."""
+    payload = json.dumps({"plan": "step 1", "needs_research": True})
+
+    result = await run_with(payload, ("plan", "needs_research"))
+
+    assert result.status is TaskStatus.COMPLETED
+    assert result.output == {"plan": "step 1", "needs_research": True}
+
+
+async def test_undeclared_extra_keys_are_dropped():
+    """선언되지 않은 값이 state 로 흘러가면 02 Rule 5 의 출력 규율이 깨진다."""
+    payload = json.dumps({"plan": "p", "secret_scratch": "should not leak"})
+
+    result = await run_with(payload, ("plan",))
+
+    assert result.output == {"plan": "p"}
+
+
+async def test_nested_values_survive():
+    payload = json.dumps({"findings": [{"source": "a", "claim": "b"}]})
+
+    result = await run_with(payload, ("findings",))
+
+    assert result.output["findings"] == [{"source": "a", "claim": "b"}]
+
+
+# --- 계약 위반 -----------------------------------------------------------------
+
+
+async def test_a_non_json_response_fails_with_llm_004():
+    """조용히 빈 출력으로 떨어지면 다음 노드에서야 GRAPH_003 으로 실패한다."""
+    result = await run_with("prose, not json", ("plan",))
+
+    assert result.status is TaskStatus.FAILED
+    assert result.error is not None
+    assert result.error.code == ErrorCode.LLM_004
+
+
+@pytest.mark.parametrize("payload", ["[1, 2]", '"a string"', "42", "null"])
+async def test_a_json_non_object_fails(payload):
+    """배열/스칼라는 키를 가질 수 없다 — 조용히 통과시키면 안 된다."""
+    result = await run_with(payload, ("plan",))
+
+    assert result.status is TaskStatus.FAILED
+    assert result.error.code == ErrorCode.LLM_004
+
+
+async def test_a_missing_declared_key_fails():
+    """promptset 이 계약과 어긋나면 그 자리에서 드러나야 한다."""
+    result = await run_with(json.dumps({"other": 1}), ("plan",))
+
+    assert result.status is TaskStatus.FAILED
+    assert result.error.code == ErrorCode.LLM_004
+
+
+async def test_the_failure_names_the_declared_keys():
+    """무엇을 기대했는지 없으면 promptset 드리프트를 추적할 수 없다."""
+    result = await run_with("nope", ("plan", "needs_research"))
+
+    assert "plan" in result.error.details["declared"]
+    assert "needs_research" in result.error.details["declared"]
+
+
+# --- manifest 선언 --------------------------------------------------------------
+
+
+def test_declared_keys_must_be_identifiers():
+    """키는 state schema 필드명과 맞물린다."""
+    from pydantic import ValidationError
+
+    from malkuth.core.manifest import OutputSpec
+
+    with pytest.raises(ValidationError):
+        OutputSpec(keys=("not an identifier",))
+
+
+def test_declared_keys_must_be_unique():
+    from pydantic import ValidationError
+
+    from malkuth.core.manifest import OutputSpec
+
+    with pytest.raises(ValidationError):
+        OutputSpec(keys=("plan", "plan"))
+
+
+def test_no_declaration_means_no_keys():
+    from malkuth.core.manifest import OutputSpec
+
+    assert OutputSpec().keys == ()
+
+
+@pytest.fixture
+def manifest_declaring_output():
+    """출력을 선언한 manifest — 파일 I/O 는 동기 fixture 에 둔다.
+
+    async 테스트 안에서 파일을 열면 린터가 막고, 실제로도 이벤트 루프에서
+    blocking I/O 를 하는 셈이다.
+    """
+    from pathlib import Path
+
+    import yaml
+
+    from malkuth.core.manifest import AgentManifest
+
+    declared = yaml.safe_load(Path("agents/echo/manifest.yaml").read_text(encoding="utf-8"))
+    declared["spec"]["output"] = {"keys": ["plan"]}
+    return AgentManifest.model_validate(declared)
+
+
+async def test_the_assembled_executor_carries_the_declared_keys(
+    monkeypatch, manifest_declaring_output
+):
+    """헬퍼만 검증하면 **조립부에서 안 넘겨도 통과한다** — 이 세션에서 반복된 함정."""
+    from malkuth.agentd.__main__ import build_executor
+
+    monkeypatch.setenv("MALKUTH_ROOT", ".")
+    monkeypatch.setenv("MALKUTH_EXECUTOR", "")
+
+    built = await build_executor(manifest_declaring_output)
+
+    assert built._output_keys == ("plan",)

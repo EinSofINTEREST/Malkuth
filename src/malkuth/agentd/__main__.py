@@ -277,6 +277,7 @@ async def build_executor(manifest: AgentManifest, *, metrics: Metrics | None = N
         tool_schemas=_executable_schemas(result, registry_tools),
         telemetry=_telemetry_for(manifest, metrics),
         artifacts=_artifact_store(manifest),
+        output_keys=manifest.spec.output.keys,
     )
 
 

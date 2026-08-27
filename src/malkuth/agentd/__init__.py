@@ -10,7 +10,6 @@ from malkuth.agentd.bootstrap import (
     BootstrapResult,
     McpLauncher,
     build_tool_registry,
-    namespaced,
 )
 from malkuth.agentd.executor import (
     Executor,
@@ -25,6 +24,7 @@ from malkuth.agentd.server import (
     AgentRuntime,
     create_app,
 )
+from malkuth.core.tools import namespaced
 
 __all__ = [
     "DEFAULT_MAX_CONCURRENT_TASKS",

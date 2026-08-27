@@ -8,12 +8,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Final
 
+from malkuth.core.tools import is_mcp_tool
+
 if TYPE_CHECKING:
     from malkuth.core.agent import ModelUsage
     from malkuth.observability.metrics import Metrics
-
-# executor 와 같은 네임스페이스 규칙을 쓴다 — 정의 통합은 #94
-MCP_TOOL_PREFIX: Final = "mcp__"
 
 STATUS_COMPLETED: Final = "completed"
 STATUS_FAILED: Final = "failed"
@@ -27,7 +26,7 @@ DIRECTION_OUTPUT: Final = "output"
 
 def tool_source(name: str) -> str:
     """tool 의 출처 — 네임스페이스 접두사로 판별한다 (05 표준 라벨)."""
-    return SOURCE_MCP if name.startswith(MCP_TOOL_PREFIX) else SOURCE_SKILLSET
+    return SOURCE_MCP if is_mcp_tool(name) else SOURCE_SKILLSET
 
 
 class ExecutorTelemetry:

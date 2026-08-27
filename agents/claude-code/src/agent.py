@@ -30,8 +30,18 @@ if TYPE_CHECKING:
 COMMAND_ENV = "MALKUTH_CLAUDE_COMMAND"
 """CLI 호출 명령 — 플래그가 바뀌어도 이미지 교체로 끝나도록 env 로 받는다."""
 
-DEFAULT_COMMAND = "claude -p --output-format json"
-"""기본 호출. 코드에 플래그를 박지 않는다 (02 Manifest Rules 3)."""
+DEFAULT_COMMAND = "claude -p --output-format json --permission-mode bypassPermissions"
+"""기본 호출. 코드에 플래그를 박지 않는다 (02 Manifest Rules 3).
+
+``bypassPermissions`` 인 이유: 헤드리스에는 승인해 줄 사람이 없어 기본
+모드면 tool 이 전부 거부된다 — 에이전트가 텍스트만 답하는 껍데기가 된다
+(실제로 ``permission_denials`` 에 Write 가 쌓였다).
+
+**권한 경계를 포기하는 것이 아니다.** 경계는 컨테이너다 (02 Docker Isolation):
+non-root, ``cap_drop: ALL``, read-only rootfs, 선언된 tmpfs·볼륨만 쓰기 가능,
+전용 bridge 네트워크. 바깥으로 향하는 능력은 **주입된 tool 로** 통제하고,
+CLI 내부 승인 프롬프트는 그 통제의 수단이 아니다.
+"""
 
 PROMPT_KEY = "prompt"
 """태스크 입력에서 프롬프트로 쓰는 키."""

@@ -283,3 +283,27 @@ async def test_a_task_result_is_unwrapped_despite_trailing_noise(monkeypatch):
 
     assert result.status is TaskStatus.COMPLETED
     assert result.output["result"] == "hello from malkuth"
+
+
+# --- 권한 모드 (실제 실행으로 결정) ---------------------------------------------------
+
+
+def test_the_default_command_does_not_ask_for_permission(monkeypatch):
+    """헤드리스에는 승인해 줄 사람이 없다 — 기본 모드면 tool 이 전부 거부된다.
+
+    실제로 permission_denials 에 Write 가 쌓여 에이전트가 텍스트만 답하는
+    껍데기가 됐다. 권한 경계는 컨테이너가 맡는다 (02 Docker Isolation).
+    """
+    monkeypatch.delenv(COMMAND_ENV, raising=False)
+
+    command = resolve_command()
+
+    assert "--permission-mode" in command
+    assert command[command.index("--permission-mode") + 1] == "bypassPermissions"
+
+
+def test_the_permission_mode_is_still_overridable(monkeypatch):
+    """정책을 좁히고 싶은 배포는 같은 주입 지점으로 좁힌다."""
+    monkeypatch.setenv(COMMAND_ENV, "claude -p --output-format json --permission-mode plan")
+
+    assert resolve_command()[-1] == "plan"

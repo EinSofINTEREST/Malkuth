@@ -91,36 +91,21 @@ def test_chain_of_unknown_entry_is_none(store):
 
 
 def test_cyclic_correction_does_not_hang(store):
-    """순환 정정이 들어와도 무한 루프에 빠지지 않는다."""
-    first = make_entry(content="a")
-    store.append(first)
-    second = make_entry(content="b", supersedes=first.entry_id)
-    store.append(second)
-    # first 가 second 를 대체한다고 주장하는 순환 구조를 직접 만든다
-    cyclic = make_entry(entry_id=first.entry_id + "-cycle", supersedes=second.entry_id)
-    store.append(cyclic)
-    store._conn.execute(
-        "INSERT INTO memory_entries "
-        "(entry_id, space, kind, content, tags, agent, created_at, importance, supersedes) "
-        "VALUES ('loop', ?, 'fact', 'loop', '', 'researcher', '2026-01-01T00:00:00+00:00', "
-        " 0.5, ?)",
-        (first.space, cyclic.entry_id),
-    )
-    store._conn.execute(
-        "INSERT INTO memory_entries "
-        "(entry_id, space, kind, content, tags, agent, created_at, importance, supersedes) "
-        "VALUES ('loop2', ?, 'fact', 'loop2', '', 'researcher', '2026-01-01T00:00:00+00:00', "
-        " 0.5, 'loop')",
-        (first.space,),
-    )
-    store._conn.commit()
+    """순환 정정이 들어와도 무한 루프에 빠지지 않는다.
 
-    result = store.latest_of_chain(first.entry_id)
+    저장소 API 만으로 순환을 만든다 — 원시 SQL 을 쓰면 백엔드마다 문법이 달라
+    계약 테스트가 한쪽 구현에 묶인다.
+
+    ``latest_of_chain`` 은 supersedes 를 **앞으로** 따라간다 (X 의 후계자 =
+    ``supersedes == X`` 인 항목). a→b→a 로 서로를 가리키게 하면 고리가 닫힌다.
+    """
+    # a 는 b 를 대체한다고, b 는 a 를 대체한다고 주장한다 — 서로가 서로의 후계자다
+    store.append(make_entry(entry_id="a", content="a", supersedes="b"))
+    store.append(make_entry(entry_id="b", content="b", supersedes="a"))
+
+    result = store.latest_of_chain("a")
 
     assert result is not None
-
-
-# --- 불변식 ------------------------------------------------------------------
 
 
 def test_provenance_is_required(store):

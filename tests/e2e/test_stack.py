@@ -170,10 +170,15 @@ def test_streaming_emits_events(stack):
     """스트리밍 경로가 SSE 로 이벤트를 흘린다."""
     assert wait_healthy(ECHO_URL)
 
+    # SSE 라 fetch() 헬퍼(JSON 파싱)를 못 쓴다 — 토큰은 그것과 같은 방식으로 싣는다.
+    # 02 API Rules 3 상 /health 외 전 엔드포인트가 인증을 요구한다
     request = urllib.request.Request(  # noqa: S310
         f"{ECHO_URL}/v1/stream",
         data=json.dumps(direct_task({"msg": "stream"})).encode(),
-        headers={"content-type": "application/json"},
+        headers={
+            "content-type": "application/json",
+            "authorization": f"Bearer {AGENT_TOKEN}",
+        },
     )
     with urllib.request.urlopen(request, timeout=15) as response:  # noqa: S310
         body = response.read().decode()

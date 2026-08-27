@@ -1,0 +1,35 @@
+apiVersion: malkuth/v1
+kind: Promptset
+metadata:
+  name: planner
+  version: 0.2.0
+  description: 질의를 실행 가능한 리서치 계획으로 나누는 에이전트 프롬프트
+
+spec:
+  engine: jinja2
+  default_locale: en
+  templates:
+    system:
+      file: templates/system.j2
+    # 그래프 노드 id 와 이름이 같아야 agentd 가 task.node_id 로 고른다
+    planner:
+      file: templates/planner.j2
+      output_keys: [plan, needs_research]
+      variables:
+        query: {type: string, required: true}
+        depth: {type: integer, default: 2}
+    # direct 요청은 node_id 가 없어 default 를 쓴다 — 없으면 단독 호출이 불가능하다
+    classifier:
+      file: templates/classifier.j2
+      output_keys: [seen_ids]
+      variables:
+        new_items: {type: string, required: true}
+    scanner:
+      file: templates/scanner.j2
+      output_keys: [pending_spaces]
+      variables:
+        spaces: {type: string, required: true}
+    default:
+      file: templates/default.j2
+      variables:
+        query: {type: string, required: true}

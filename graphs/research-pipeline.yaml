@@ -20,17 +20,17 @@ spec:
 
   nodes:
     - id: planner
-      agent: agents/planner@0.1.0
+      agent: agents/planner@0.2.0
       input_map: {query: state.query}
       output_map: {plan: output.plan, needs_research: output.needs_research}
 
     - id: researcher
-      agent: agents/researcher@0.1.0
+      agent: agents/researcher@0.2.0
       input_map: {plan: state.plan}
       output_map: {findings: output.findings}
 
     - id: writer
-      agent: agents/writer@0.1.0
+      agent: agents/writer@0.2.0
       input_map: {findings: state.findings}
       output_map: {report: output.report}
 

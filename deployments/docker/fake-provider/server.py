@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
 
@@ -27,9 +28,29 @@ def respond_to(prompt: str) -> dict[str, Any]:
     """
     digest = hashlib.blake2b(prompt.encode("utf-8"), digest_size=6).hexdigest()
     return {
-        "content": f"fake-response:{digest}",
+        "content": _content_for(prompt, digest),
         "usage": {"input_tokens": len(prompt) // 4, "output_tokens": 8},
     }
+
+
+_ASKS_FOR = re.compile(r"exactly these keys: (.+)")
+
+
+def _content_for(prompt: str, digest: str) -> str:
+    """프롬프트가 요구한 형태로 응답한다.
+
+    출력 키를 요구하는 프롬프트에는 **그 키를 담은 JSON** 으로 답한다 —
+    에이전트 이름을 하드코딩하지 않고 프롬프트에서 읽으므로, 새 에이전트가
+    늘어도 이 대역을 고치지 않는다.
+    """
+    # **마지막** 매치를 쓴다: 계약은 템플릿 끝에 붙고, 그 앞의 렌더된 사용자
+    # 입력에 같은 문구가 섞이면 대역이 입력에 휘둘린다
+    matches = _ASKS_FOR.findall(prompt)
+    if not matches:
+        return f"fake-response:{digest}"
+
+    keys = [key.strip() for key in matches[-1].split(",") if key.strip()]
+    return json.dumps({key: f"fake-{key}:{digest}" for key in keys})
 
 
 class Handler(BaseHTTPRequestHandler):

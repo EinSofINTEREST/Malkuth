@@ -18,15 +18,16 @@ from tests.fixtures.builders import make_task
 from tests.fixtures.fake_model import FakeModel, FakeTools, text
 
 
-async def run_with(content: str, keys=()):
+async def run_with(content: str, keys=(), *, node_id: str | None = "planner"):
+    """키는 **태스크마다** 고른다 — 같은 에이전트가 노드마다 다른 계약을 갖는다."""
     executor = Executor(
         agent="planner",
         model=FakeModel([text(content)]),
         tools=FakeTools(),
         render=lambda _task: "prompt",
-        output_keys=keys,
+        output_keys=(lambda _task: keys) if keys else None,
     )
-    return await executor.execute(make_task())
+    return await executor.execute(make_task(node_id=node_id))
 
 
 # --- 선언 없음: 기존 동작 ----------------------------------------------------------
@@ -113,37 +114,84 @@ async def test_the_failure_names_the_declared_keys():
     assert "needs_research" in result.error.details["declared"]
 
 
-# --- manifest 선언 --------------------------------------------------------------
+# --- 템플릿 선언 ----------------------------------------------------------------
 
 
 def test_declared_keys_must_be_identifiers():
     """키는 state schema 필드명과 맞물린다."""
     from pydantic import ValidationError
 
-    from malkuth.core.manifest import OutputSpec
+    from malkuth.modules.promptset import TemplateSpec
 
     with pytest.raises(ValidationError):
-        OutputSpec(keys=("not an identifier",))
+        TemplateSpec(file="t.j2", output_keys=("not an identifier",))
 
 
 def test_declared_keys_must_be_unique():
     from pydantic import ValidationError
 
-    from malkuth.core.manifest import OutputSpec
+    from malkuth.modules.promptset import TemplateSpec
 
     with pytest.raises(ValidationError):
-        OutputSpec(keys=("plan", "plan"))
+        TemplateSpec(file="t.j2", output_keys=("plan", "plan"))
 
 
 def test_no_declaration_means_no_keys():
-    from malkuth.core.manifest import OutputSpec
+    from malkuth.modules.promptset import TemplateSpec
 
-    assert OutputSpec().keys == ()
+    assert TemplateSpec(file="t.j2").output_keys == ()
+
+
+# --- 노드별로 다른 계약 (#150) ------------------------------------------------------
+
+
+async def test_the_same_agent_yields_different_keys_per_node():
+    """#150 의 핵심 — 에이전트 단위 선언으로는 불가능했다.
+
+    planner 는 세 그래프에서 각각 plan/seen_ids/pending_spaces 를 낸다.
+    """
+    per_node = {
+        "planner": ("plan", "needs_research"),
+        "classifier": ("seen_ids",),
+    }
+
+    async def run(node_id: str, content: str):
+        executor = Executor(
+            agent="planner",
+            model=FakeModel([text(content)]),
+            tools=FakeTools(),
+            render=lambda _task: "prompt",
+            output_keys=lambda task: per_node.get(task.template_name, ()),
+        )
+        return await executor.execute(make_task(node_id=node_id))
+
+    planned = await run("planner", json.dumps({"plan": "p", "needs_research": False}))
+    classified = await run("classifier", json.dumps({"seen_ids": [1, 2]}))
+
+    assert planned.output == {"plan": "p", "needs_research": False}
+    assert classified.output == {"seen_ids": [1, 2]}
+
+
+async def test_a_direct_request_follows_the_default_template():
+    """direct 요청은 node_id 가 없어 default 를 쓴다 (04 Compatibility Rules 4)."""
+    seen: list[str] = []
+
+    executor = Executor(
+        agent="planner",
+        model=FakeModel([text("prose")]),
+        tools=FakeTools(),
+        render=lambda _task: "prompt",
+        output_keys=lambda task: seen.append(task.template_name) or (),
+    )
+
+    await executor.execute(make_task(node_id=None))
+
+    assert seen == ["default"]
 
 
 @pytest.fixture
 def manifest_declaring_output():
-    """출력을 선언한 manifest — 파일 I/O 는 동기 fixture 에 둔다.
+    """실제 manifest — 파일 I/O 는 동기 fixture 에 둔다.
 
     async 테스트 안에서 파일을 열면 린터가 막고, 실제로도 이벤트 루프에서
     blocking I/O 를 하는 셈이다.
@@ -155,7 +203,6 @@ def manifest_declaring_output():
     from malkuth.core.manifest import AgentManifest
 
     declared = yaml.safe_load(Path("agents/echo/manifest.yaml").read_text(encoding="utf-8"))
-    declared["spec"]["output"] = {"keys": ["plan"]}
     return AgentManifest.model_validate(declared)
 
 
@@ -170,4 +217,5 @@ async def test_the_assembled_executor_carries_the_declared_keys(
 
     built = await build_executor(manifest_declaring_output)
 
-    assert built._output_keys == ("plan",)
+    # 조립부가 콜러블을 넘겨야 태스크마다 템플릿 선언을 볼 수 있다
+    assert callable(built._output_keys)

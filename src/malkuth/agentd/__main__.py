@@ -277,7 +277,7 @@ async def build_executor(manifest: AgentManifest, *, metrics: Metrics | None = N
         tool_schemas=_executable_schemas(result, registry_tools),
         telemetry=_telemetry_for(manifest, metrics),
         artifacts=_artifact_store(manifest),
-        output_keys=manifest.spec.output.keys,
+        output_keys=lambda task: _template_output_keys(result, task),
     )
 
 
@@ -352,6 +352,18 @@ def _executable_schemas(result: Any, tools: AgentToolRegistry) -> list[SkillSpec
             continue
         runnable.append(spec)
     return runnable
+
+
+def _template_output_keys(result: Any, task: Any) -> tuple[str, ...]:
+    """이 태스크가 쓰는 템플릿이 요구하는 응답 키.
+
+    계약은 **템플릿에** 붙어 있다 — 같은 에이전트가 노드마다 다른 키를 내야
+    하고, 요구하는 곳과 선언하는 곳이 같아야 드리프트가 불가능하다 (#150).
+    """
+    if result.promptset is None:
+        return ()
+    template = result.promptset.spec.templates.get(task.template_name)
+    return () if template is None else template.output_keys
 
 
 def _render(result: Any, task: Any) -> str:

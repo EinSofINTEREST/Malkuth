@@ -150,14 +150,15 @@ class Executor:
         telemetry: ExecutorTelemetry | None = None,
         recall: TaskRecall | None = None,
         artifacts: ArtifactStore | None = None,
-        output_keys: Sequence[str] = (),
+        output_keys: Callable[[TaskRequest], Sequence[str]] | None = None,
     ) -> None:
         self._agent = agent
         # 미주입 시 skill 은 ctx.artifacts is None 을 받는다 — 지금까지 **항상**
         # 그랬고, 그래서 02 Output Discipline 의 참조 전달 경로가 죽어 있었다
         self._artifacts = artifacts
-        # 미선언이면 기존대로 content 하나 — 선언한 에이전트만 이름 있는 출력을 낸다
-        self._output_keys = tuple(output_keys)
+        # 키는 **태스크마다** 다르다: 같은 에이전트가 노드마다 다른 템플릿을
+        # 쓰고, 계약은 그 템플릿에 붙어 있다 (#150)
+        self._output_keys = output_keys
         self._recall = recall
         self._telemetry = telemetry
         self._model = model
@@ -237,7 +238,7 @@ class Executor:
             status=result.status.value, duration_s=duration_s, graph=task.trace.graph
         )
 
-    def _shape_output(self, content: str) -> dict[str, Any]:
+    def _shape_output(self, content: str, task: TaskRequest) -> dict[str, Any]:
         """Build the task output from the model's final response.
 
         선언된 키가 없으면 기존대로 ``{"content": ...}`` 하나입니다.
@@ -251,31 +252,32 @@ class Executor:
                 declared key is missing — 조용히 빈 출력으로 떨어지면 그래프가
                 다음 노드에서야 GRAPH_003 으로 실패해 원인이 멀어집니다.
         """
-        if not self._output_keys:
+        keys = tuple(self._output_keys(task)) if self._output_keys else ()
+        if not keys:
             return {"content": content}
 
         try:
             parsed = json.loads(content)
         except json.JSONDecodeError as err:
-            raise self._output_error("model response is not json", content) from err
+            raise self._output_error("model response is not json", content, keys) from err
 
         if not isinstance(parsed, dict):
-            raise self._output_error("model response is not a json object", content)
+            raise self._output_error("model response is not a json object", content, keys)
 
-        missing = [key for key in self._output_keys if key not in parsed]
+        missing = [key for key in keys if key not in parsed]
         if missing:
-            raise self._output_error(f"declared output keys missing: {missing}", content)
+            raise self._output_error(f"declared output keys missing: {missing}", content, keys)
 
-        return {key: parsed[key] for key in self._output_keys}
+        return {key: parsed[key] for key in keys}
 
-    def _output_error(self, message: str, content: str) -> MalkuthError:
+    def _output_error(self, message: str, content: str, keys: Sequence[str]) -> MalkuthError:
         """출력 계약 위반 — 응답 꼬리를 남겨 promptset 드리프트를 추적한다."""
         return MalkuthError(
             category=ErrorCategory.MODEL,
             code=ErrorCode.LLM_004,
             message=message,
             agent=self._agent,
-            details={"declared": ",".join(self._output_keys), "content": content[-300:]},
+            details={"declared": ",".join(keys), "content": content[-300:]},
         )
 
     async def _initial_prompt(self, task: TaskRequest) -> str:
@@ -312,7 +314,7 @@ class Executor:
 
                 if response.is_final:
                     return TaskResult.completed(
-                        task, output=self._shape_output(response.content), usage=usage
+                        task, output=self._shape_output(response.content, task), usage=usage
                     )
 
                 results = await self._run_tools(response.tool_calls, task, turn)

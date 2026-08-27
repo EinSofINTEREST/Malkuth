@@ -46,7 +46,11 @@ from malkuth.core.manifest import (
     ModuleRefStr,
     ResourceSpec,
 )
-from malkuth.core.skill import SkillContext, SkillSpec, skill
+
+# ``skill`` 데코레이터는 여기서 re-export 하지 않는다 — 같은 이름의 하위 모듈을
+# 가려서 ``malkuth.core.skill`` 이 모듈이 아니라 함수로 잡힌다 (#87).
+# 데코레이터는 ``from malkuth.core.skill import skill`` 로 가져온다
+from malkuth.core.skill import SkillContext, SkillSpec
 
 __all__ = [
     "NETWORK_RETRY",
@@ -85,5 +89,4 @@ __all__ = [
     "ToolCallEvent",
     "ToolResultEvent",
     "TraceContext",
-    "skill",
 ]

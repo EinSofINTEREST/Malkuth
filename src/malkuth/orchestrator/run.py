@@ -15,10 +15,17 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
 from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
+from malkuth.orchestrator.telemetry import (
+    STATUS_COMPLETED,
+    STATUS_FAILED,
+    OrchestratorTelemetry,
+)
 from malkuth.orchestrator.topology import GraphMode, GraphTopology
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
+
+    from malkuth.observability.metrics import Metrics
 
 DEFAULT_MAX_CONCURRENT_RUNS = 10
 DEFAULT_MAX_SERVICE_RUNS = 5
@@ -91,10 +98,12 @@ class RunManager:
         *,
         max_concurrent_runs: int = DEFAULT_MAX_CONCURRENT_RUNS,
         max_service_runs: int = DEFAULT_MAX_SERVICE_RUNS,
+        metrics: Metrics | None = None,
     ) -> None:
         self._max_mission = max_concurrent_runs
         self._max_service = max_service_runs
         self._runs: dict[str, RunHandle] = {}
+        self._metrics = metrics
 
     @property
     def runs(self) -> dict[str, RunHandle]:
@@ -148,6 +157,9 @@ class RunManager:
 
         handle = RunHandle(run_id=resolved_id, graph=topology.name, mode=mode)
         self._runs[handle.run_id] = handle
+        telemetry = self._telemetry(handle)
+        if telemetry is not None:
+            telemetry.run_started()
         return handle
 
     def get(self, run_id: str) -> RunHandle:
@@ -174,8 +186,22 @@ class RunManager:
         run 을 종료 상태로 표시해 슬롯을 반납합니다.
         """
         run = self._runs.get(run_id)
-        if run is not None:
-            run.status = status
+        if run is None:
+            return
+        # 이미 끝난 run 을 다시 반납하면 active 게이지가 음수로 흘러간다
+        if run.status not in (RunStatus.RUNNING, RunStatus.DRAINING):
+            return
+
+        run.status = status
+        telemetry = self._telemetry(run)
+        if telemetry is not None:
+            telemetry.run_finished(status=status.value)
+
+    def _telemetry(self, handle: RunHandle) -> OrchestratorTelemetry | None:
+        """이 run 의 계측기 — graph/mode 라벨이 run 마다 다르므로 그때 만든다."""
+        if self._metrics is None:
+            return None
+        return OrchestratorTelemetry(self._metrics, graph=handle.graph, mode=handle.mode)
 
 
 class ServiceRunner:
@@ -191,6 +217,7 @@ class ServiceRunner:
         graph: Any,
         *,
         sleep: Callable[[float], Awaitable[None]] | None = None,
+        metrics: Metrics | None = None,
     ) -> None:
         if topology.mode is not GraphMode.SERVICE:
             raise MalkuthError(
@@ -212,6 +239,16 @@ class ServiceRunner:
         self._graph = graph
         self._sleep = sleep or _no_sleep
         self.delays: list[float] = []
+        self._telemetry = (
+            None
+            if metrics is None
+            else OrchestratorTelemetry(metrics, graph=topology.name, mode=topology.mode)
+        )
+
+    def _record_iteration(self, status: str) -> None:
+        """iteration 결과를 메트릭에 남긴다 — 메트릭 미주입 시 무동작."""
+        if self._telemetry is not None:
+            self._telemetry.iteration_finished(status=status)
 
     async def run(
         self,
@@ -261,6 +298,7 @@ class ServiceRunner:
                 continue
 
             handle.failure_streak = 0
+            self._record_iteration(STATUS_COMPLETED)
             idle_streak = await self._apply_idle_policy(state, idle_streak, is_idle)
 
         handle.status = RunStatus.STOPPED
@@ -297,8 +335,11 @@ class ServiceRunner:
         """실패를 누적하고, 임계 초과 시 run 을 halted 로 정지한다."""
         handle.failure_streak += 1
         if handle.failure_streak < self._service.max_failure_streak:
+            self._record_iteration(STATUS_FAILED)
             return False
 
+        # ServiceRunHalted 알림이 이 라벨을 본다 — 단순 실패와 구분해야 한다
+        self._record_iteration(RunStatus.HALTED.value)
         handle.status = RunStatus.HALTED
         handle.error = MalkuthError(
             category=ErrorCategory.GRAPH,
@@ -327,5 +368,7 @@ class ServiceRunner:
 
         delay = self._service.idle.delay_for(idle_streak)
         self.delays.append(delay)
+        if self._telemetry is not None:
+            self._telemetry.idle_delay(delay)
         await self._sleep(delay)
         return idle_streak + 1

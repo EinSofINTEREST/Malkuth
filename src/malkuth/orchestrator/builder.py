@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 import uuid
 from collections.abc import Hashable
 from typing import TYPE_CHECKING, Any, Protocol, TypedDict
@@ -21,6 +22,7 @@ from langgraph.graph import StateGraph
 from malkuth.core.agent import TaskConfig, TaskRequest, TaskResult, TaskStatus, TraceContext
 from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
 from malkuth.orchestrator.state import extract_input, merge_output, resolve_state_schema
+from malkuth.orchestrator.telemetry import OrchestratorTelemetry
 from malkuth.orchestrator.topology import (
     END,
     START,
@@ -34,6 +36,8 @@ if TYPE_CHECKING:
 
     from langgraph.checkpoint.base import BaseCheckpointSaver
     from pydantic import BaseModel
+
+    from malkuth.observability.metrics import Metrics
 
 _ITERATION_KEY = "_iterations"
 
@@ -116,11 +120,17 @@ class GraphBuilder:
         *,
         state_schema: type[BaseModel] | None = None,
         node_timeout_s: float = 300.0,
+        metrics: Metrics | None = None,
     ) -> None:
         self._topology = topology
         self._runtime = runtime
         self._schema = state_schema or resolve_state_schema(topology.spec.state.schema_ref)
         self._node_timeout_s = node_timeout_s
+        self._telemetry = (
+            None
+            if metrics is None
+            else OrchestratorTelemetry(metrics, graph=topology.name, mode=topology.mode)
+        )
 
     @property
     def state_schema(self) -> type[BaseModel]:
@@ -244,7 +254,21 @@ class GraphBuilder:
             update = merge_output(node, result.output, schema=self._schema)
             return self._with_iteration(state, node.id, update)
 
-        return run
+        if self._telemetry is None:
+            # 계측이 없으면 래퍼도 두지 않는다 — 선택적 경로가 상시 비용을 내면 안 된다
+            return run
+
+        telemetry = self._telemetry
+
+        async def timed(state: dict[str, Any]) -> dict[str, Any]:
+            """노드 latency 를 남긴다 — 실패한 노드도 관측 대상이다."""
+            started = time.perf_counter()
+            try:
+                return await run(state)
+            finally:
+                telemetry.node_finished(node_id=node.id, duration_s=time.perf_counter() - started)
+
+        return timed
 
     def _with_iteration(
         self, state: dict[str, Any], node_id: str, update: dict[str, Any]
@@ -275,6 +299,7 @@ def build_graph(
     checkpointer: BaseCheckpointSaver[Any] | None = None,
     state_schema: type[BaseModel] | None = None,
     node_timeout_s: float = 300.0,
+    metrics: Metrics | None = None,
 ) -> Any:
     """Build a runnable graph from a topology.
 
@@ -286,11 +311,16 @@ def build_graph(
         checkpointer: Checkpointer attached to the compiled graph.
         state_schema: Optional pre-resolved state schema.
         node_timeout_s: Default per-node timeout.
+        metrics: Optional metric registry for node latency.
 
     Returns:
         The compiled graph.
     """
     builder = GraphBuilder(
-        topology, runtime, state_schema=state_schema, node_timeout_s=node_timeout_s
+        topology,
+        runtime,
+        state_schema=state_schema,
+        node_timeout_s=node_timeout_s,
+        metrics=metrics,
     )
     return builder.build(checkpointer=checkpointer)

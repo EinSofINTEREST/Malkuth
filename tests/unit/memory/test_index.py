@@ -7,7 +7,10 @@
 
 from __future__ import annotations
 
+import contextlib
+
 import pytest
+from pydantic import ValidationError
 
 from malkuth.core.errors import MalkuthError
 from malkuth.memory.embedding import HashEmbedder, cosine, normalize, tokenize
@@ -18,6 +21,7 @@ from malkuth.memory.index import (
     SpaceIndex,
     split_chunks,
 )
+from malkuth.memory.recall import Recall
 from malkuth.modules.memoryset import ChunkSpec, MemoryKind
 
 SPACE = "local:researcher:longterm"
@@ -452,3 +456,146 @@ def test_cosine_of_orthogonal_vectors_is_zero():
 
 def test_cosine_with_a_zero_vector_is_zero():
     assert cosine([0.0, 0.0], [1.0, 0.0]) == 0.0
+
+
+# --- 메트릭 배선 ---------------------------------------------------------------
+
+
+def make_metrics():
+    """이 테스트만의 registry — 프로세스 전역을 오염시키지 않는다."""
+    from prometheus_client import CollectorRegistry
+
+    from malkuth.observability.metrics import Metrics
+
+    return Metrics(registry=CollectorRegistry())
+
+
+def gauge_value(metrics, name: str, **labels) -> float:
+    return metrics.registry.get_sample_value(name, labels) or 0.0
+
+
+def test_draining_reports_the_space_size():
+    """무한 성장은 검색 품질과 비용을 함께 망친다 — 크기를 봐야 한다."""
+    metrics = make_metrics()
+    registry = IndexRegistry(metrics=metrics)
+    registry.submit(entry("첫 항목"), spec())
+    registry.submit(entry("둘째 항목"), spec())
+
+    registry.drain()
+
+    assert gauge_value(metrics, "malkuth_memory_entries", space=SPACE) == 2.0
+
+
+def test_pending_entry_publishes_a_positive_lag_before_draining():
+    """drain 후에만 재면 큐가 비어 있어 항상 0 이다 — 밀리는 사실이 안 보인다."""
+    from datetime import UTC, datetime, timedelta
+
+    metrics = make_metrics()
+    registry = IndexRegistry(metrics=metrics)
+
+    registry.submit(entry("대기 중", created_at=datetime.now(UTC) - timedelta(seconds=45)), spec())
+
+    assert gauge_value(metrics, "malkuth_memory_index_lag_seconds", space=SPACE) >= 45.0
+
+
+def test_failed_drain_still_publishes_the_lag():
+    """색인이 실패해 큐에 남는 그때가 지연이 가장 중요한 시점이다."""
+    from datetime import UTC, datetime, timedelta
+
+    metrics = make_metrics()
+    registry = IndexRegistry(metrics=metrics)
+    old_entry = entry("색인 실패 예정", created_at=datetime.now(UTC) - timedelta(seconds=45))
+    registry.submit(old_entry, spec())
+    # 다른 space 의 인덱스만 남겨 drain 이 대상 인덱스를 찾지 못하게 한다
+    registry.indexes.clear()
+
+    with contextlib.suppress(MalkuthError):
+        registry.drain()
+
+    assert gauge_value(metrics, "malkuth_memory_index_lag_seconds", space=SPACE) >= 45.0
+
+
+def test_naive_timestamps_are_rejected_at_the_entry_boundary():
+    """naive 시각이 섞이면 provenance 가 모호해지고 지연 관측이 TypeError 로 터진다."""
+    from datetime import datetime
+
+    with pytest.raises(ValidationError, match="timezone-aware"):
+        entry("시간대 없음", created_at=datetime(2026, 1, 1))  # noqa: DTZ001
+
+
+def test_pending_entries_report_their_age_in_seconds():
+    """09 의 목표 지연이 초 단위이므로 개수가 아니라 시간이어야 한다."""
+    from datetime import UTC, datetime, timedelta
+
+    metrics = make_metrics()
+    registry = IndexRegistry(metrics=metrics)
+    old = entry("오래 대기", created_at=datetime.now(UTC) - timedelta(seconds=30))
+    registry.submit(old, spec())
+
+    lag = registry.queue.lag_seconds(now=old.created_at + timedelta(seconds=30))
+
+    assert lag[SPACE] == pytest.approx(30.0)
+
+
+def test_drained_space_reports_zero_lag():
+    """해소된 지연이 게이지에 남아 있으면 계속 밀린 것처럼 보인다."""
+    metrics = make_metrics()
+    registry = IndexRegistry(metrics=metrics)
+    registry.submit(entry("색인 대상"), spec())
+
+    registry.drain()
+
+    assert gauge_value(metrics, "malkuth_memory_index_lag_seconds", space=SPACE) == 0.0
+
+
+def test_search_duration_is_observed_per_space():
+    metrics = make_metrics()
+    index = index_with(entry("mcp sidecar 는 태그 고정이 필요하다"))
+    recall = Recall(indexes={SPACE: index}, metrics=metrics)
+
+    recall.search("sidecar", spaces=[SPACE], k=3)
+
+    assert gauge_value(metrics, "malkuth_memory_search_duration_seconds_count", space=SPACE) == 1.0
+
+
+def test_index_layer_works_without_metrics():
+    registry = IndexRegistry()
+    registry.submit(entry("메트릭 없이"), spec())
+
+    assert registry.drain() == 1
+
+
+def test_search_is_counted_as_an_operation():
+    """09 는 search 도 집계 대상으로 둔다 — MemoryService 를 거치지 않으므로 여기서 센다."""
+    metrics = make_metrics()
+    index = index_with(entry("mcp sidecar 는 태그 고정이 필요하다"))
+    recall = Recall(indexes={SPACE: index}, metrics=metrics)
+
+    recall.search("sidecar", spaces=[SPACE], k=3)
+
+    assert (
+        metrics.registry.get_sample_value(
+            "malkuth_memory_operations_total", {"space": SPACE, "op": "search", "status": "ok"}
+        )
+        == 1.0
+    )
+
+
+def test_auto_recall_is_counted_as_an_operation():
+    """recall 은 프롬프트 주입량과 직결된다 — 얼마나 자주 도는지 보여야 한다."""
+    from malkuth.memory.recall import AutoRecall
+    from malkuth.modules.memoryset import RecallSpec
+
+    metrics = make_metrics()
+    item = entry("mcp sidecar 는 태그 고정이 필요하다")
+    recall = Recall(indexes={SPACE: index_with(item)}, metrics=metrics)
+    auto = AutoRecall(recall=recall, policy=RecallSpec(auto=True, k=3, min_score=0.0))
+
+    auto.for_task("sidecar", spaces=[SPACE], entries={item.entry_id: item})
+
+    assert (
+        metrics.registry.get_sample_value(
+            "malkuth_memory_operations_total", {"space": SPACE, "op": "recall", "status": "ok"}
+        )
+        == 1.0
+    )

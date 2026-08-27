@@ -12,9 +12,18 @@ from typing import TYPE_CHECKING, Any
 from langgraph.checkpoint.base import BaseCheckpointSaver
 
 from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
+from malkuth.orchestrator.telemetry import (
+    OPERATION_LOAD,
+    OPERATION_SAVE,
+    STATUS_COMPLETED,
+    STATUS_ERROR,
+    CheckpointTelemetry,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+    from malkuth.observability.metrics import Metrics
 
 
 class CheckpointerKind(StrEnum):
@@ -108,11 +117,40 @@ def build_checkpointer(
         ) from err
 
 
+async def _guarded(
+    action: Callable[[], Any],
+    *,
+    code: ErrorCode,
+    message: str,
+    operation: str,
+    graph: str,
+    run_id: str,
+    metrics: Metrics | None,
+) -> Any:
+    """저장/복원 공통 경로 — 실패를 구조화하고 결과를 계측한다."""
+    telemetry = None if metrics is None else CheckpointTelemetry(metrics)
+    try:
+        result = await action()
+    except MalkuthError:
+        if telemetry is not None:
+            telemetry.operation(operation=operation, status=STATUS_ERROR)
+        raise
+    except Exception as err:
+        if telemetry is not None:
+            telemetry.operation(operation=operation, status=STATUS_ERROR)
+        raise _storage_error(code, message, graph=graph, run_id=run_id) from err
+
+    if telemetry is not None:
+        telemetry.operation(operation=operation, status=STATUS_COMPLETED)
+    return result
+
+
 async def guarded_save(
     save: Callable[[], Any],
     *,
     graph: str,
     run_id: str,
+    metrics: Metrics | None = None,
 ) -> Any:
     """Run a checkpoint save, converting failures to ``STOR_001``.
 
@@ -121,17 +159,15 @@ async def guarded_save(
     Raises:
         MalkuthError: STORAGE/``STOR_001`` if the save fails.
     """
-    try:
-        return await save()
-    except MalkuthError:
-        raise
-    except Exception as err:
-        raise _storage_error(
-            ErrorCode.STOR_001,
-            "checkpoint save failed",
-            graph=graph,
-            run_id=run_id,
-        ) from err
+    return await _guarded(
+        save,
+        code=ErrorCode.STOR_001,
+        message="checkpoint save failed",
+        operation=OPERATION_SAVE,
+        graph=graph,
+        run_id=run_id,
+        metrics=metrics,
+    )
 
 
 async def guarded_restore(
@@ -139,6 +175,7 @@ async def guarded_restore(
     *,
     graph: str,
     run_id: str,
+    metrics: Metrics | None = None,
 ) -> Any:
     """Run a checkpoint restore, converting failures to ``STOR_002``.
 
@@ -147,14 +184,12 @@ async def guarded_restore(
     Raises:
         MalkuthError: STORAGE/``STOR_002`` if the restore fails.
     """
-    try:
-        return await restore()
-    except MalkuthError:
-        raise
-    except Exception as err:
-        raise _storage_error(
-            ErrorCode.STOR_002,
-            "checkpoint restore failed",
-            graph=graph,
-            run_id=run_id,
-        ) from err
+    return await _guarded(
+        restore,
+        code=ErrorCode.STOR_002,
+        message="checkpoint restore failed",
+        operation=OPERATION_LOAD,
+        graph=graph,
+        run_id=run_id,
+        metrics=metrics,
+    )

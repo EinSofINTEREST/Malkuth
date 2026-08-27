@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from malkuth.modules.memoryset import MemoryKind
 
@@ -51,6 +51,22 @@ class MemoryEntry(BaseModel):
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     importance: float = Field(default=0.5, ge=0.0, le=1.0)
     supersedes: str | None = None
+
+    @field_validator("created_at")
+    @classmethod
+    def _require_timezone(cls, value: datetime) -> datetime:
+        """시각은 tz-aware 여야 한다.
+
+        naive 시각이 섞이면 provenance 가 어느 시간대의 것인지 모호해지고,
+        aware 시각과의 뺄셈이 ``TypeError`` 로 터진다 — 인덱싱 지연 관측이
+        저장소 데이터 때문에 실패하면 안 된다.
+
+        Raises:
+            ValueError: If the timestamp has no timezone.
+        """
+        if value.tzinfo is None:
+            raise ValueError("created_at must be timezone-aware")
+        return value
 
     def to_row(self) -> dict[str, Any]:
         """저장소 행 표현 — tags 는 검색 필터가 쓰도록 구분자로 이어 붙인다."""

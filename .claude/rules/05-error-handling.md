@@ -425,7 +425,7 @@ malkuth_service_iterations_total{graph, status}          # Counter — iteration
 malkuth_service_idle_delay_seconds{graph}                # Gauge — 현재 idle backoff
 
 # Memory metrics ([09-memory-context.md](09-memory-context.md))
-malkuth_memory_operations_total{space, op, status}       # op: append|search|recall
+malkuth_memory_operations_total{space, op, status}       # op: append|read|latest|search|recall
 malkuth_memory_search_duration_seconds{space}
 malkuth_memory_entries{space}                            # Gauge
 malkuth_memory_index_lag_seconds{space}

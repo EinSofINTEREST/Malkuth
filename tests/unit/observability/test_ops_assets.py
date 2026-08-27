@@ -21,6 +21,7 @@ ALERTS = MONITORING / "alerts.yaml"
 DASHBOARDS = sorted((MONITORING / "dashboards").glob("*.json"))
 RUNBOOKS_EN = REPO_ROOT / "docs" / "en" / "runbooks"
 RUNBOOKS_KO = REPO_ROOT / "docs" / "ko" / "runbooks"
+RULES = REPO_ROOT / ".claude" / "rules"
 
 REGISTERED = {spec.name for spec in METRIC_SPECS}
 
@@ -298,3 +299,62 @@ def test_runbooks_reference_real_cli_commands():
     }
 
     assert referenced <= documented, f"undocumented commands: {sorted(referenced - documented)}"
+
+
+# --- 알림이 기대하는 status 값 --------------------------------------------------
+
+
+def status_filters(text: str) -> set[tuple[str, str]]:
+    """알림 표현식에서 ``metric{status="value"}`` 쌍을 뽑는다."""
+    pattern = re.compile(r"(malkuth_\w+)\{[^}]*status\s*=\s*\"([^\"]+)\"")
+    return {(base_metric(metric), value) for metric, value in pattern.findall(text)}
+
+
+def test_alerts_only_filter_on_status_values_the_code_emits():
+    """알림이 코드가 내지 않는 값을 보면 **영원히 침묵한다**.
+
+    라벨 이름 검사는 이 오류를 잡지 못한다 — 이름은 맞고 값만 어긋나기 때문이다.
+    실제로 checkpoint 실패를 `failed` 로 기록해 `status="error"` 알림이 죽어
+    있었다.
+    """
+    from malkuth.agentd import telemetry as agent_telemetry
+    from malkuth.orchestrator import telemetry as orchestrator_telemetry
+    from malkuth.orchestrator.run import RunStatus
+
+    emitted = {
+        agent_telemetry.STATUS_COMPLETED,
+        agent_telemetry.STATUS_FAILED,
+        orchestrator_telemetry.STATUS_COMPLETED,
+        orchestrator_telemetry.STATUS_FAILED,
+        orchestrator_telemetry.STATUS_ERROR,
+        *(status.value for status in RunStatus),
+        # 모델 provider 가 분류하는 값 — 바인딩(#77) 이후 executor 가 낸다
+        "rate_limited",
+    }
+
+    referenced = status_filters(ALERTS.read_text(encoding="utf-8"))
+    unknown = sorted(
+        f"{metric}{{status={value!r}}}" for metric, value in referenced if value not in emitted
+    )
+
+    assert unknown == [], f"알림이 코드가 내지 않는 status 를 본다: {unknown}"
+
+
+def test_documented_memory_ops_match_what_the_code_emits():
+    """05/09 가 나열한 ``op`` 값과 코드가 내는 값이 같아야 한다.
+
+    어긋나면 둘 중 하나를 고쳐야 하는데, **문서를 코드에 맞추는 쪽이 언제나
+    쉬워서** 계약이 조용히 코드를 따라가게 된다. 그 순환을 막는다.
+    """
+    from malkuth.memory.telemetry import OP_RECALL, OP_SEARCH
+
+    emitted = {"append", "read", "latest", OP_SEARCH, OP_RECALL}
+    pattern = re.compile(r"malkuth_memory_operations_total\{[^}]*\}\s*#\s*op:\s*([\w|]+)")
+
+    for rules in (RULES / "05-error-handling.md", RULES / "09-memory-context.md"):
+        match = pattern.search(rules.read_text(encoding="utf-8"))
+        assert match, f"{rules.name}: op 값 주석을 찾지 못했다"
+        documented = set(match.group(1).split("|"))
+        assert documented == emitted, (
+            f"{rules.name}: 문서 {sorted(documented)} vs 코드 {sorted(emitted)}"
+        )

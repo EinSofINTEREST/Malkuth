@@ -22,6 +22,7 @@ if TYPE_CHECKING:
 
     from malkuth.memory.store import MemoryStore
     from malkuth.modules.memoryset import MemoryKind
+    from malkuth.observability.metrics import Metrics
 
 SCOPE_PRECEDENCE = (
     MemoryScope.LOCAL,
@@ -120,6 +121,7 @@ class MemoryService:
     """
 
     store: MemoryStore
+    metrics: Metrics | None = None
     _audit: list[dict[str, str]] = field(default_factory=list, init=False)
 
     def _authorize(self, token: AccessToken, alias: str, *, write: bool) -> MemorySpace:
@@ -152,6 +154,10 @@ class MemoryService:
         }
         self._audit.append(entry)
         log.info("memory access", **entry)
+        if self.metrics is not None:
+            self.metrics.counter("malkuth_memory_operations_total").labels(
+                space=space, op=op, status=status
+            ).inc()
 
     @property
     def audit_log(self) -> tuple[dict[str, str], ...]:

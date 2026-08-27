@@ -16,7 +16,7 @@ import structlog
 from malkuth.memory.telemetry import OP_RECALL, OP_SEARCH, IndexTelemetry
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterable, Sequence
 
     from malkuth.memory.entry import MemoryEntry
     from malkuth.memory.index import Hit, SpaceIndex
@@ -182,6 +182,20 @@ class Recall:
         telemetry = IndexTelemetry(self.metrics)
         telemetry.search_finished(space=space, duration_s=duration_s)
         telemetry.operation(space=space, op=OP_SEARCH)
+
+
+def superseded_ids(entries: Iterable[MemoryEntry]) -> frozenset[str]:
+    """Collect the ids that some other entry supersedes.
+
+    정정으로 대체된 항목의 id 를 모읍니다 — ``resolve_corrections`` 의 입력입니다.
+
+    Args:
+        entries: The candidate entries.
+
+    Returns:
+        Ids that at least one entry claims to supersede.
+    """
+    return frozenset(entry.supersedes for entry in entries if entry.supersedes)
 
 
 def resolve_corrections(

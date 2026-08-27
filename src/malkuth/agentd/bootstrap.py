@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 from malkuth.core.agent import ComponentHealth, HealthState, HealthStatus
 from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
 from malkuth.core.tools import namespaced
+from malkuth.memory.tool import MEMORY_SEARCH_SPEC, MEMORY_SEARCH_TOOL
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -83,6 +84,7 @@ def build_tool_registry(
     mcp_servers: dict[str, tuple[str, ...]],
     *,
     agent: str,
+    with_memory: bool = False,
 ) -> dict[str, SkillSpec | str]:
     """Merge skillset and MCP tools into one registry.
 
@@ -92,6 +94,8 @@ def build_tool_registry(
         skillsets: Loaded skillsets contributing tools.
         mcp_servers: Server name to its exposed tool names.
         agent: Agent name for error context.
+        with_memory: Register the framework ``memory_search`` tool — memory 가
+            붙지 않았는데 노출하면 모델이 부를 수 없는 tool 을 본다.
 
     Returns:
         Tool name to its spec (skillset) or owning server (MCP).
@@ -125,6 +129,17 @@ def build_tool_registry(
                     mcp_server=server,
                 )
             registry[name] = server
+
+    if with_memory:
+        if MEMORY_SEARCH_TOOL in registry:
+            # 프레임워크 tool 이름을 스킬셋이 가져가면 둘 중 하나가 조용히 가려진다
+            raise _module_error(
+                ErrorCode.MOD_002,
+                f"tool name is reserved by the framework: {MEMORY_SEARCH_TOOL}",
+                agent,
+                tool=MEMORY_SEARCH_TOOL,
+            )
+        registry[MEMORY_SEARCH_TOOL] = MEMORY_SEARCH_SPEC
 
     return registry
 

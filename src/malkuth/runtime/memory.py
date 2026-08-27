@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
+from malkuth.memory.recall import AutoRecall, render_context, superseded_ids
 from malkuth.memory.service import access_denied, build_token
 
 if TYPE_CHECKING:
@@ -24,7 +25,7 @@ if TYPE_CHECKING:
     from malkuth.memory.entry import MemoryEntry
     from malkuth.memory.recall import Recall
     from malkuth.memory.service import AccessToken, MemoryService
-    from malkuth.modules.memoryset import MemoryKind
+    from malkuth.modules.memoryset import MemoryKind, RecallSpec
 
 
 DEFAULT_SCAN_LIMIT = 500
@@ -146,6 +147,38 @@ class ServiceMemoryAccess:
                 space=alias,
             )
         return space.space_id
+
+    async def recall_for_task(self, query: str, *, policy: RecallSpec) -> str:
+        """Recall once at task entry and render it for the prompt.
+
+        태스크 진입 시 1회 회상해 프롬프트에 넣을 형태로 렌더링합니다 —
+        루프마다 재검색하지 않습니다 (09 Rule 7).
+
+        Args:
+            query: The task input to recall against.
+            policy: The memoryset recall policy (k / min_score / budget_tokens).
+
+        Returns:
+            The rendered context, or an empty string when nothing survives the
+            threshold and budget.
+        """
+        aliases = [space.alias for space in self.token.spaces]
+        if not aliases:
+            return ""
+
+        entries = {
+            entry.entry_id: entry
+            for alias in aliases
+            for entry in self.service.read(self.token, alias, limit=DEFAULT_SCAN_LIMIT)
+        }
+        auto = AutoRecall(recall=self.recall, policy=policy)
+        selected = auto.for_task(
+            query,
+            spaces=[self._space_id(alias) for alias in aliases],
+            entries=entries,
+            superseded=superseded_ids(entries.values()),
+        )
+        return render_context(selected)
 
     async def append(self, space: str, **kwargs: Any) -> Any:
         """Append one entry to a writable space.

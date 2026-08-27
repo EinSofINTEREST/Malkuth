@@ -283,3 +283,31 @@ async def test_every_advertised_tool_is_runnable(monkeypatch):
     for spec in executor._tool_schemas:
         assert executor._tools.timeout_for(spec.name) >= 0.0
         assert spec.name in executor._tools._skills
+
+
+def test_mcp_entries_never_reach_the_tool_schemas():
+    """registry 는 MCP tool 을 **서버 이름 문자열**로 담는다.
+
+    그대로 넘기면 provider 가 ``to_tool_schema()`` 를 부르다 AttributeError 로
+    터진다 — #78 이 세션을 세워도 스키마 조회 경로가 따로 필요하다.
+    """
+    from malkuth.agentd.__main__ import _executable_schemas
+    from malkuth.agentd.tools import AgentToolRegistry
+    from malkuth.core.skill import SkillSpec
+
+    class Result:
+        tools = {
+            "search": SkillSpec(name="search", description="d", parameters={}),
+            "mcp__filesystem__read_file": "filesystem",  # 서버 이름 문자열
+        }
+
+    class LiveMcp:
+        async def call_tool(self, name, arguments):  # pragma: no cover - 도달 안 함
+            return None
+
+    registry = AgentToolRegistry(agent="researcher", mcp=LiveMcp())
+
+    schemas = _executable_schemas(Result(), registry)
+
+    assert all(isinstance(spec, SkillSpec) for spec in schemas)
+    assert [spec.name for spec in schemas] == ["search"]

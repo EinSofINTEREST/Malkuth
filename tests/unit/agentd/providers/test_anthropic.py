@@ -61,10 +61,21 @@ def model(result: object, **overrides: object) -> AnthropicModel:
     return AnthropicModel(config=config, agent="researcher", client=FakeClient(result))
 
 
+STATUS_BY_ERROR = {
+    anthropic.RateLimitError: 429,
+    anthropic.BadRequestError: 400,
+    anthropic.InternalServerError: 500,
+}
+
+
 def api_error(kind: type[anthropic.APIStatusError], message: str = "boom"):
-    """SDK 에러를 실제 타입으로 만든다 — 문자열 매칭이 아니라 타입 분기를 검증한다."""
+    """SDK 에러를 실제 타입과 상태코드로 만든다.
+
+    지금 구현은 status 를 보지 않지만, 모든 에러를 429 로 만들어두면 나중에
+    상태코드 분기가 생겼을 때 **테스트가 잘못된 방향으로 통과**한다.
+    """
     request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
-    response = httpx.Response(429, request=request)
+    response = httpx.Response(STATUS_BY_ERROR[kind], request=request)
     return kind(message, response=response, body=None)
 
 

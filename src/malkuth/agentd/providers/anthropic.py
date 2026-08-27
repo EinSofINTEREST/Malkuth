@@ -67,8 +67,11 @@ class AnthropicModel:
     async def run(self, prompt: str, tools: Sequence[Any]) -> ModelResponse:
         """Run one model turn.
 
-        한 턴을 실행합니다. provider 예외는 전부 ``MODEL`` 카테고리로 변환되어
-        executor 가 provider 사정을 알 필요가 없습니다.
+        한 턴을 실행합니다. 재시도·라우팅 판단이 걸린 실패는 ``MODEL``
+        카테고리로 변환합니다.
+
+        **설정 오류는 그대로 전파합니다**: context 초과가 아닌 400 을
+        ``LLM_002`` 로 덮으면 운영자가 프롬프트만 줄이다 시간을 버립니다.
 
         Args:
             prompt: The rendered prompt for this turn.
@@ -81,6 +84,9 @@ class AnthropicModel:
             MalkuthError: MODEL/``LLM_001`` rate limited, ``LLM_002`` context
                 exceeded, ``LLM_003`` provider server error, ``LLM_004`` if the
                 response cannot be interpreted.
+            anthropic.APIStatusError: Configuration errors (unknown model,
+                invalid arguments) propagate unchanged — 프레임워크가 고칠 수
+                있는 실패가 아닙니다.
         """
         request: dict[str, Any] = {
             "model": self.config.name,

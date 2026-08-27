@@ -77,6 +77,24 @@ class TemplateSpec(BaseModel):
 
     file: str
     variables: dict[str, VariableSpec] = Field(default_factory=dict)
+    output_keys: tuple[str, ...] = ()
+    """이 템플릿이 요구하는 응답 키.
+
+    **요구하는 곳과 선언하는 곳이 같아야** 드리프트가 구조적으로 불가능하다.
+    에이전트 단위로 두면 같은 에이전트가 노드마다 다른 키를 낼 수 없고,
+    에이전트가 자기 배선을 알아야 하게 된다 (02 Rule 6 위반).
+    """
+
+    @field_validator("output_keys")
+    @classmethod
+    def _named_keys(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        """키는 state schema 필드명과 맞물리므로 식별자 모양이어야 한다."""
+        for key in value:
+            if not key.isidentifier():
+                raise ValueError(f"output key must be an identifier: {key!r}")
+        if len(set(value)) != len(value):
+            raise ValueError("output keys must be unique")
+        return value
 
 
 class PromptsetSpec(BaseModel):

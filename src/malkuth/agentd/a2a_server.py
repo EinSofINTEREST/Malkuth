@@ -26,6 +26,14 @@ if TYPE_CHECKING:
 PORT_ENV = "MALKUTH_A2A_PORT"
 """runtime 이 할당한 A2A 포트 — 미주입 시 서버를 띄우지 않는다."""
 
+ADVERTISED_HOST_ENV = "MALKUTH_A2A_ADVERTISED_HOST"
+"""카드에 실을 도달 주소.
+
+**바인드 주소(`0.0.0.0`)를 광고하면 안 된다** — peer 가 그리로 접속하려다
+실패한다. 미주입 시 에이전트 이름을 쓴다: 전용 bridge 네트워크에서 컨테이너
+이름이 곧 DNS 이름이다 (02 Network 5).
+"""
+
 EDGES_ENV = "MALKUTH_A2A_EDGES"
 """선언된 연결 — ``caller>callee`` 를 쉼표로. 그래프 config 가 원본이다."""
 
@@ -136,12 +144,17 @@ def _protobuf_card(manifest: AgentManifest) -> Any:
         default_output_modes=["text/plain"],
         supported_interfaces=[
             pb.AgentInterface(
-                url=f"http://0.0.0.0:{a2a_port() or 0}/",  # noqa: S104
+                url=f"http://{_advertised_host(manifest)}:{a2a_port() or 0}/",
                 protocol_binding=TransportProtocol.JSONRPC.value,
                 protocol_version="1.0",
             )
         ],
     )
+
+
+def _advertised_host(manifest: AgentManifest) -> str:
+    """peer 가 실제로 닿을 수 있는 호스트."""
+    return os.environ.get(ADVERTISED_HOST_ENV, "").strip() or manifest.name
 
 
 def declared_edges() -> str:
@@ -150,6 +163,7 @@ def declared_edges() -> str:
 
 
 __all__ = [
+    "ADVERTISED_HOST_ENV",
     "EDGES_ENV",
     "MAX_DEPTH_ENV",
     "PORT_ENV",

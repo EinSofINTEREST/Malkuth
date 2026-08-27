@@ -66,11 +66,21 @@ services:
         AGENT: planner
     ports:
       - "18082:8080"
+      - "19102:19102"
+    # 앵커 뒤에 두어 포트만 덮어쓴다
     environment: &reference-env
+      MALKUTH_A2A_PORT: "19102"
       MALKUTH_AGENT_TOKEN: ${MALKUTH_AGENT_TOKEN:-e2e-token}
       # SDK 가 이 값을 읽는다 — 코드 변경 없이 대역으로 향한다
       ANTHROPIC_BASE_URL: http://fake-provider:8000
       ANTHROPIC_API_KEY: e2e-fake-key
+      # graphs/research-pipeline.yaml 의 connections 선언이 원본이다.
+      # runtime 이 배포 시 주입하는 것을 여기서는 compose 가 대신한다
+      MALKUTH_A2A_EDGES: researcher>planner
+      MALKUTH_A2A_SECRET: ${MALKUTH_A2A_SECRET:-e2e-a2a-secret}
+      # 테스트가 호스트에서 부르므로 loopback 을 광고한다 —
+      # 배포에서는 runtime 이 컨테이너 DNS 이름을 주입한다
+      MALKUTH_A2A_ADVERTISED_HOST: 127.0.0.1
 
   agent-researcher:
     <<: *agent-defaults
@@ -83,7 +93,10 @@ services:
         AGENT: researcher
     ports:
       - "18083:8080"
-    environment: *reference-env
+      - "19103:19103"
+    environment:
+      <<: *reference-env
+      MALKUTH_A2A_PORT: "19103"
 
   agent-writer:
     <<: *agent-defaults
@@ -96,7 +109,10 @@ services:
         AGENT: writer
     ports:
       - "18084:8080"
-    environment: *reference-env
+      - "19104:19104"
+    environment:
+      <<: *reference-env
+      MALKUTH_A2A_PORT: "19104"
 
 networks:
   malkuth-e2e-net:

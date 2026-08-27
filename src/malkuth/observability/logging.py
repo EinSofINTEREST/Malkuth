@@ -22,6 +22,20 @@ if TYPE_CHECKING:
 
 DEFAULT_LOG_LEVEL = "INFO"
 
+LOG_LEVELS = {
+    "DEBUG": logging.DEBUG,
+    "INFO": logging.INFO,
+    "WARNING": logging.WARNING,
+    "ERROR": logging.ERROR,
+    "CRITICAL": logging.CRITICAL,
+}
+"""05 가 규정한 레벨 — 이 프레임워크가 지원하는 전부다.
+
+``logging.getLevelNamesMapping()`` 을 쓰면 **전역 레지스트리**를 신뢰하게 되어,
+서드파티가 등록한 레벨(uvicorn 의 ``TRACE`` 등)이 조용히 유효해진다. 그러면
+오타에 가까운 값이 통과하고, 그 레벨은 05 의 어느 표에도 없다.
+"""
+
 REDACTED: Final = "***"
 TRUNCATED: Final = "<truncated>"
 
@@ -215,10 +229,9 @@ def configure(
         json_output: JSON renderer for production; pretty console when False.
         extra_processors: Processors inserted before rendering.
     """
-    levels = logging.getLevelNamesMapping()
-    resolved_level = levels.get(level.upper())
+    resolved_level = LOG_LEVELS.get(level.upper())
     if resolved_level is None:
-        raise ValueError(f"unknown log level: {level!r} (expected one of {sorted(levels)})")
+        raise ValueError(f"unknown log level: {level!r} (expected one of {sorted(LOG_LEVELS)})")
 
     renderer: Any = (
         structlog.processors.JSONRenderer()

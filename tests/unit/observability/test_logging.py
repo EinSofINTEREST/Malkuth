@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from pathlib import Path
 
@@ -424,3 +425,15 @@ def test_rules_doc_is_found_regardless_of_cwd(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
 
     assert documented_fields() == STANDARD_FIELDS
+
+
+def test_a_third_party_registered_level_does_not_become_valid():
+    """전역 레지스트리를 신뢰하면 서드파티가 우리 계약을 넓힌다.
+
+    uvicorn 을 구동하면 `TRACE` 가 전역 등록되어, `getLevelNamesMapping()` 을
+    쓰던 검증이 조용히 그것을 받아들였다 — 05 의 어느 표에도 없는 레벨인데도.
+    """
+    logging.addLevelName(5, "TRACE")
+
+    with pytest.raises(ValueError, match="unknown log level"):
+        configure(level="TRACE")

@@ -24,6 +24,7 @@ from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
 from malkuth.core.manifest import AgentManifest
 from malkuth.core.skill import SkillSpec
 from malkuth.core.tools import is_mcp_tool
+from malkuth.memory.http import MEMORY_TOKEN_ENV, MEMORY_URL_ENV
 from malkuth.memory.tool import MEMORY_SEARCH_TOOL
 from malkuth.observability.metrics import DEFAULT_METRICS_PORT, Metrics
 from malkuth.protocols.a2a.card import build_card
@@ -184,7 +185,11 @@ async def build_executor(manifest: AgentManifest, *, metrics: Metrics | None = N
         skillset_loader=SkillsetLoader(registry),
     ).run()
 
-    registry_tools = AgentToolRegistry(agent=manifest.name, skillsets=result.skillsets)
+    registry_tools = AgentToolRegistry(
+        agent=manifest.name,
+        skillsets=result.skillsets,
+        memory=_memory_access(),
+    )
 
     return Executor(
         agent=manifest.name,
@@ -194,6 +199,22 @@ async def build_executor(manifest: AgentManifest, *, metrics: Metrics | None = N
         tool_schemas=_executable_schemas(result, registry_tools),
         telemetry=_telemetry_for(manifest, metrics),
     )
+
+
+def _memory_access() -> Any:
+    """Build memory access from the injected endpoint.
+
+    runtime 이 주소와 불투명 토큰을 주입했을 때만 만듭니다 — **DB 자격증명은
+    컨테이너에 들어오지 않습니다** (09 Access Enforcement 1).
+    """
+    url = os.environ.get(MEMORY_URL_ENV)
+    token = os.environ.get(MEMORY_TOKEN_ENV)
+    if not url or not token:
+        return None
+
+    from malkuth.runtime.memory_http import HttpMemoryAccess
+
+    return HttpMemoryAccess(base_url=url, token=token)
 
 
 def _telemetry_for(manifest: AgentManifest, metrics: Metrics | None) -> ExecutorTelemetry | None:

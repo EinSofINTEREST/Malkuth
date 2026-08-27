@@ -202,3 +202,50 @@ async def test_stop_all_cleans_every_agent_before_reporting_failure():
     # 실패한 쪽은 재시도용으로 남고, 멀쩡한 쪽은 끝까지 정리된다
     assert set(launch.launched) == {"echo"}
     assert healthy.handle.container_id in client.removed
+
+
+# --- memory 접속 정보 주입 ---------------------------------------------------
+
+
+async def test_memory_endpoint_reaches_the_container():
+    """주소와 불투명 토큰만 넣는다 — DB 자격증명은 컨테이너에 들어가지 않는다."""
+    from malkuth.memory.http import MEMORY_TOKEN_ENV, MEMORY_URL_ENV
+    from malkuth.runtime.launcher import MemoryEndpoint
+
+    client = FakeDockerClient()
+
+    await launcher(client).start(
+        manifest(), memory=MemoryEndpoint(url="http://memory:8080", token="opaque")
+    )
+
+    env = client.created[0]["environment"]
+    assert env[MEMORY_URL_ENV] == "http://memory:8080"
+    assert env[MEMORY_TOKEN_ENV] == "opaque"
+
+
+async def test_no_memory_endpoint_leaves_the_environment_alone():
+    """메모리를 쓰지 않는 에이전트에게 빈 값을 넣으면 기동이 헷갈린다."""
+    from malkuth.memory.http import MEMORY_TOKEN_ENV, MEMORY_URL_ENV
+
+    client = FakeDockerClient()
+
+    await launcher(client).start(manifest())
+
+    env = client.created[0]["environment"]
+    assert MEMORY_URL_ENV not in env
+    assert MEMORY_TOKEN_ENV not in env
+
+
+async def test_storage_credentials_never_reach_the_container():
+    """09 Access Enforcement 1 — 저장소 자격증명은 서비스만 보유한다."""
+    from malkuth.runtime.launcher import MemoryEndpoint
+
+    client = FakeDockerClient()
+
+    await launcher(client).start(
+        manifest(), memory=MemoryEndpoint(url="http://memory:8080", token="opaque")
+    )
+
+    env = client.created[0]["environment"]
+    leaked = [key for key in env if "DSN" in key.upper() or "DATABASE" in key.upper()]
+    assert leaked == []

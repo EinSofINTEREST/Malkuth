@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 import structlog
 
 from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
+from malkuth.memory.http import MEMORY_TOKEN_ENV, MEMORY_URL_ENV
 from malkuth.runtime.control import ControlClient
 from malkuth.runtime.spec import build_container_spec
 from malkuth.runtime.tokens import TokenIssuer, authenticated_env
@@ -46,6 +47,25 @@ class LaunchedAgent:
         await self.client.aclose()
 
 
+@dataclass(frozen=True)
+class MemoryEndpoint:
+    """Where an agent reaches the Memory Service, and with what token.
+
+    저장소 자격증명이 아니라 **주소와 불투명 토큰**만 담는다 — 그것이 컨테이너에
+    들어가도 되는 전부다.
+    """
+
+    url: str
+    token: str
+
+
+def _with_memory(env: dict[str, str], memory: MemoryEndpoint | None) -> dict[str, str]:
+    """메모리 접속 정보를 환경에 합친다 — 없으면 그대로 둔다."""
+    if memory is None:
+        return env
+    return {**env, MEMORY_URL_ENV: memory.url, MEMORY_TOKEN_ENV: memory.token}
+
+
 @dataclass
 class AgentLauncher:
     """Starts agents with authentication wired end to end.
@@ -69,6 +89,7 @@ class AgentLauncher:
         secrets: Mapping[str, str] | None = None,
         replica: int = 0,
         a2a_port: int | None = None,
+        memory: MemoryEndpoint | None = None,
     ) -> LaunchedAgent:
         """Start one agent with its token injected and wired.
 
@@ -78,6 +99,8 @@ class AgentLauncher:
             manifest: The validated agent manifest.
             secrets: Secret values resolved from the scope chain.
             replica: Replica index for the container name.
+            memory: Memory Service address and this agent's opaque token —
+                **DB 자격증명은 컨테이너에 넣지 않는다** (09 Access Enforcement 1).
             a2a_port: A2A port assigned by the runtime, when enabled.
 
         Returns:
@@ -97,7 +120,7 @@ class AgentLauncher:
 
         spec = build_container_spec(
             manifest,
-            env=authenticated_env(self.issuer, agent, secrets),
+            env=_with_memory(authenticated_env(self.issuer, agent, secrets), memory),
             replica=replica,
             a2a_port=a2a_port,
             network=self.engine.network,

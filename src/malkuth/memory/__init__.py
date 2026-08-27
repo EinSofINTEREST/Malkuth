@@ -3,6 +3,7 @@
 컨텍스트 메모리 space 와 접근 제어. 저장소 자격증명은 서비스만 보유한다.
 """
 
+from malkuth.memory.backend import create_store
 from malkuth.memory.compaction import (
     CompactionPlan,
     Summarizer,
@@ -57,7 +58,6 @@ __all__ = [
     "Hit",
     "IndexQueue",
     "IndexRegistry",
-    "SpaceIndex",
     "MemoryEntry",
     "MemoryService",
     "MemorySource",
@@ -65,13 +65,15 @@ __all__ = [
     "MemoryStore",
     "Recall",
     "ScoredEntry",
-    "Summarizer",
+    "SpaceIndex",
     "SqliteMemoryStore",
+    "Summarizer",
     "access_denied",
     "apply_budget",
     "build_summary",
     "build_token",
     "cosine",
+    "create_store",
     "expired_entries",
     "index_error",
     "normalize",

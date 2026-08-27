@@ -31,12 +31,13 @@ spec:
       input_map: {pending_spaces: state.pending_spaces}
       output_map: {compacted: output.compacted}
 
+  # 한 iteration = START -> ... -> END. 반복은 ServiceRunner 가 소유한다
   edges:
     - {from: START, to: scanner}
     - from: scanner
       to: compactor
       condition: malkuth.graphs.conditions:needs_compaction
     - from: scanner
-      to: scanner
+      to: END
       condition: malkuth.graphs.conditions:maintenance_idle
-    - {from: compactor, to: scanner}
+    - {from: compactor, to: END}

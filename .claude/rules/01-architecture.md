@@ -148,7 +148,7 @@
 |---|---|---|
 | 목표 | 특정 기능/산출물 완성을 위한 오케스트레이션 | 무한히 반복해야 할 과업 |
 | 종료 | END 도달 시 완료, 결과 반환 | 자연 종료 없음 — 운영자 stop / 명시적 stop 조건 |
-| 토폴로지 | END 필수, cycle 은 `max_iterations` 필수 | 무한 cycle 허용, idle 정책 필수 |
+| 토폴로지 | END 필수, cycle 은 `max_iterations` 필수 | 좌동 + idle 정책 필수 — 반복은 그래프가 아니라 runner 소유 |
 | Checkpoint | node 단위 | node + iteration 단위 (재시작 시 이어서) |
 | 예시 | 리서치 보고서 생성, 기능 구현 파이프라인 | 피드 감시, 큐 소비, 주기 리포팅 |
 
@@ -156,6 +156,9 @@
 
 1. **Mission**: `START → ... → END`. 완료 시 최종 state 반환, run 종료
 2. **Service**: iteration loop 로 영구 실행
+   - **한 iteration = `START → ... → END` 한 바퀴**. 반복은 그래프 안의 순환이 아니라
+     `ServiceRunner` 가 소유한다 — 그래프가 스스로 순환하면 한 번의 실행이 끝나지 않아
+     iteration 경계 자체가 성립하지 않는다
    - Iteration 마다 checkpoint — 프로세스/호스트 재시작 시 마지막 iteration 에서 재개
    - **Idle 정책 필수**: 처리할 작업이 없으면 exponential backoff —
      busy-loop 로 모델 호출을 낭비하는 것 금지

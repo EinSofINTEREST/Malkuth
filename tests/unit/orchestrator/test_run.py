@@ -10,13 +10,15 @@ import asyncio
 
 import pytest
 
+from malkuth.core.agent import TaskRequest, TaskResult
 from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
+from malkuth.orchestrator.builder import build_graph
 from malkuth.orchestrator.run import (
     RunManager,
     RunStatus,
     ServiceRunner,
 )
-from malkuth.orchestrator.topology import GraphMode
+from malkuth.orchestrator.topology import GraphMode, NodeSpec
 from tests.fixtures.topologies import make_mission, make_service
 
 
@@ -489,3 +491,39 @@ async def test_halt_records_the_failed_iteration_index():
 
     assert handle.error is not None
     assert handle.error.details["iteration"] == 0
+
+
+# --- 실제 컴파일된 그래프와의 결합 ---------------------------------------------
+
+
+class EchoRuntime:
+    """노드를 빈 출력으로 완료시키는 runtime 대역 (``NodeRuntime`` 계약)."""
+
+    def __init__(self) -> None:
+        self.invoked: list[str] = []
+
+    async def invoke(self, node: NodeSpec, task: TaskRequest) -> TaskResult:
+        self.invoked.append(node.id)
+        return TaskResult.completed(task, output={})
+
+
+async def test_service_runner_iterates_a_real_compiled_graph():
+    """fake graph 가 아니라 build_graph 결과로도 iteration 이 끝나야 한다.
+
+    service 그래프가 스스로 순환하던 시절에는 ainvoke 하나가 영원히 돌아
+    GraphRecursionError 까지 갔다 (#89). fake graph 만 쓰는 다른 테스트는
+    ainvoke 가 즉시 반환하므로 그 회귀를 잡지 못한다.
+    """
+    topology = make_service(
+        service={"idle": {"min_delay_s": 1, "max_delay_s": 2}, "max_failure_streak": 5}
+    )
+    runtime = EchoRuntime()
+    runner = ServiceRunner(topology, build_graph(topology, runtime), sleep=FakeSleep())
+    handle = RunManager().acquire(topology)
+
+    await asyncio.wait_for(runner.run(handle, {"feeds": []}, max_iterations=3), timeout=10)
+
+    assert handle.iteration == 3
+    assert handle.status is RunStatus.STOPPED
+    # 빈 state 로 시작하면 idle 분기를 타 watcher 만 돈다 — iteration 마다 한 번씩
+    assert runtime.invoked == ["watcher", "watcher", "watcher"]

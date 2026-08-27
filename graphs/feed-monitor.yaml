@@ -41,13 +41,15 @@ spec:
       input_map: {new_items: state.new_items}
       output_map: {notified: output.notified}
 
+  # 한 iteration = START -> ... -> END. 반복은 그래프가 아니라 ServiceRunner 가
+  # 소유한다 — 그래프가 스스로 순환하면 한 번의 실행이 끝나지 않는다
   edges:
     - {from: START, to: watcher}
     - from: watcher
       to: classifier
       condition: malkuth.graphs.conditions:has_new_items
     - from: watcher
-      to: watcher
+      to: END
       condition: malkuth.graphs.conditions:idle
     - {from: classifier, to: notifier}
-    - {from: notifier, to: watcher}
+    - {from: notifier, to: END}

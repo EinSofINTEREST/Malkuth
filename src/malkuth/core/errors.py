@@ -288,6 +288,8 @@ class CircuitBreaker:
     open_category: ErrorCategory = ErrorCategory.INTERNAL
     open_code: str = ErrorCode.INTERNAL_001
     clock: Callable[[], float] = field(default_factory=lambda: _monotonic)
+    # 상태 전이 관찰자 — core 는 관측 계층에 의존하지 않으므로 소유자가 주입한다
+    on_transition: Callable[[CircuitState], None] | None = None
 
     _failures: int = field(default=0, init=False)
     _opened_at: float | None = field(default=None, init=False)
@@ -301,7 +303,7 @@ class CircuitBreaker:
             and self._opened_at is not None
             and self.clock() - self._opened_at >= self.reset_timeout_s
         ):
-            self._state = CircuitState.HALF_OPEN
+            self._transition(CircuitState.HALF_OPEN)
         return self._state
 
     def can_attempt(self) -> bool:
@@ -312,14 +314,22 @@ class CircuitBreaker:
         """성공 기록 — 실패 카운터를 리셋하고 closed 로 복귀한다."""
         self._failures = 0
         self._opened_at = None
-        self._state = CircuitState.CLOSED
+        self._transition(CircuitState.CLOSED)
 
     def record_failure(self) -> None:
         """실패 기록 — 임계 도달 시 open 으로 전이한다."""
         self._failures += 1
         if self._failures >= self.max_failures:
-            self._state = CircuitState.OPEN
             self._opened_at = self.clock()
+            self._transition(CircuitState.OPEN)
+
+    def _transition(self, state: CircuitState) -> None:
+        """상태를 바꾸고, 실제로 바뀐 경우에만 관찰자에게 알린다."""
+        if self._state is state:
+            return
+        self._state = state
+        if self.on_transition is not None:
+            self.on_transition(state)
 
     async def call(self, fn: Callable[[], Awaitable[T]]) -> T:
         """Run a call under the breaker.

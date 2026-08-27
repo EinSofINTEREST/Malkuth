@@ -18,12 +18,14 @@ from malkuth.protocols.mcp.session import (
     McpSession,
     ToolResult,
 )
+from malkuth.protocols.telemetry import STATUS_COMPLETED, STATUS_FAILED, McpTelemetry
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
     from malkuth.core.agent import ComponentHealth
     from malkuth.core.manifest import McpServerSpec
+    from malkuth.observability.metrics import Metrics
     from malkuth.protocols.mcp.transport import TransportSelector
 
 MCP_TOOL_PREFIX = "mcp__"
@@ -63,6 +65,14 @@ class McpClient:
     agent: str
     transports: TransportSelector
     sessions: dict[str, McpSession] = field(default_factory=dict)
+    # 주입 지점은 하나다 — telemetry 와 metrics 를 따로 받으면 한쪽만 주입됐을 때
+    # 계측이 조용히 반쪽이 되거나 서로 다른 registry 로 흩어진다
+    metrics: Metrics | None = None
+    _telemetry: McpTelemetry | None = field(default=None, init=False)
+
+    def __post_init__(self) -> None:
+        if self.metrics is not None:
+            self._telemetry = McpTelemetry(self.metrics, agent=self.agent)
 
     async def start(
         self, spec: McpServerSpec, *, timeout_s: float = DEFAULT_STARTUP_TIMEOUT_S
@@ -87,6 +97,7 @@ class McpClient:
             transport=self.transports.for_spec(spec),
             agent=self.agent,
             startup_timeout_s=timeout_s,
+            metrics=self.metrics,
         )
         tools = await session.initialize()
         self.sessions[spec.name] = session
@@ -129,6 +140,7 @@ class McpClient:
                 tool=tool,
                 duration_ms=int((time.monotonic() - started) * 1000),
             )
+            self._record(server=server, tool=tool, status=STATUS_FAILED)
             raise
 
         log.info(
@@ -138,7 +150,13 @@ class McpClient:
             tool=tool,
             duration_ms=int((time.monotonic() - started) * 1000),
         )
+        self._record(server=server, tool=tool, status=STATUS_COMPLETED)
         return result
+
+    def _record(self, *, server: str, tool: str, status: str) -> None:
+        """tool 호출을 메트릭에 남긴다 — telemetry 미주입 시 무동작."""
+        if self._telemetry is not None:
+            self._telemetry.tool_called(server=server, tool=tool, status=status)
 
     def tools(self) -> dict[str, str]:
         """바인딩된 tool 전체 — 네임스페이스 이름에서 소유 서버로."""

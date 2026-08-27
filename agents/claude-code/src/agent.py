@@ -81,6 +81,23 @@ def read_result(raw: str) -> dict[str, Any]:
     return {"result": parsed}
 
 
+def cli_error(raw: str) -> str | None:
+    """CLI 가 stdout 에 실어 보낸 실패 사유 — 실패가 아니면 ``None``.
+
+    구조화 출력은 실패도 0 이 아닌 종료코드와 **함께 stdout 에 JSON 으로**
+    남긴다 (``is_error: true`` + ``result``). 그 사유를 읽지 않으면
+    "exited with a failure" 만 남아 원인을 알 수 없다.
+    """
+    try:
+        parsed = json.loads(raw.strip() or "{}")
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, dict) or not parsed.get("is_error"):
+        return None
+    reason = parsed.get("result")
+    return str(reason) if reason else "claude code reported a failure"
+
+
 class ClaudeCodeExecutor:
     """Runs one task through the Claude Code CLI.
 
@@ -158,17 +175,22 @@ class ClaudeCodeExecutor:
             await self._terminate(process)
             raise
 
-        if process.returncode != 0:
+        raw = stdout.decode(errors="replace")
+        reported = cli_error(raw)
+
+        if process.returncode != 0 or reported is not None:
+            # CLI 는 실패 사유를 **stdout 의 JSON** 에 담는다 — stderr 만 보면
+            # 운영자가 받는 details 가 비어 원인을 잃는다 (실제로 그랬다)
             raise self._error(
                 ErrorCode.LLM_003,
                 ErrorCategory.MODEL,
-                "claude code exited with a failure",
+                reported or "claude code exited with a failure",
                 task,
                 returncode=str(process.returncode),
                 stderr=stderr.decode(errors="replace")[-500:],
             )
 
-        return read_result(stdout.decode(errors="replace"))
+        return read_result(raw)
 
     async def _terminate(self, process: asyncio.subprocess.Process) -> None:
         """자식 프로세스를 정리한다 — 종료를 기다려 좀비를 남기지 않는다."""

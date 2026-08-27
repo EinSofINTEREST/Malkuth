@@ -24,6 +24,7 @@ from agent import (  # noqa: E402 — 경로 삽입 뒤에야 import 가능
     COMMAND_ENV,
     ClaudeCodeExecutor,
     build_prompt,
+    cli_error,
     read_result,
     resolve_command,
 )
@@ -205,3 +206,44 @@ async def test_a_failed_stream_still_reports_done(monkeypatch):
 
     assert events[-1].type == "done"
     assert events[-1].status is TaskStatus.FAILED
+
+
+# --- CLI 가 stdout 에 싣는 실패 사유 ------------------------------------------------
+
+# 실제 CLI 출력에서 가져온 모양 — 실패도 stdout 에 JSON 으로 남는다
+NOT_LOGGED_IN = json.dumps(
+    {"is_error": True, "subtype": "success", "result": "Not logged in · Please run /login"}
+)
+
+
+def test_a_reported_failure_is_read_from_stdout():
+    """stderr 만 보면 details 가 비어 운영자가 원인을 잃는다 — 실제로 그랬다."""
+    assert cli_error(NOT_LOGGED_IN) == "Not logged in · Please run /login"
+
+
+def test_a_successful_result_is_not_an_error():
+    assert cli_error(json.dumps({"result": "완료"})) is None
+
+
+def test_plain_text_output_is_not_treated_as_an_error():
+    assert cli_error("그냥 문장") is None
+
+
+async def test_the_failure_reason_reaches_the_task_result(monkeypatch):
+    """#133 을 실제로 돌려보고 잡은 결함 — 사유 없는 실패는 진단할 수 없다."""
+    fake_cli(monkeypatch, stdout=NOT_LOGGED_IN, code=1)
+
+    result = await executor().execute(make_task())
+
+    assert result.status is TaskStatus.FAILED
+    assert result.error is not None
+    assert "Not logged in" in result.error.message
+
+
+async def test_a_reported_failure_with_a_zero_exit_still_fails(monkeypatch):
+    """종료코드만 믿으면 CLI 가 0 으로 끝낸 실패가 성공으로 보고된다."""
+    fake_cli(monkeypatch, stdout=NOT_LOGGED_IN, code=0)
+
+    result = await executor().execute(make_task())
+
+    assert result.status is TaskStatus.FAILED

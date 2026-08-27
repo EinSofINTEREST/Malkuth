@@ -288,7 +288,7 @@ class GraphBuilder:
             node_id=node.id,
             input=extract_input(node, state, schema=self._schema),
             config=TaskConfig(timeout_s=node.timeout_s or self._node_timeout_s),
-            trace=TraceContext(trace_id=trace_id),
+            trace=TraceContext(trace_id=trace_id, graph=self._topology.name),
         )
 
 

@@ -54,13 +54,26 @@ class TraceContext(BaseModel):
     trace_id: str
     span_id: str | None = None
     depth: int = 0
+    graph: str | None = None
+    """이 태스크를 낳은 그래프 — direct 요청은 ``None``.
+
+    에이전트는 이 값을 **메트릭 라벨로만** 쓰고 동작을 바꾸지 않는다:
+    전달받는 것과 가정하는 것은 다르며, 02 Rule 6 이 금지하는 것은 후자다.
+    """
 
     def child(self, span_id: str) -> TraceContext:
         """Derive a child context with incremented depth.
 
         깊이를 1 증가시킨 자식 컨텍스트를 만듭니다 (A2A 위임 시 사용).
+        ``graph`` 는 그대로 물려줍니다 — 위임된 태스크도 원래 어느 그래프의
+        일이었는지 알아야 메트릭이 갈라지지 않습니다.
         """
-        return TraceContext(trace_id=self.trace_id, span_id=span_id, depth=self.depth + 1)
+        return TraceContext(
+            trace_id=self.trace_id,
+            span_id=span_id,
+            depth=self.depth + 1,
+            graph=self.graph,
+        )
 
 
 class TaskConfig(BaseModel):

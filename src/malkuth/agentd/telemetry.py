@@ -29,12 +29,17 @@ def tool_source(name: str) -> str:
     return SOURCE_MCP if is_mcp_tool(name) else SOURCE_SKILLSET
 
 
+DIRECT_GRAPH = "direct"
+"""그래프 밖 태스크의 ``graph`` 라벨 — 빈 문자열은 미기록과 구분되지 않는다."""
+
+
 class ExecutorTelemetry:
     """Records the agent-execution metric contract.
 
-    태스크·모델·tool 경로의 표준 메트릭을 기록합니다. ``agent`` 이외의 라벨은
-    태스크가 아니라 배치 시점에 정해지므로 (에이전트가 어느 그룹·그래프에
-    속하는지) 생성 시 받습니다.
+    태스크·모델·tool 경로의 표준 메트릭을 기록합니다. ``agent`` 와 ``group`` 은
+    배치 시점에 정해지므로 생성 시 받고, ``graph`` 는 **태스크마다 다르므로**
+    (같은 에이전트가 그래프 노드로도 direct 요청으로도 불립니다) 기록 시점에
+    받습니다.
     """
 
     def __init__(
@@ -43,24 +48,27 @@ class ExecutorTelemetry:
         *,
         agent: str,
         group: str = "",
-        graph: str = "",
         provider: str = "",
         model: str = "",
     ) -> None:
         self._metrics = metrics
         self._agent = agent
         self._group = group
-        self._graph = graph
         self._provider = provider
         self._model = model
 
-    def task_finished(self, *, status: str, duration_s: float) -> None:
-        """태스크 종료 — 상태별 카운터와 latency 히스토그램."""
+    def task_finished(self, *, status: str, duration_s: float, graph: str | None = None) -> None:
+        """태스크 종료 — 상태별 카운터와 latency 히스토그램.
+
+        ``graph`` 가 없는 태스크(direct 요청)는 ``"direct"`` 로 표시합니다 —
+        빈 문자열이면 "그래프 없음"과 "라벨을 못 채움"이 구분되지 않습니다.
+        """
+        label = graph or DIRECT_GRAPH
         self._metrics.counter("malkuth_agent_tasks_total").labels(
-            agent=self._agent, group=self._group, graph=self._graph, status=status
+            agent=self._agent, group=self._group, graph=label, status=status
         ).inc()
         self._metrics.histogram("malkuth_agent_task_duration_seconds").labels(
-            agent=self._agent, group=self._group, graph=self._graph
+            agent=self._agent, group=self._group, graph=label
         ).observe(duration_s)
 
     def model_called(self, *, status: str, usage: ModelUsage | None = None) -> None:

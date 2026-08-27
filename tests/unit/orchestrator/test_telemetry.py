@@ -298,3 +298,73 @@ async def test_node_metrics_flow_through_the_submitter():
     assert (
         value(metrics, "malkuth_node_duration_seconds_count", graph=GRAPH, node_id="planner") == 1.0
     )
+
+
+# --- 에이전트 메트릭의 graph 라벨 (#113) -------------------------------------------
+
+
+async def test_a_graph_run_stamps_its_name_on_the_task():
+    """에이전트는 이 값을 통해서만 자기 그래프를 안다 — 가정하지 않고 전달받는다."""
+    seen: list[str | None] = []
+
+    class RecordingRuntime:
+        async def invoke(self, node, task) -> TaskResult:
+            seen.append(task.trace.graph)
+            return TaskResult.completed(task, output={})
+
+    graph = build_graph(make_mission(), RecordingRuntime())
+
+    await graph.ainvoke({"query": "q"})
+
+    assert seen
+    assert set(seen) == {GRAPH}
+
+
+async def test_the_agent_metric_carries_the_real_graph_name():
+    """빈 문자열이면 대시보드의 그래프별 분해가 무의미해진다 (#113 완료 조건)."""
+    from malkuth.agentd.executor import Executor
+    from malkuth.agentd.telemetry import ExecutorTelemetry
+    from tests.fixtures.fake_model import FakeModel, FakeTools, text
+
+    metrics = make_metrics()
+
+    class AgentdRuntime:
+        """오케스트레이터가 준 태스크를 실제 executor 에 흘려보낸다."""
+
+        async def invoke(self, node, task) -> TaskResult:
+            executor = Executor(
+                agent="researcher",
+                model=FakeModel([text("done")]),
+                tools=FakeTools(),
+                render=lambda _t: "prompt",
+                telemetry=ExecutorTelemetry(metrics, agent="researcher", group="research"),
+            )
+            return await executor.execute(task)
+
+    graph = build_graph(make_mission(), AgentdRuntime())
+
+    await graph.ainvoke({"query": "q"})
+
+    assert (
+        value(
+            metrics,
+            "malkuth_agent_tasks_total",
+            agent="researcher",
+            group="research",
+            graph=GRAPH,
+            status="completed",
+        )
+        > 0.0
+    )
+
+
+async def test_a2a_delegation_keeps_the_originating_graph():
+    """위임된 태스크가 그래프를 잃으면 같은 run 의 메트릭이 둘로 갈라진다."""
+    from malkuth.core.agent import TraceContext
+
+    original = TraceContext(trace_id="trace-1", graph=GRAPH)
+
+    delegated = original.child("span-2")
+
+    assert delegated.graph == GRAPH
+    assert delegated.depth == 1

@@ -69,13 +69,18 @@ What the suite does **not** prove, so nobody mistakes green for complete:
 - **No real embedding API.** Memory tests use `HashEmbedder`, which is deterministic
   but does not model semantic similarity. Recall *ranking quality* is therefore not
   measured; only the merge, threshold, and budget mechanics are.
-- **Protocol SDKs are behind Protocols.** MCP and A2A tests exercise our contracts and
-  error conversion, not the `mcp` / `a2a-sdk` bindings themselves. Integration tests
-  spawn a reference server process, which crosses a real process boundary but is not
-  the official SDK.
+- **SDK bindings are covered, but only in-process.** The `mcp` and `a2a-sdk`
+  bindings are exercised directly: MCP against a reference server process, A2A
+  against the SDK's own server routes over ASGI. Both cross the real SDK, but
+  neither crosses a container boundary — see the Docker note below.
 - **Docker-dependent tests skip without a daemon.** Integration and E2E tests report
   as skipped on machines without Docker. A green local run is not evidence that the
   container paths work — check the CI job.
-- **Graph runs are not driven end to end yet.** E2E covers direct requests against a
-  live agent; mission and service runs over the orchestrator require the run-submission
-  path, which is not wired to the CLI yet.
+- **A2A and memory are not covered end to end.** The allowlist and auto-recall
+  paths are proven in unit tests, not across live containers. Auto-recall ranking
+  in particular waits on a real embedding provider (see above) — running it with
+  `HashEmbedder` would restate what the unit tests already prove.
+- **Service iteration across a restart is untested.** The idle backoff, iteration
+  checkpoint, drain, and `GRAPH_005` paths are proven with a fake clock. What is
+  *not* proven is that a service run resumes correctly after the container it runs
+  in is actually restarted.

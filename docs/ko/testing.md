@@ -68,12 +68,17 @@ pytest-cov `--cov-fail-under=70` 로 강제. 핵심 경로 90%+ 와 에러 변�
 - **실제 embedding API 도 쓰지 않습니다.** 메모리 테스트는 `HashEmbedder` 를
   쓰는데, 결정적이지만 의미 유사도를 모델링하지는 않습니다. 따라서 recall 의
   **순위 품질**은 측정되지 않고, 병합·문턱·예산의 동작만 검증됩니다.
-- **프로토콜 SDK 는 Protocol 뒤에 있습니다.** MCP/A2A 테스트는 우리 계약과 에러
-  변환을 검증하지 `mcp`/`a2a-sdk` 바인딩 자체를 검증하지 않습니다. 통합
-  테스트는 참조 서버 프로세스를 띄워 실제 프로세스 경계를 넘지만, 공식 SDK 는
-  아닙니다.
+- **SDK 바인딩은 검증되지만, 프로세스 안에서만입니다.** `mcp` 와 `a2a-sdk`
+  바인딩을 직접 태웁니다 — MCP 는 참조 서버 프로세스로, A2A 는 SDK 자신의 서버
+  라우트를 ASGI 로. 둘 다 실제 SDK 를 지나지만 **컨테이너 경계는 넘지
+  않습니다** (아래 Docker 항목 참조).
 - **Docker 의존 테스트는 daemon 이 없으면 skip 됩니다.** 로컬 초록불이 컨테이너
   경로의 동작을 보장하지 않습니다 — CI job 을 확인해야 합니다.
-- **그래프 run 은 아직 전 구간으로 구동되지 않습니다.** E2E 는 살아있는
-  에이전트에 대한 direct 요청을 다루며, 오케스트레이터를 통한 mission/service
-  run 은 run 제출 경로가 CLI 에 배선된 뒤에 붙습니다.
+- **A2A 와 메모리는 전 구간으로 검증되지 않습니다.** allowlist 와 auto-recall
+  경로는 유닛에서 증명되며, 살아있는 컨테이너를 가로지르지는 않습니다. 특히
+  auto-recall 의 순위는 실제 embedding provider 를 기다립니다 (위 항목) —
+  `HashEmbedder` 로 돌리면 유닛이 이미 증명한 것을 되풀이할 뿐입니다.
+- **재시작을 넘는 service iteration 은 검증되지 않았습니다.** idle backoff,
+  iteration checkpoint, drain, `GRAPH_005` 는 fake clock 으로 증명됩니다.
+  증명되지 **않은** 것은 구동 중인 컨테이너를 실제로 재시작한 뒤 service run 이
+  올바르게 이어지는가입니다.

@@ -37,6 +37,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 
     from malkuth.agentd.telemetry import ExecutorTelemetry
+    from malkuth.core.skill import ArtifactStore
 
     TaskRecall = Callable[[TaskRequest], Awaitable[str]]
     """태스크 진입 시 1회 회상해 프롬프트에 붙일 텍스트를 만드는 콜러블."""
@@ -147,8 +148,12 @@ class Executor:
         on_cleanup: Callable[[], None] | None = None,
         telemetry: ExecutorTelemetry | None = None,
         recall: TaskRecall | None = None,
+        artifacts: ArtifactStore | None = None,
     ) -> None:
         self._agent = agent
+        # 미주입 시 skill 은 ctx.artifacts is None 을 받는다 — 지금까지 **항상**
+        # 그랬고, 그래서 02 Output Discipline 의 참조 전달 경로가 죽어 있었다
+        self._artifacts = artifacts
         self._recall = recall
         self._telemetry = telemetry
         self._model = model
@@ -304,7 +309,12 @@ class Executor:
         하나가 실패해도 형제 호출을 중도 취소하지 않는다 — 취소된 호출은
         결과도 메트릭도 남기지 못해, 다중 tool 턴의 집계가 조용히 비게 된다.
         """
-        ctx = SkillContext(agent=self._agent, task_id=task.task_id, run_id=task.run_id)
+        ctx = SkillContext(
+            agent=self._agent,
+            task_id=task.task_id,
+            run_id=task.run_id,
+            artifacts=self._artifacts,
+        )
         coros = [self._run_tool(call, task, ctx) for call in calls]
 
         try:
@@ -450,7 +460,12 @@ class Executor:
         # 태스크가 기본값을 그대로 쓰면 executor 설정을 따른다 —
         # `or` 로 고르면 TaskConfig 의 기본값(20)이 항상 이겨 설정이 무시된다
         max_turns = min(task.config.max_turns, self._config.max_turns)
-        ctx = SkillContext(agent=self._agent, task_id=task.task_id, run_id=task.run_id)
+        ctx = SkillContext(
+            agent=self._agent,
+            task_id=task.task_id,
+            run_id=task.run_id,
+            artifacts=self._artifacts,
+        )
 
         try:
             for turn in range(max_turns):

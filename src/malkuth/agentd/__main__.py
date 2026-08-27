@@ -46,6 +46,9 @@ EXECUTOR_ENV = "MALKUTH_EXECUTOR"
 
 ECHO_EXECUTOR = "echo"
 
+ARTIFACT_ROOT_ENV = "MALKUTH_ARTIFACT_ROOT"
+"""Artifact 저장 루트 — runtime 이 주입한다. 미주입 시 저장소 없음."""
+
 ROOT_ENV = "MALKUTH_ROOT"
 DEFAULT_ROOT = "/app"
 """모듈 registry 루트 — 이미지가 modules/ 를 어디에 두는지."""
@@ -273,7 +276,25 @@ async def build_executor(manifest: AgentManifest, *, metrics: Metrics | None = N
         render=lambda task: _render(result, task),
         tool_schemas=_executable_schemas(result, registry_tools),
         telemetry=_telemetry_for(manifest, metrics),
+        artifacts=_artifact_store(manifest),
     )
+
+
+def _artifact_store(manifest: AgentManifest) -> Any:
+    """이 에이전트의 artifact 저장소 — 경로 미주입 시 None.
+
+    02 Output Discipline 의 참조 전달 경로다. 주입하지 않으면 skill 이
+    ``ctx.artifacts is None`` 을 받아 대용량 산출물을 남길 곳이 없다.
+
+    스코프는 우선 ``local`` 뿐이다 — group/global 해석과 quota 는 #140.
+    """
+    root = os.environ.get(ARTIFACT_ROOT_ENV)
+    if not root:
+        return None
+
+    from malkuth.artifacts import FilesystemArtifactStore
+
+    return FilesystemArtifactStore(root=Path(root), scope=manifest.name)
 
 
 def _memory_access() -> Any:

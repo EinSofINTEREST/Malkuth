@@ -22,12 +22,12 @@ spec:
 
   nodes:
     - id: scanner
-      agent: agents/planner@0.2.0
+      agent: agents/planner@0.3.0
       input_map: {spaces: state.spaces}
       output_map: {pending_spaces: output.pending_spaces}
 
     - id: compactor
-      agent: agents/writer@0.2.0
+      agent: agents/writer@0.3.0
       input_map: {pending_spaces: state.pending_spaces}
       output_map: {compacted: output.compacted}
 

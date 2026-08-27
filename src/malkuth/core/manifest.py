@@ -129,7 +129,13 @@ class ModelConfig(BaseModel):
     provider: str
     name: str
     max_tokens: int | None = None
-    temperature: float | None = None
+    effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None
+    """출력 품질/비용 조절.
+
+    최신 모델은 sampling 파라미터(``temperature``/``top_p``/``top_k``)를
+    받지 않는다 — 보내면 호출이 실패한다. 의도(품질과 비용의 균형)는
+    ``output_config.effort`` 가 이어받는다.
+    """
 
 
 class ModuleRef(BaseModel):

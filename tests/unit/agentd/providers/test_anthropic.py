@@ -101,22 +101,37 @@ async def test_max_tokens_falls_back_to_the_default():
 
 
 async def test_declared_limits_reach_the_request():
-    provider = model(Message([Block(type="text", text="done")]), max_tokens=1024, temperature=0.3)
+    provider = model(Message([Block(type="text", text="done")]), max_tokens=1024, effort="high")
 
     await provider.run("prompt", [])
 
     request = provider.client.messages.requests[0]
     assert request["max_tokens"] == 1024
-    assert request["temperature"] == 0.3
+    assert request["output_config"] == {"effort": "high"}
 
 
-async def test_temperature_is_omitted_when_undeclared():
+async def test_effort_is_omitted_when_undeclared():
     """선언하지 않은 값을 임의로 채우면 manifest 가 계약이 아니게 된다."""
     provider = model(Message([Block(type="text", text="done")]))
 
     await provider.run("prompt", [])
 
-    assert "temperature" not in provider.client.messages.requests[0]
+    assert "output_config" not in provider.client.messages.requests[0]
+
+
+async def test_sampling_parameters_are_never_sent():
+    """현재 API 는 temperature 를 받지 않는다 — 보내면 호출이 TypeError 로 죽는다.
+
+    E2E 를 표준 실행기로 돌리자마자 첫 모델 호출에서 드러났다 (#157).
+    유닛은 FakeModel 을, E2E 는 echo 대역을 쓰고 있어 한 번도 잡히지 않았다.
+    """
+    provider = model(Message([Block(type="text", text="done")]), effort="high")
+
+    await provider.run("prompt", [])
+
+    request = provider.client.messages.requests[0]
+    for rejected in ("temperature", "top_p", "top_k"):
+        assert rejected not in request
 
 
 async def test_tool_schemas_keep_the_mcp_namespace():

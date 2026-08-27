@@ -21,16 +21,38 @@ MAX_BODY_BYTES = 1 << 20
 
 
 def respond_to(prompt: str) -> dict[str, Any]:
-    """Derive a deterministic response from the prompt.
+    """Derive a deterministic Messages API response from the prompt.
 
     프롬프트로부터 결정적 응답을 만듭니다 — 해시를 써서 같은 입력이 항상 같은
     출력을 내되, 서로 다른 입력은 구분됩니다.
+
+    **Anthropic Messages API 의 응답 모양**을 따릅니다. 자체 형식으로 답하면
+    에이전트가 이 대역을 쓸 수 없어, E2E 가 실제 실행 경로를 태우지 못합니다
+    (#153).
     """
     digest = hashlib.blake2b(prompt.encode("utf-8"), digest_size=6).hexdigest()
     return {
-        "content": _content_for(prompt, digest),
-        "usage": {"input_tokens": len(prompt) // 4, "output_tokens": 8},
+        "id": f"msg_{digest}",
+        "type": "message",
+        "role": "assistant",
+        "model": "fake-model",
+        "content": [{"type": "text", "text": _content_for(prompt, digest)}],
+        "stop_reason": "end_turn",
+        "stop_sequence": None,
+        "usage": {"input_tokens": max(len(prompt) // 4, 1), "output_tokens": 8},
     }
+
+
+def prompt_of(payload: dict[str, Any]) -> str:
+    """요청에서 프롬프트를 꺼낸다 — Messages API 는 ``messages[]`` 로 싣는다."""
+    parts: list[str] = []
+    for message in payload.get("messages") or []:
+        content = message.get("content")
+        if isinstance(content, str):
+            parts.append(content)
+        elif isinstance(content, list):
+            parts.extend(block.get("text", "") for block in content if isinstance(block, dict))
+    return "\n".join(parts)
 
 
 _ASKS_FOR = re.compile(r"exactly these keys: (.+)")
@@ -66,7 +88,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error(400, "invalid json")
             return
 
-        body = json.dumps(respond_to(str(payload.get("prompt", "")))).encode()
+        body = json.dumps(respond_to(prompt_of(payload))).encode()
         self.send_response(200)
         self.send_header("content-type", "application/json")
         self.send_header("content-length", str(len(body)))

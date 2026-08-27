@@ -62,10 +62,11 @@ Check names and merge-gate wiring: [ci/status-checks.md](ci/status-checks.md).
 
 What the suite does **not** prove, so nobody mistakes green for complete:
 
-- **No real model is ever called.** Unit tests use `FakeModel`, E2E uses a
-  deterministic fake provider container. Behaviour that only appears with a real
-  provider — token limits, streaming quirks, provider-side rate limiting — is not
-  covered here.
+- **No real model is ever called.** Unit tests use `FakeModel`; E2E runs the
+  **standard executor** against a deterministic fake provider that speaks the
+  Messages API — so prompt rendering, the tool loop, output shaping, and the
+  provider binding all execute. What is still absent is a real provider's own
+  behaviour: token limits, streaming quirks, provider-side rate limiting.
 - **No real embedding API.** Memory tests use `HashEmbedder`, which is deterministic
   but does not model semantic similarity. Recall *ranking quality* is therefore not
   measured; only the merge, threshold, and budget mechanics are.
@@ -76,10 +77,13 @@ What the suite does **not** prove, so nobody mistakes green for complete:
 - **Docker-dependent tests skip without a daemon.** Integration and E2E tests report
   as skipped on machines without Docker. A green local run is not evidence that the
   container paths work — check the CI job.
-- **A2A and memory are not covered end to end.** The allowlist and auto-recall
-  paths are proven in unit tests, not across live containers. Auto-recall ranking
-  in particular waits on a real embedding provider (see above) — running it with
-  `HashEmbedder` would restate what the unit tests already prove.
+- **A2A is not covered end to end.** The allowlist path is proven in unit tests
+  against the SDK's own routes, not across live containers.
+- **Auto-recall is not covered end to end.** The embedding provider binding
+  exists and is exercised against a fake endpoint, but the E2E stack does not
+  yet serve one — so memory accumulation feeding a later task's prompt is
+  proven only in unit tests. Ranking quality remains unmeasured either way
+  (see the embedding note above).
 - **Service iteration across a restart is untested.** The idle backoff, iteration
   checkpoint, drain, and `GRAPH_005` paths are proven with a fake clock. What is
   *not* proven is that a service run resumes correctly after the container it runs

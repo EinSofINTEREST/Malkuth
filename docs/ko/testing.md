@@ -62,9 +62,11 @@ pytest-cov `--cov-fail-under=70` 로 강제. 핵심 경로 90%+ 와 에러 변�
 
 이 스위트가 **증명하지 않는 것** — 초록불을 완전함으로 오해하지 않도록:
 
-- **실제 모델은 한 번도 호출하지 않습니다.** 유닛은 `FakeModel`, E2E 는 결정적
-  fake provider 컨테이너를 씁니다. 실 provider 에서만 드러나는 동작(토큰 한도,
-  스트리밍 특이사항, provider 측 rate limit)은 여기서 다루지 않습니다.
+- **실제 모델은 한 번도 호출하지 않습니다.** 유닛은 `FakeModel` 을, E2E 는
+  Messages API 를 흉내내는 결정적 fake provider 를 상대로 **표준 실행기**를
+  돌립니다 — 프롬프트 렌더, tool loop, 출력 정형, provider 바인딩이 전부
+  실행됩니다. 여전히 없는 것은 실 provider 자신의 동작입니다: 토큰 한도,
+  스트리밍 특이사항, provider 측 rate limit.
 - **실제 embedding API 도 쓰지 않습니다.** 메모리 테스트는 `HashEmbedder` 를
   쓰는데, 결정적이지만 의미 유사도를 모델링하지는 않습니다. 따라서 recall 의
   **순위 품질**은 측정되지 않고, 병합·문턱·예산의 동작만 검증됩니다.
@@ -74,10 +76,13 @@ pytest-cov `--cov-fail-under=70` 로 강제. 핵심 경로 90%+ 와 에러 변�
   않습니다** (아래 Docker 항목 참조).
 - **Docker 의존 테스트는 daemon 이 없으면 skip 됩니다.** 로컬 초록불이 컨테이너
   경로의 동작을 보장하지 않습니다 — CI job 을 확인해야 합니다.
-- **A2A 와 메모리는 전 구간으로 검증되지 않습니다.** allowlist 와 auto-recall
-  경로는 유닛에서 증명되며, 살아있는 컨테이너를 가로지르지는 않습니다. 특히
-  auto-recall 의 순위는 실제 embedding provider 를 기다립니다 (위 항목) —
-  `HashEmbedder` 로 돌리면 유닛이 이미 증명한 것을 되풀이할 뿐입니다.
+- **A2A 는 전 구간으로 검증되지 않습니다.** allowlist 경로는 SDK 자신의
+  라우트를 상대로 유닛에서 증명되며, 살아있는 컨테이너를 가로지르지는
+  않습니다.
+- **auto-recall 은 전 구간으로 검증되지 않습니다.** embedding provider
+  바인딩은 존재하고 대역 endpoint 로 검증되지만, E2E 스택이 아직 그것을
+  제공하지 않습니다 — 메모리 축적이 후속 태스크 프롬프트로 들어가는 것은
+  유닛에서만 증명됩니다. 순위 품질은 어느 쪽이든 측정되지 않습니다 (위 항목).
 - **재시작을 넘는 service iteration 은 검증되지 않았습니다.** idle backoff,
   iteration checkpoint, drain, `GRAPH_005` 는 fake clock 으로 증명됩니다.
   증명되지 **않은** 것은 구동 중인 컨테이너를 실제로 재시작한 뒤 service run 이

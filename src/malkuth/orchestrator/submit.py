@@ -98,8 +98,8 @@ class RunSubmitter:
     manager: RunManager = field(default_factory=RunManager)
     checkpointer: BaseCheckpointSaver[Any] | None = None
     node_timeout_s: float = DEFAULT_NODE_TIMEOUT_S
+    # 구동 중인 service 루프 — fire-and-forget 을 막기 위해 소유자를 명시한다 (07 Async 5)
     services: dict[str, asyncio.Task[RunHandle]] = field(default_factory=dict)
-    """구동 중인 service 루프 — fire-and-forget 을 막기 위해 소유자를 명시한다 (07 Async 5)."""
 
     async def submit(
         self,
@@ -311,12 +311,14 @@ class RunSubmitter:
             )
 
         previous = self.manager.get(run_id)
-        if previous.status in (RunStatus.RUNNING, RunStatus.DRAINING):
-            # 살아있는 run 을 재개하면 같은 iteration 을 두 벌이 돌린다
+        if previous.status is not RunStatus.HALTED:
+            # 살아있는 run 은 같은 iteration 을 두 벌이 돌게 되고, drain 으로
+            # 정상 정지한 run 은 재개가 아니라 새로 시작해야 한다 — 둘 다
+            # 놀라운 재시작이므로 halted 만 허용한다
             raise MalkuthError(
                 category=ErrorCategory.GRAPH,
                 code=ErrorCode.GRAPH_001,
-                message="cannot resume a run that is still active",
+                message="only a halted run can be resumed",
                 details={"run_id": run_id, "status": str(previous.status)},
             )
 

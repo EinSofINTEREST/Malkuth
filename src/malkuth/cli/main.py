@@ -311,18 +311,30 @@ def _run_service(
     뒤 정지하므로 반쯤 진행된 회차가 남지 않습니다.
     """
     import asyncio
+    import contextlib
+    import signal
 
     async def drive() -> Any:
         handle = await submitter.start_service(
             topology, payload, run_id=args.run_id, max_iterations=args.iterations
         )
         task = submitter.services[handle.run_id]
+
+        # 인터럽트를 **취소가 일어나기 전에** 잡아 drain 을 요청한다.
+        # 취소된 뒤에 정리하려 하면 그 대기까지 함께 취소되고, shield 로 감싸도
+        # 바깥이 끝나면서 이벤트 루프가 함께 닫혀 완료를 볼 수 없다
+        loop = asyncio.get_running_loop()
+        installed = False
+        with contextlib.suppress(NotImplementedError):  # Windows 는 미지원
+            loop.add_signal_handler(signal.SIGINT, handle.request_drain)
+            installed = True
+
         try:
             await task
-        except asyncio.CancelledError:
-            # Ctrl-C 는 정지 요청이지 파괴가 아니다
-            await submitter.drain_service(handle.run_id)
-            raise
+        finally:
+            if installed:
+                with contextlib.suppress(NotImplementedError):
+                    loop.remove_signal_handler(signal.SIGINT)
         return handle
 
     try:

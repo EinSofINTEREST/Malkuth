@@ -216,6 +216,20 @@ async def test_resume_without_a_checkpointer_is_rejected():
     assert exc_info.value.code == ErrorCode.STOR_002
 
 
+async def test_resuming_a_cleanly_stopped_run_is_rejected():
+    """정상 정지한 run 은 재개가 아니라 새로 시작해야 한다 — 놀라운 재시작 방지."""
+    sub = submitter(checkpointer=MemorySaver())
+    topology = make_service()
+    handle = await sub.start_service(topology, {"feeds": []}, max_iterations=1, sleep=no_sleep)
+    await asyncio.wait_for(sub.services[handle.run_id], timeout=10)
+    assert handle.status is RunStatus.STOPPED
+
+    with pytest.raises(MalkuthError) as exc_info:
+        await sub.resume_service(topology, handle.run_id)
+
+    assert exc_info.value.code == ErrorCode.GRAPH_001
+
+
 async def test_resuming_a_live_run_is_rejected():
     """살아있는 run 을 재개하면 같은 iteration 을 두 벌이 돌린다."""
     sub = submitter(checkpointer=MemorySaver())

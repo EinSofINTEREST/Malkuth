@@ -136,6 +136,19 @@ malkuth run graphs/research-pipeline.yaml \
 
 에이전트는 `make e2e-up` 으로 먼저 띄웁니다 (fake 모델 provider — 실 LLM 미호출).
 
+Service 그래프는 완주 개념이 없으므로 `--service` 로 구동합니다:
+
+```bash
+malkuth run graphs/feed-monitor.yaml --service \
+  --agent-token "${MALKUTH_AGENT_TOKEN:-e2e-token}" \
+  --agent watcher=http://127.0.0.1:18082
+```
+
+한 iteration 은 `START → … → END` 한 바퀴이고, 중단할 때까지 반복합니다.
+`Ctrl-C` 는 즉시 종료가 아니라 **drain** 입니다 — 진행 중 iteration 을 마친 뒤
+정지하므로 반쯤 진행된 회차가 남지 않습니다. 정해진 횟수만 돌리려면
+`--iterations N` 을 씁니다.
+
 Direct 요청은 그래프 run 없이 어느 에이전트의 Control API 에나 닿습니다:
 
 ```bash

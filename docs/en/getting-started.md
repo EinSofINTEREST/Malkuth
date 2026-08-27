@@ -136,6 +136,19 @@ malkuth run graphs/research-pipeline.yaml \
 
 Bring the agents up first with `make e2e-up` (fake model provider, no real LLM calls).
 
+Service graphs have no completion, so they are driven with `--service` instead:
+
+```bash
+malkuth run graphs/feed-monitor.yaml --service \
+  --agent-token "${MALKUTH_AGENT_TOKEN:-e2e-token}" \
+  --agent watcher=http://127.0.0.1:18082
+```
+
+One iteration is a single `START → … → END` pass; the loop repeats until you
+interrupt it. `Ctrl-C` **drains** rather than kills — the current iteration finishes
+first, so no half-done pass is left behind. Use `--iterations N` to stop after a
+fixed number of passes.
+
 Direct requests reach any agent's Control API without a graph run:
 
 ```bash

@@ -282,6 +282,10 @@ def cmd_run(args: argparse.Namespace) -> int:
         runtime=ControlNodeRuntime(clients=_control_clients(args)),
         checkpointer=build_checkpointer(args.checkpointer),
     )
+
+    if getattr(args, "service", False):
+        return _run_service(submitter, topology, payload, args)
+
     result = asyncio.run(submitter.submit(topology, payload, run_id=args.run_id))
 
     emit(
@@ -295,6 +299,49 @@ def cmd_run(args: argparse.Namespace) -> int:
         as_json=args.json,
     )
     return EXIT_OK if result.ok else EXIT_FAILED
+
+
+def _run_service(
+    submitter: Any, topology: Any, payload: dict[str, Any], args: argparse.Namespace
+) -> int:
+    """Drive a service graph until interrupted or bounded.
+
+    상주 그래프를 구동합니다. ``--iterations`` 가 없으면 인터럽트까지 돌고,
+    인터럽트는 **즉시 취소가 아니라 drain** 입니다 — 진행 중 iteration 을 마친
+    뒤 정지하므로 반쯤 진행된 회차가 남지 않습니다.
+    """
+    import asyncio
+
+    async def drive() -> Any:
+        handle = await submitter.start_service(
+            topology, payload, run_id=args.run_id, max_iterations=args.iterations
+        )
+        task = submitter.services[handle.run_id]
+        try:
+            await task
+        except asyncio.CancelledError:
+            # Ctrl-C 는 정지 요청이지 파괴가 아니다
+            await submitter.drain_service(handle.run_id)
+            raise
+        return handle
+
+    try:
+        handle = asyncio.run(drive())
+    except KeyboardInterrupt:
+        emit({"graph": topology.metadata.name, "status": "interrupted"}, as_json=args.json)
+        return EXIT_FAILED
+
+    emit(
+        {
+            "run_id": handle.run_id,
+            "graph": topology.metadata.name,
+            "status": str(handle.status),
+            "iterations": handle.iteration,
+            "error": handle.error.message if handle.error else None,
+        },
+        as_json=args.json,
+    )
+    return EXIT_OK if handle.error is None else EXIT_FAILED
 
 
 def _control_clients(args: argparse.Namespace) -> dict[str, Any]:
@@ -371,6 +418,17 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         dest="agent_token",
         help="control api token (defaults to $MALKUTH_AGENT_TOKEN)",
+    )
+    run.add_argument(
+        "--service",
+        action="store_true",
+        help="drive a service graph's perpetual loop instead of a mission run",
+    )
+    run.add_argument(
+        "--iterations",
+        type=int,
+        default=None,
+        help="stop a service run after N iterations (default: until interrupted)",
     )
     run.set_defaults(handler=cmd_run)
 

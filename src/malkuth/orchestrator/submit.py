@@ -9,6 +9,7 @@ Run 슬롯은 ``RunManager`` 가 관리하며, **슬롯 반납을 finally 로 �
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
@@ -17,17 +18,16 @@ import structlog
 
 from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
 from malkuth.orchestrator.builder import build_graph
-from malkuth.orchestrator.run import RunManager, RunStatus
+from malkuth.orchestrator.run import RunHandle, RunManager, RunStatus, ServiceRunner
 from malkuth.orchestrator.state import resolve_state_schema, validate_state
 from malkuth.orchestrator.topology import GraphMode
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Awaitable, Callable, Mapping
 
     from langgraph.checkpoint.base import BaseCheckpointSaver
 
     from malkuth.orchestrator.builder import NodeRuntime
-    from malkuth.orchestrator.run import RunHandle
     from malkuth.orchestrator.topology import GraphTopology
 
 DEFAULT_NODE_TIMEOUT_S = 300.0
@@ -98,6 +98,8 @@ class RunSubmitter:
     manager: RunManager = field(default_factory=RunManager)
     checkpointer: BaseCheckpointSaver[Any] | None = None
     node_timeout_s: float = DEFAULT_NODE_TIMEOUT_S
+    services: dict[str, asyncio.Task[RunHandle]] = field(default_factory=dict)
+    """구동 중인 service 루프 — fire-and-forget 을 막기 위해 소유자를 명시한다 (07 Async 5)."""
 
     async def submit(
         self,
@@ -184,6 +186,192 @@ class RunSubmitter:
 
         handle = self.manager.acquire(topology, run_id=run_id)
         return await self._drive(topology, handle, initial_state or {})
+
+    async def start_service(
+        self,
+        topology: GraphTopology,
+        initial_state: Mapping[str, Any],
+        *,
+        run_id: str | None = None,
+        max_iterations: int | None = None,
+        is_idle: Callable[[dict[str, Any]], bool] | None = None,
+        sleep: Callable[[float], Awaitable[None]] | None = None,
+        start_iteration: int = 0,
+    ) -> RunHandle:
+        """Start a service graph's perpetual loop.
+
+        상주 그래프의 iteration 루프를 시작하고 즉시 핸들을 돌려줍니다 —
+        완주 개념이 없으므로 결과를 기다리지 않습니다. 정지는 ``drain_service``
+        로 요청합니다.
+
+        Args:
+            topology: The validated service topology.
+            initial_state: The starting state.
+            run_id: Explicit run id; generated when omitted.
+            max_iterations: Bound for tests; unbounded when omitted.
+            is_idle: Decides whether an iteration found no work.
+            sleep: Injected sleep for idle backoff — 테스트가 실제로 대기하지
+                않게 합니다.
+            start_iteration: Iteration counter to continue from — resume 경로가
+                이전 회차를 이어받습니다.
+
+        Returns:
+            The run handle — drain 요청과 상태 조회 창구입니다.
+
+        Raises:
+            MalkuthError: GRAPH/``GRAPH_001`` if the graph is not a service graph.
+        """
+        # mode 검사가 먼저다 — state 문제까지 겹치면 GRAPH_003 이 앞서 나와
+        # 운영자가 진짜 원인(mode 위반)을 놓친다
+        if topology.spec.mode is not GraphMode.SERVICE:
+            raise MalkuthError(
+                category=ErrorCategory.GRAPH,
+                code=ErrorCode.GRAPH_001,
+                message="only service graphs run as a perpetual loop",
+                details={"graph": topology.metadata.name, "mode": str(topology.spec.mode)},
+            )
+
+        self._reject_invalid_state(topology, initial_state)
+
+        handle = self.manager.acquire(topology, run_id=run_id or f"svc-{uuid4().hex[:12]}")
+        # 태스크가 돌기 전에 세워야 한다 — checkpoint thread_id 와 max_iterations
+        # 판정이 둘 다 이 값을 본다
+        handle.iteration = start_iteration
+        runner = ServiceRunner(
+            topology,
+            build_graph(
+                topology,
+                self.runtime,
+                checkpointer=self.checkpointer,
+                node_timeout_s=self.node_timeout_s,
+            ),
+            sleep=sleep,
+        )
+        task = asyncio.create_task(
+            runner.run(
+                handle,
+                seed_state(initial_state, run_id=handle.run_id),
+                max_iterations=max_iterations,
+                is_idle=is_idle,
+            ),
+            name=f"service-run:{handle.run_id}",
+        )
+        self.services[handle.run_id] = task
+        # 루프가 어떻게 끝나든 슬롯이 반납되어야 한다 — 예외로 끝나도 마찬가지다
+        task.add_done_callback(lambda _t: self._release_service(handle))
+
+        log.info("service run started", graph=topology.metadata.name, run_id=handle.run_id)
+        return handle
+
+    def _release_service(self, handle: RunHandle) -> None:
+        """구동이 끝난 service run 의 슬롯과 태스크 참조를 정리한다."""
+        self.services.pop(handle.run_id, None)
+        # 루프가 스스로 halted/stopped 를 기록했으면 그 상태를 존중한다
+        outcome = handle.status if handle.status is not RunStatus.RUNNING else RunStatus.STOPPED
+        self.manager.release(handle.run_id, outcome)
+
+    async def resume_service(
+        self,
+        topology: GraphTopology,
+        run_id: str,
+        *,
+        max_iterations: int | None = None,
+        is_idle: Callable[[dict[str, Any]], bool] | None = None,
+        sleep: Callable[[float], Awaitable[None]] | None = None,
+    ) -> RunHandle:
+        """Restart a halted service run from its last iteration.
+
+        ``GRAPH_005`` 로 정지한 상주 run 을 마지막 iteration 다음부터 재개합니다
+        (05 Incident Response). 원인이 해소되지 않았다면 다시 정지하지만,
+        그때도 실패 회차는 checkpoint 로 남습니다.
+
+        Args:
+            topology: The service topology this run belongs to.
+            run_id: The halted run to resume.
+            max_iterations: Bound for tests; unbounded when omitted.
+            is_idle: Decides whether an iteration found no work.
+            sleep: Injected sleep for idle backoff.
+
+        Returns:
+            The handle of the resumed run.
+
+        Raises:
+            MalkuthError: STORAGE/``STOR_002`` without a checkpointer —
+                이어갈 지점이 없는데 재개하면 처음부터 다시 돌아 부수효과가
+                두 번 일어납니다.
+            MalkuthError: NOT_FOUND/``NF_001`` if the run is unknown.
+            MalkuthError: GRAPH/``GRAPH_001`` if the run is still active.
+        """
+        if self.checkpointer is None:
+            raise MalkuthError(
+                category=ErrorCategory.STORAGE,
+                code=ErrorCode.STOR_002,
+                message="cannot resume without a checkpointer",
+                details={"run_id": run_id, "graph": topology.metadata.name},
+            )
+
+        previous = self.manager.get(run_id)
+        if previous.status in (RunStatus.RUNNING, RunStatus.DRAINING):
+            # 살아있는 run 을 재개하면 같은 iteration 을 두 벌이 돌린다
+            raise MalkuthError(
+                category=ErrorCategory.GRAPH,
+                code=ErrorCode.GRAPH_001,
+                message="cannot resume a run that is still active",
+                details={"run_id": run_id, "status": str(previous.status)},
+            )
+
+        resumed = await self.start_service(
+            topology,
+            previous.state,
+            run_id=f"{run_id}:resumed",
+            max_iterations=max_iterations,
+            is_idle=is_idle,
+            sleep=sleep,
+            # 재개는 다음 회차부터다 — 실패한 회차를 다시 돌리면 부수효과가 겹친다
+            start_iteration=previous.iteration,
+        )
+        log.info(
+            "service run resumed",
+            graph=topology.metadata.name,
+            run_id=resumed.run_id,
+            iteration=previous.iteration,
+        )
+        return resumed
+
+    async def drain_service(self, run_id: str, *, timeout_s: float | None = None) -> RunHandle:
+        """Ask a service run to stop after its current iteration.
+
+        진행 중 iteration 을 마친 뒤 정지하도록 요청하고 완료를 기다립니다 —
+        즉시 취소가 아니므로 반쯤 진행된 iteration 이 남지 않습니다.
+
+        Args:
+            run_id: The service run to drain.
+            timeout_s: Wait budget; unbounded when omitted.
+
+        Returns:
+            The stopped run handle.
+
+        Raises:
+            MalkuthError: NOT_FOUND/``NF_001`` if the run is unknown.
+            TimeoutError: If the iteration does not finish within the budget.
+        """
+        handle = self.manager.get(run_id)
+        handle.request_drain()
+
+        task = self.services.get(run_id)
+        if task is None:
+            return handle
+
+        if timeout_s is None:
+            await task
+        else:
+            await asyncio.wait_for(asyncio.shield(task), timeout=timeout_s)
+        return handle
+
+    async def stop_services(self) -> None:
+        """구동 중인 service run 을 전부 drain 한다 — 종료 경로에서 태스크를 남기지 않는다."""
+        for run_id in list(self.services):
+            await self.drain_service(run_id)
 
     async def _drive(
         self,

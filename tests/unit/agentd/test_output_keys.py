@@ -219,3 +219,46 @@ async def test_the_assembled_executor_carries_the_declared_keys(
 
     # 조립부가 콜러블을 넘겨야 태스크마다 템플릿 선언을 볼 수 있다
     assert callable(built._output_keys)
+
+
+# --- 실제 promptset 을 로드해 키를 고른다 -------------------------------------------
+
+
+@pytest.fixture
+def planner_manifest():
+    """레퍼런스 manifest — 실제 promptset 을 가리킨다."""
+    from pathlib import Path
+
+    import yaml
+
+    from malkuth.core.manifest import AgentManifest
+
+    declared = Path("agents/planner/manifest.yaml").read_text(encoding="utf-8")
+    return AgentManifest.model_validate(yaml.safe_load(declared))
+
+
+@pytest.mark.parametrize(
+    ("node_id", "expected"),
+    [
+        ("planner", ("plan", "needs_research")),
+        ("classifier", ("seen_ids",)),
+        ("scanner", ("pending_spaces",)),
+        (None, ()),
+    ],
+)
+async def test_keys_come_from_the_loaded_promptset(
+    monkeypatch, planner_manifest, node_id, expected
+):
+    """**로드된** promptset 에서 골라야 한다 — 모양을 잘못 짚으면 AttributeError 다.
+
+    실제로 그랬다: `result.promptset.spec` 로 접근했는데 `LoadedPromptset` 에는
+    그 속성이 없다. 이 경로를 태우는 테스트가 없어 컨테이너에서야 드러났다.
+    """
+    from malkuth.agentd.__main__ import build_executor
+
+    monkeypatch.setenv("MALKUTH_ROOT", ".")
+    monkeypatch.setenv("MALKUTH_EXECUTOR", "")
+
+    built = await build_executor(planner_manifest)
+
+    assert tuple(built._output_keys(make_task(node_id=node_id))) == expected

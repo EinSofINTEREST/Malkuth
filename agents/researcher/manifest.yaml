@@ -2,7 +2,7 @@ apiVersion: malkuth/v1
 kind: Agent
 metadata:
   name: researcher
-  version: 0.2.0
+  version: 0.3.0
   group: research
   description: 계획을 근거 수집으로 옮기는 에이전트
 
@@ -11,7 +11,7 @@ spec:
     provider: anthropic
     name: claude-sonnet-5
     max_tokens: 8192
-    temperature: 0.3
+    effort: high
 
   promptset:
     ref: promptsets/researcher@0.2.0

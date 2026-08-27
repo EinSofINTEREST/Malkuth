@@ -120,7 +120,7 @@ spec:
     provider: anthropic
     name: claude-sonnet-5
     max_tokens: 8192
-    temperature: 0.3
+    effort: high              # 품질/비용 조절 — sampling 파라미터는 현재 API 가 받지 않는다
 
   promptset:
     ref: promptsets/researcher@0.1.0

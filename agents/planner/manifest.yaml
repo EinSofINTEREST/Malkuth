@@ -2,7 +2,7 @@ apiVersion: malkuth/v1
 kind: Agent
 metadata:
   name: planner
-  version: 0.2.0
+  version: 0.3.0
   group: research
   description: 질의를 실행 가능한 리서치 계획으로 나누는 에이전트
 
@@ -11,7 +11,7 @@ spec:
     provider: anthropic
     name: claude-sonnet-5
     max_tokens: 4096
-    temperature: 0.2
+    effort: high
 
   promptset:
     ref: promptsets/planner@0.2.0

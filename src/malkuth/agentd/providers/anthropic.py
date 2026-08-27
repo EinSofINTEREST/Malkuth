@@ -93,8 +93,9 @@ class AnthropicModel:
             "max_tokens": self.config.max_tokens or DEFAULT_MAX_TOKENS,
             "messages": [{"role": "user", "content": prompt}],
         }
-        if self.config.temperature is not None:
-            request["temperature"] = self.config.temperature
+        if self.config.effort is not None:
+            # sampling 파라미터는 현재 API 가 받지 않는다 — effort 가 그 자리다
+            request["output_config"] = {"effort": self.config.effort}
         if tools:
             request["tools"] = [_to_tool_schema(tool) for tool in tools]
 

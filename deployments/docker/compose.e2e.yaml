@@ -52,34 +52,51 @@ services:
       # 인증을 켠 채 검증한다 — 무인증 E2E 는 인증 회귀를 통과시킨다
       MALKUTH_AGENT_TOKEN: ${MALKUTH_AGENT_TOKEN:-e2e-token}
 
-  # 레퍼런스 그래프의 세 노드를 담당한다. 전부 echo 대역을 쓴다 —
-  # graph run 의 검증 대상은 라우팅과 state 병합이지 모델 출력이 아니다
+  # 레퍼런스 그래프의 세 노드. **표준 실행기**로 돈다 — promptset 을 렌더하고
+  # 모델을 호출하며 출력을 정형한다. echo 로 두면 그 경로가 전혀 검증되지
+  # 않는다 (#153). 모델은 fake-provider 가 받아 실 LLM 을 부르지 않는다
   agent-planner:
     <<: *agent-defaults
-    image: malkuth/agent-echo:${IMAGE_TAG:-0.1.0}
+    image: malkuth/agent-planner:${IMAGE_TAG:-0.1.0}
+    build:
+      context: ../..
+      dockerfile: deployments/docker/agent-reference.Dockerfile
+      args:
+        BASE_TAG: ${IMAGE_TAG:-0.1.0}
+        AGENT: planner
     ports:
       - "18082:8080"
-    environment:
-      MALKUTH_EXECUTOR: echo
+    environment: &reference-env
       MALKUTH_AGENT_TOKEN: ${MALKUTH_AGENT_TOKEN:-e2e-token}
+      # SDK 가 이 값을 읽는다 — 코드 변경 없이 대역으로 향한다
+      ANTHROPIC_BASE_URL: http://fake-provider:8000
+      ANTHROPIC_API_KEY: e2e-fake-key
 
   agent-researcher:
     <<: *agent-defaults
-    image: malkuth/agent-echo:${IMAGE_TAG:-0.1.0}
+    image: malkuth/agent-researcher:${IMAGE_TAG:-0.1.0}
+    build:
+      context: ../..
+      dockerfile: deployments/docker/agent-reference.Dockerfile
+      args:
+        BASE_TAG: ${IMAGE_TAG:-0.1.0}
+        AGENT: researcher
     ports:
       - "18083:8080"
-    environment:
-      MALKUTH_EXECUTOR: echo
-      MALKUTH_AGENT_TOKEN: ${MALKUTH_AGENT_TOKEN:-e2e-token}
+    environment: *reference-env
 
   agent-writer:
     <<: *agent-defaults
-    image: malkuth/agent-echo:${IMAGE_TAG:-0.1.0}
+    image: malkuth/agent-writer:${IMAGE_TAG:-0.1.0}
+    build:
+      context: ../..
+      dockerfile: deployments/docker/agent-reference.Dockerfile
+      args:
+        BASE_TAG: ${IMAGE_TAG:-0.1.0}
+        AGENT: writer
     ports:
       - "18084:8080"
-    environment:
-      MALKUTH_EXECUTOR: echo
-      MALKUTH_AGENT_TOKEN: ${MALKUTH_AGENT_TOKEN:-e2e-token}
+    environment: *reference-env
 
 networks:
   malkuth-e2e-net:

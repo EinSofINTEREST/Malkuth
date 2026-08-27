@@ -400,7 +400,7 @@ def _template_output_keys(result: Any, task: Any) -> tuple[str, ...]:
     """
     if result.promptset is None:
         return ()
-    template = result.promptset.spec.templates.get(task.template_name)
+    template = result.promptset.manifest.spec.templates.get(task.template_name)
     return () if template is None else template.output_keys
 
 

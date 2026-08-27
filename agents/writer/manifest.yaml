@@ -2,7 +2,7 @@ apiVersion: malkuth/v1
 kind: Agent
 metadata:
   name: writer
-  version: 0.2.0
+  version: 0.3.0
   group: research
   description: 수집된 근거를 보고서로 정리하는 에이전트
 
@@ -11,7 +11,7 @@ spec:
     provider: anthropic
     name: claude-sonnet-5
     max_tokens: 8192
-    temperature: 0.4
+    effort: medium
 
   promptset:
     ref: promptsets/writer@0.2.0

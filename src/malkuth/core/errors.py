@@ -123,6 +123,9 @@ class ErrorCode(StrEnum):
     VAL_002 = "VAL_002"  # 필드 형식 오류
 
     # Storage
+    ART_001 = "ART_001"  # Artifact 스코프 미선언 / 접근 거부
+    ART_002 = "ART_002"  # Artifact quota 초과 — 저장 거부
+
     STOR_001 = "STOR_001"  # Checkpoint 저장 실패
     STOR_002 = "STOR_002"  # Checkpoint 복원 실패
     STOR_003 = "STOR_003"  # Registry 저장소 오류

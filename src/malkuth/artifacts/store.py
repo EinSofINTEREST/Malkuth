@@ -220,6 +220,13 @@ class FilesystemArtifactStore:
             return []
         return sorted(str(path.relative_to(base)) for path in base.rglob("*") if path.is_file())
 
+    def used_bytes(self) -> int:
+        """이 스코프가 차지한 바이트 — quota 검증에 쓴다."""
+        base = self.root / self.scope
+        if not base.exists():
+            return 0
+        return sum(path.stat().st_size for path in base.rglob("*") if path.is_file())
+
 
 def digest_key(prefix: str, data: bytes) -> str:
     """내용 기반 key — 같은 산출물을 두 번 저장하지 않으려는 호출자용."""

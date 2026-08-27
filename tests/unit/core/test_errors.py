@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import re
+from pathlib import Path
+
 import pytest
 
 from malkuth.core.errors import (
@@ -15,6 +18,9 @@ from malkuth.core.errors import (
     MalkuthErrorPayload,
     RetryPolicy,
 )
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+RULES = REPO_ROOT / ".claude" / "rules"
 
 
 class FakeClock:
@@ -215,28 +221,22 @@ async def test_breaker_call_returns_value_and_resets():
     assert breaker.state is CircuitState.CLOSED
 
 
+def documented_error_codes() -> set[str]:
+    """05 의 코드 목록을 읽는다.
+
+    하드코딩된 사본과 대조하면 **문서에만 추가된 코드를 잡지 못한다** — 이
+    테스트의 이름이 주장하는 것과 다른 일을 하게 된다.
+    """
+    text = (RULES / "05-error-handling.md").read_text(encoding="utf-8")
+    return set(re.findall(r"^([A-Z][A-Z0-9]*_\d{3}):", text, re.MULTILINE))
+
+
 def test_all_documented_error_codes_exist():
     """룰셋(05-error-handling.md)에 명시된 코드가 전부 정의되어 있는지."""
-    expected = {
-        "NET_001", "NET_002",
-        "TO_001", "TO_002", "TO_003",
-        "LLM_001", "LLM_002", "LLM_003", "LLM_004", "LLM_005",
-        "A2A_001", "A2A_002", "A2A_003", "A2A_004", "A2A_005",
-        "MCP_001", "MCP_002", "MCP_003", "MCP_004",
-        "SKILL_001",
-        "RT_001", "RT_002", "RT_003", "RT_004", "RT_005", "RT_006",
-        "RT_007", "RT_008", "RT_009",
-        "GRAPH_001", "GRAPH_002", "GRAPH_003", "GRAPH_004", "GRAPH_005",
-        "MOD_001", "MOD_002", "MOD_003", "MOD_004",
-        "MEM_001", "MEM_002", "MEM_003", "MEM_004",
-        "NF_001",
-        "VAL_001", "VAL_002",
-        "STOR_001", "STOR_002", "STOR_003",
-        "CFG_001", "CFG_002",
-        "INTERNAL_001",
-    }  # fmt: skip
+    documented = documented_error_codes()
 
-    assert {c.value for c in ErrorCode} == expected
+    assert documented, "05 의 에러 코드 목록을 찾지 못했다"
+    assert {code.value for code in ErrorCode} == documented
 
 
 def test_explicit_empty_details_is_preserved():

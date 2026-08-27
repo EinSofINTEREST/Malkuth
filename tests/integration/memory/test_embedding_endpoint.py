@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import threading
 from http.server import HTTPServer
@@ -25,6 +26,9 @@ pytestmark = pytest.mark.integration
 DIMENSIONS = 64
 SPACE = "longterm"
 
+# 대역의 차원은 **import 시점**에 고정된다 — 프로세스가 다른 값을 들고 있으면
+# spec() 의 선언과 어긋나 외부 설정이 이 테스트의 성패를 가른다
+os.environ["FAKE_EMBEDDING_DIMENSIONS"] = str(DIMENSIONS)
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "deployments/docker/fake-provider"))
 
 
@@ -123,3 +127,33 @@ def test_a_dimension_mismatch_is_refused(embedding_endpoint):
         registry.index_for(SPACE).add(remembered("x"), ChunkSpec(max_tokens=400, overlap_tokens=40))
 
     assert exc_info.value.code == ErrorCode.MEM_003
+
+
+# --- 대역 자체의 건전성 -----------------------------------------------------------
+
+
+@pytest.mark.parametrize("declared", ["0", "-8"])
+def test_a_non_positive_dimension_is_refused_at_startup(monkeypatch, declared):
+    """0 을 그대로 두면 벡터를 만들 때 modulo 0 으로 요청마다 죽는다."""
+    import server as fake
+
+    monkeypatch.setenv("FAKE_EMBEDDING_DIMENSIONS", declared)
+
+    with pytest.raises(ValueError, match="must be positive"):
+        fake._embedding_dimensions()
+
+
+def test_a_malformed_dimension_is_refused_at_startup(monkeypatch):
+    import server as fake
+
+    monkeypatch.setenv("FAKE_EMBEDDING_DIMENSIONS", "sixty-four")
+
+    with pytest.raises(ValueError, match="must be an integer"):
+        fake._embedding_dimensions()
+
+
+def test_the_fixture_pins_the_dimension_it_declares():
+    """외부 프로세스 설정이 이 테스트의 성패를 가르면 안 된다."""
+    import server as fake
+
+    assert fake.EMBEDDING_DIMENSIONS == DIMENSIONS

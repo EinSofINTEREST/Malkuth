@@ -75,8 +75,23 @@ def _content_for(prompt: str, digest: str) -> str:
     return json.dumps({key: f"fake-{key}:{digest}" for key in keys})
 
 
-EMBEDDING_DIMENSIONS = int(os.environ.get("FAKE_EMBEDDING_DIMENSIONS", "64"))
-"""대역 벡터 차원 — memoryset 선언과 맞춰야 한다 (#159 가 불일치를 거부한다)."""
+def _embedding_dimensions() -> int:
+    """대역 벡터 차원 — memoryset 선언과 맞춰야 한다 (#159 가 불일치를 거부한다).
+
+    0 이하를 그대로 두면 벡터를 만들 때 modulo 0 으로 죽는다 — 요청마다
+    터지느니 기동 시점에 거부한다.
+    """
+    declared = os.environ.get("FAKE_EMBEDDING_DIMENSIONS", "64")
+    try:
+        value = int(declared)
+    except ValueError as err:
+        raise ValueError(f"FAKE_EMBEDDING_DIMENSIONS must be an integer: {declared!r}") from err
+    if value <= 0:
+        raise ValueError(f"FAKE_EMBEDDING_DIMENSIONS must be positive: {value}")
+    return value
+
+
+EMBEDDING_DIMENSIONS = _embedding_dimensions()
 
 
 def embed(payload: dict[str, Any]) -> dict[str, Any]:

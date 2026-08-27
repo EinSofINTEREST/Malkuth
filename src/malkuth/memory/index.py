@@ -388,12 +388,17 @@ class IndexRegistry:
         """비동기 색인 요청 — 대상 space 인덱스를 미리 만들어 둔다."""
         self.index_for(entry.space)
         self.queue.submit(entry, spec)
+        # 지연은 **쌓여 있는 동안** 관측해야 한다 — drain 후에만 재면 큐가 비어
+        # 있어 항상 0 이고, 밀리고 있다는 사실이 메트릭에 영원히 안 나온다
+        self._observe()
 
     def drain(self) -> int:
         """큐를 비우고 space 별 크기·지연을 관측한다."""
-        indexed = self.queue.drain(self.indexes)
-        self._observe()
-        return indexed
+        try:
+            return self.queue.drain(self.indexes)
+        finally:
+            # 실패해 큐에 남아도 관측한다 — 그때가 지연이 가장 중요한 시점이다
+            self._observe()
 
     def _observe(self, *, now: datetime | None = None) -> None:
         """space 크기와 인덱싱 지연을 게이지에 반영한다 — 메트릭 미주입 시 무동작."""

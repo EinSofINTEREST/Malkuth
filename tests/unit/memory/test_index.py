@@ -7,7 +7,10 @@
 
 from __future__ import annotations
 
+import contextlib
+
 import pytest
+from pydantic import ValidationError
 
 from malkuth.core.errors import MalkuthError
 from malkuth.memory.embedding import HashEmbedder, cosine, normalize, tokenize
@@ -481,6 +484,43 @@ def test_draining_reports_the_space_size():
     registry.drain()
 
     assert gauge_value(metrics, "malkuth_memory_entries", space=SPACE) == 2.0
+
+
+def test_pending_entry_publishes_a_positive_lag_before_draining():
+    """drain 후에만 재면 큐가 비어 있어 항상 0 이다 — 밀리는 사실이 안 보인다."""
+    from datetime import UTC, datetime, timedelta
+
+    metrics = make_metrics()
+    registry = IndexRegistry(metrics=metrics)
+
+    registry.submit(entry("대기 중", created_at=datetime.now(UTC) - timedelta(seconds=45)), spec())
+
+    assert gauge_value(metrics, "malkuth_memory_index_lag_seconds", space=SPACE) >= 45.0
+
+
+def test_failed_drain_still_publishes_the_lag():
+    """색인이 실패해 큐에 남는 그때가 지연이 가장 중요한 시점이다."""
+    from datetime import UTC, datetime, timedelta
+
+    metrics = make_metrics()
+    registry = IndexRegistry(metrics=metrics)
+    old_entry = entry("색인 실패 예정", created_at=datetime.now(UTC) - timedelta(seconds=45))
+    registry.submit(old_entry, spec())
+    # 다른 space 의 인덱스만 남겨 drain 이 대상 인덱스를 찾지 못하게 한다
+    registry.indexes.clear()
+
+    with contextlib.suppress(MalkuthError):
+        registry.drain()
+
+    assert gauge_value(metrics, "malkuth_memory_index_lag_seconds", space=SPACE) >= 45.0
+
+
+def test_naive_timestamps_are_rejected_at_the_entry_boundary():
+    """naive 시각이 섞이면 provenance 가 모호해지고 지연 관측이 TypeError 로 터진다."""
+    from datetime import datetime
+
+    with pytest.raises(ValidationError, match="timezone-aware"):
+        entry("시간대 없음", created_at=datetime(2026, 1, 1))  # noqa: DTZ001
 
 
 def test_pending_entries_report_their_age_in_seconds():

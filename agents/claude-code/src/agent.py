@@ -60,6 +60,23 @@ def build_prompt(task: TaskRequest) -> str:
     return json.dumps(task.input, ensure_ascii=False)
 
 
+def decode_prefix(raw: str) -> Any | None:
+    """출력 앞머리의 JSON 하나를 읽는다 — 뒤에 붙은 잡음은 버린다.
+
+    CLI 는 JSON 뒤에 경고문을 덧붙인다 (예: MCP 의 "does not advertise tools
+    capability"). 전체를 ``json.loads`` 로 읽으면 그 한 줄 때문에 **결과 전체가
+    평문으로 떨어진다** — 실제로 그랬다.
+    """
+    text = raw.strip()
+    if not text:
+        return None
+    try:
+        parsed, _end = json.JSONDecoder().raw_decode(text)
+    except json.JSONDecodeError:
+        return None
+    return parsed
+
+
 def read_result(raw: str) -> dict[str, Any]:
     """CLI 출력에서 산출물을 꺼낸다.
 
@@ -69,9 +86,8 @@ def read_result(raw: str) -> dict[str, Any]:
     text = raw.strip()
     if not text:
         return {}
-    try:
-        parsed = json.loads(text)
-    except json.JSONDecodeError:
+    parsed = decode_prefix(text)
+    if parsed is None:
         return {"text": text}
 
     if isinstance(parsed, dict):
@@ -88,10 +104,7 @@ def cli_error(raw: str) -> str | None:
     남긴다 (``is_error: true`` + ``result``). 그 사유를 읽지 않으면
     "exited with a failure" 만 남아 원인을 알 수 없다.
     """
-    try:
-        parsed = json.loads(raw.strip() or "{}")
-    except json.JSONDecodeError:
-        return None
+    parsed = decode_prefix(raw)
     if not isinstance(parsed, dict) or not parsed.get("is_error"):
         return None
     reason = parsed.get("result")

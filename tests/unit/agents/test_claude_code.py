@@ -247,3 +247,39 @@ async def test_a_reported_failure_with_a_zero_exit_still_fails(monkeypatch):
     result = await executor().execute(make_task())
 
     assert result.status is TaskStatus.FAILED
+
+
+# --- JSON 뒤에 붙는 잡음 (실제 출력에서 발견) ------------------------------------------
+
+# CLI 는 JSON 뒤에 경고문을 덧붙인다 — 실제로 관측한 모양
+TRAILING_NOISE = (
+    "Client.listTools() called but server does not advertise tools capability"
+    " - returning empty list"
+)
+
+
+def test_trailing_noise_does_not_discard_the_result():
+    """전체를 json.loads 로 읽으면 경고 한 줄에 **결과 전체가 평문으로 떨어진다**."""
+    raw = json.dumps({"result": "완료", "is_error": False}) + "\n" + TRAILING_NOISE
+
+    parsed = read_result(raw)
+
+    assert parsed["result"] == "완료"
+    assert "text" not in parsed
+
+
+def test_a_reported_failure_survives_trailing_noise():
+    raw = NOT_LOGGED_IN + "\n" + TRAILING_NOISE
+
+    assert cli_error(raw) == "Not logged in · Please run /login"
+
+
+async def test_a_task_result_is_unwrapped_despite_trailing_noise(monkeypatch):
+    """#133 을 실제 컨테이너로 돌려보고 잡은 결함."""
+    raw = json.dumps({"result": "hello from malkuth", "is_error": False})
+    fake_cli(monkeypatch, stdout=f"{raw}\n{TRAILING_NOISE}")
+
+    result = await executor().execute(make_task())
+
+    assert result.status is TaskStatus.COMPLETED
+    assert result.output["result"] == "hello from malkuth"

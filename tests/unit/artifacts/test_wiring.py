@@ -86,9 +86,11 @@ def test_the_store_is_built_when_a_root_is_injected(tmp_path, monkeypatch):
 
     built = _artifact_store(make_manifest())
 
-    assert isinstance(built, FilesystemArtifactStore)
-    # 스코프는 에이전트 이름 — 다른 에이전트의 산출물과 섞이지 않는다
-    assert built.scope == "test-agent"
+    # 소속이 스코프를 정한다 — local 은 늘 있고 이름은 에이전트다 (#155)
+    from malkuth.artifacts.scope import ArtifactScope, ScopedArtifacts
+
+    assert isinstance(built, ScopedArtifacts)
+    assert built.stores[ArtifactScope.LOCAL].scope == "test-agent"
 
 
 def test_no_store_without_an_injected_root(monkeypatch):
@@ -130,6 +132,8 @@ async def test_the_assembled_executor_carries_the_store(tmp_path, monkeypatch, e
 
     built = await build_executor(echo_manifest)
 
+    from malkuth.artifacts.scope import ArtifactScope, ScopedArtifacts
+
     store = built._artifacts
-    assert isinstance(store, FilesystemArtifactStore)
-    assert store.scope == echo_manifest.name
+    assert isinstance(store, ScopedArtifacts)
+    assert store.stores[ArtifactScope.LOCAL].scope == echo_manifest.name

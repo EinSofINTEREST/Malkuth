@@ -72,28 +72,42 @@ class ScopedArtifacts:
 
     stores: Mapping[ArtifactScope, FilesystemArtifactStore]
     quotas: Mapping[ArtifactScope, int] = field(default_factory=dict)
+    writable: frozenset[ArtifactScope] = frozenset({ArtifactScope.LOCAL, ArtifactScope.GROUP})
+    """쓰기가 허용된 스코프.
 
-    async def put(self, key: str, data: bytes) -> str:
-        """Store into the local scope.
+    09 의 memory ACL 과 같은 규약이다: **group 은 멤버 rw, global 은 기본
+    ro** (전역 write 는 명시 허가). local 만 쓰게 막으면 01 이 규정한
+    "그룹 산출물"에 아무도 쓸 수 없어 노드 간 전달이 성립하지 않는다.
+    """
 
-        local 스코프에 저장합니다 — 에이전트가 자기 것만 쓴다는 뜻입니다.
+    async def put(
+        self, key: str, data: bytes, *, scope: ArtifactScope = ArtifactScope.LOCAL
+    ) -> str:
+        """Store into a writable scope.
+
+        쓰기가 허용된 스코프에 저장합니다. 기본은 ``local`` — 노드 간에
+        넘길 산출물만 ``group`` 을 명시합니다.
 
         Args:
-            key: Name within the local scope.
+            key: Name within the scope.
             data: The bytes to store.
+            scope: Target scope; defaults to the agent's own.
 
         Returns:
             The ``artifact://`` reference.
 
         Raises:
-            MalkuthError: FORBIDDEN/``ART_001`` if no local scope is declared,
-                STORAGE/``ART_002`` if the quota would be exceeded.
+            MalkuthError: FORBIDDEN/``ART_001`` if the scope is undeclared or
+                read-only, STORAGE/``ART_002`` if the quota would be exceeded.
         """
-        store = self.stores.get(ArtifactScope.LOCAL)
+        store = self.stores.get(scope)
         if store is None:
-            raise denied(str(ArtifactScope.LOCAL), "no local artifact scope declared")
+            raise denied(str(scope), "scope was not declared for this agent")
+        if scope not in self.writable:
+            # global 에 아무나 쓰면 전사 공용 산출물이 오염된다 (09 와 같은 규약)
+            raise denied(str(scope), "scope is read-only for this agent")
 
-        self._check_quota(ArtifactScope.LOCAL, store, len(data))
+        self._check_quota(scope, store, len(data))
         return await store.put(key, data)
 
     async def get(self, ref: str) -> bytes:

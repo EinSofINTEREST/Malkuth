@@ -49,6 +49,12 @@ ECHO_EXECUTOR = "echo"
 ARTIFACT_ROOT_ENV = "MALKUTH_ARTIFACT_ROOT"
 """Artifact 저장 루트 — runtime 이 주입한다. 미주입 시 저장소 없음."""
 
+ARTIFACT_QUOTA_ENV = "MALKUTH_ARTIFACT_QUOTAS"
+"""스코프별 바이트 상한 — ``local=1024,group=2048`` 형식. runtime 이 주입한다."""
+
+GLOBAL_SCOPE = "global"
+"""전역 artifact 스코프 이름 — 예약 그룹과 같은 이름을 쓴다."""
+
 ROOT_ENV = "MALKUTH_ROOT"
 DEFAULT_ROOT = "/app"
 """모듈 registry 루트 — 이미지가 modules/ 를 어디에 두는지."""
@@ -282,20 +288,52 @@ async def build_executor(manifest: AgentManifest, *, metrics: Metrics | None = N
 
 
 def _artifact_store(manifest: AgentManifest) -> Any:
-    """이 에이전트의 artifact 저장소 — 경로 미주입 시 None.
+    """이 에이전트가 닿을 수 있는 artifact 스코프들 — 경로 미주입 시 None.
 
     02 Output Discipline 의 참조 전달 경로다. 주입하지 않으면 skill 이
     ``ctx.artifacts is None`` 을 받아 대용량 산출물을 남길 곳이 없다.
 
-    스코프는 우선 ``local`` 뿐이다 — group/global 해석과 quota 는 #140.
+    스코프는 **소속이 정한다** (01 Resource Scoping): local 은 늘, group 은
+    소속이 있을 때만, global 은 항상. 쓰기는 local 로만 가므로 에이전트가
+    group/global 을 임의로 오염시킬 수 없다.
     """
     root = os.environ.get(ARTIFACT_ROOT_ENV)
     if not root:
         return None
 
     from malkuth.artifacts import FilesystemArtifactStore
+    from malkuth.artifacts.scope import ArtifactScope, ScopedArtifacts
 
-    return FilesystemArtifactStore(root=Path(root), scope=manifest.name)
+    base = Path(root)
+    stores = {
+        ArtifactScope.LOCAL: FilesystemArtifactStore(root=base, scope=manifest.name),
+        ArtifactScope.GLOBAL: FilesystemArtifactStore(root=base, scope=GLOBAL_SCOPE),
+    }
+    group = manifest.metadata.group
+    if group:
+        stores[ArtifactScope.GROUP] = FilesystemArtifactStore(root=base, scope=group)
+
+    return ScopedArtifacts(stores=stores, quotas=_artifact_quotas())
+
+
+def _artifact_quotas() -> dict[Any, int]:
+    """runtime 이 주입한 스코프별 상한.
+
+    컨테이너는 ``groups/*.yaml`` 을 볼 수 없다 — 그것을 읽는 쪽이 값만
+    넘겨준다 (02 Secrets Injection 과 같은 방향).
+    """
+    from malkuth.artifacts.scope import ArtifactScope
+
+    declared = os.environ.get(ARTIFACT_QUOTA_ENV, "").strip()
+    if not declared:
+        return {}
+
+    quotas: dict[Any, int] = {}
+    for entry in declared.split(","):
+        scope, _, limit = entry.partition("=")
+        if scope.strip() and limit.strip().isdigit():
+            quotas[ArtifactScope(scope.strip())] = int(limit)
+    return quotas
 
 
 def _memory_access() -> Any:

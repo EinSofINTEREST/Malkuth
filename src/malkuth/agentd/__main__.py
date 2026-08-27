@@ -469,7 +469,39 @@ def main() -> None:
         agent_version=manifest.metadata.version,
         port=CONTROL_PORT,
     )
-    uvicorn.run(app, host="0.0.0.0", port=CONTROL_PORT, log_config=None)  # noqa: S104
+    _serve(app, manifest, executor)
+
+
+def _serve(app: Any, manifest: AgentManifest, executor: Any) -> None:
+    """Control API 를 서빙하고, 선언되어 있으면 A2A 도 함께 띄운다.
+
+    03 기동 순서 5단계 — 두 포트는 **별개 서버**다: Control 은 runtime 만,
+    A2A 는 allowlist 된 peer 만 접근한다 (02 Network 5).
+    """
+    from malkuth.agentd.a2a_server import a2a_port, build_a2a_app
+
+    peer_app = build_a2a_app(manifest, executor.execute)
+    port = a2a_port()
+    if peer_app is None or port is None:
+        uvicorn.run(app, host="0.0.0.0", port=CONTROL_PORT, log_config=None)  # noqa: S104
+        return
+
+    asyncio.run(_serve_both(app, peer_app, port))
+
+
+async def _serve_both(control: Any, peer: Any, peer_port: int) -> None:
+    """두 서버를 함께 돌린다 — 하나가 끝나면 다른 하나도 정리한다."""
+    servers = [
+        uvicorn.Server(
+            uvicorn.Config(control, host="0.0.0.0", port=CONTROL_PORT, log_config=None)  # noqa: S104
+        ),
+        uvicorn.Server(
+            uvicorn.Config(peer, host="0.0.0.0", port=peer_port, log_config=None)  # noqa: S104
+        ),
+    ]
+    async with asyncio.TaskGroup() as group:
+        for server in servers:
+            group.create_task(server.serve())
 
 
 if __name__ == "__main__":

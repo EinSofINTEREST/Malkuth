@@ -31,9 +31,14 @@ def unreachable(url: str, err: Exception) -> MalkuthError:
     )
 
 
-def _failed(url: str, response: httpx.Response) -> MalkuthError:
-    """서비스가 돌려준 실패를 구조화 에러로."""
-    if response.status_code == httpx.codes.NOT_FOUND:
+def _failed(url: str, response: httpx.Response, *, run_scoped: bool) -> MalkuthError:
+    """서비스가 돌려준 실패를 구조화 에러로.
+
+    404 를 무조건 "unknown run" 으로 읽지 않는다: 목록 조회에는 run id 가
+    없으므로, 그 404 는 **엔드포인트가 없다**는 뜻이다 (버전이 안 맞는 Control
+    Plane). 둘을 뭉개면 운영자가 없는 run 을 찾아 헤맨다.
+    """
+    if response.status_code == httpx.codes.NOT_FOUND and run_scoped:
         return MalkuthError(
             category=ErrorCategory.NOT_FOUND,
             code=ErrorCode.NF_001,
@@ -74,8 +79,15 @@ class ControlClient:
         self._base = base_url.rstrip("/")
         self._timeout_s = timeout_s
 
-    def _request(self, method: str, path: str) -> Any:
-        """요청 한 건 — 연결 실패와 서비스 실패를 나눠 옮긴다."""
+    def _request(self, method: str, path: str, *, run_scoped: bool = True) -> Any:
+        """요청 한 건 — 연결 실패와 서비스 실패를 나눠 옮긴다.
+
+        Args:
+            method: HTTP method.
+            path: Request path.
+            run_scoped: Whether a 404 means "that run does not exist" — 목록
+                조회는 False 다 (그 404 는 엔드포인트 부재를 뜻한다).
+        """
         url = f"{self._base}{path}"
         try:
             response = httpx.request(method, url, timeout=self._timeout_s)
@@ -83,13 +95,13 @@ class ControlClient:
             raise unreachable(self._base, err) from err
 
         if response.status_code >= httpx.codes.BAD_REQUEST:
-            raise _failed(url, response)
+            raise _failed(url, response, run_scoped=run_scoped)
         return response.json()
 
     def list_runs(self, *, mode: str | None = None) -> Sequence[dict[str, Any]]:
         """진행 중 run 목록 — mode 로 좁힐 수 있다."""
         query = f"?mode={mode}" if mode else ""
-        listed: list[dict[str, Any]] = self._request("GET", f"/v1/runs{query}")
+        listed: list[dict[str, Any]] = self._request("GET", f"/v1/runs{query}", run_scoped=False)
         return listed
 
     def get_run(self, run_id: str) -> dict[str, Any]:

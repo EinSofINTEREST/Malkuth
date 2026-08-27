@@ -433,7 +433,14 @@ def test_a_third_party_registered_level_does_not_become_valid():
     uvicorn 을 구동하면 `TRACE` 가 전역 등록되어, `getLevelNamesMapping()` 을
     쓰던 검증이 조용히 그것을 받아들였다 — 05 의 어느 표에도 없는 레벨인데도.
     """
+    # 전역 레지스트리를 건드리므로 실패해도 되돌린다 — 되돌리지 않으면 이
+    # 테스트가 바로 그것이 고발하는 순서 의존을 만든다.
+    # `addLevelName(5, "Level 5")` 로는 역방향 매핑이 남아 TRACE 가 계속 풀린다
     logging.addLevelName(5, "TRACE")
-
-    with pytest.raises(ValueError, match="unknown log level"):
-        configure(level="TRACE")
+    try:
+        with pytest.raises(ValueError, match="unknown log level"):
+            configure(level="TRACE")
+    finally:
+        with logging._lock:  # noqa: SLF001 — 공개 제거 API 가 없다
+            logging._nameToLevel.pop("TRACE", None)  # noqa: SLF001
+            logging._levelToName.pop(5, None)  # noqa: SLF001

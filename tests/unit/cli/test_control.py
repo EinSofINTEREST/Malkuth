@@ -282,3 +282,27 @@ def test_a_cli_list_shows_a_run_started_elsewhere(tmp_path):
         thread.join(timeout=10)
         driver.close()
         serving.close()
+
+
+def test_a_missing_list_endpoint_is_not_reported_as_an_unknown_run(served):
+    """목록 조회에는 run id 가 없다 — 그 404 는 엔드포인트 부재를 뜻한다.
+
+    둘을 뭉개면 운영자가 없는 run 을 찾아 헤맨다 (버전이 안 맞는 Control Plane).
+    """
+    _store, url = served
+
+    with pytest.raises(MalkuthError) as exc_info:
+        # 이 Control Plane 에 없는 경로 — 구버전 서버를 흉내낸다
+        ControlClient(url)._request("GET", "/v1/nonexistent", run_scoped=False)
+
+    assert exc_info.value.code != ErrorCode.NF_001
+
+
+def test_a_missing_run_is_still_reported_as_not_found(served):
+    """run 지정 경로의 404 는 그대로 NF_001 이어야 한다."""
+    _store, url = served
+
+    with pytest.raises(MalkuthError) as exc_info:
+        ControlClient(url).get_run("never-existed")
+
+    assert exc_info.value.code == ErrorCode.NF_001

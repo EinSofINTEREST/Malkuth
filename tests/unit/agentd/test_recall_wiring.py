@@ -164,3 +164,68 @@ async def test_memory_search_returns_entries_with_provenance():
     assert found[0]["space"] == "local:researcher:longterm"
     assert found[0]["score"] == 0.8765
     assert "created_at" in found[0]
+
+
+# --- 리뷰 반영 ----------------------------------------------------------------
+
+
+class FailingRecall:
+    async def __call__(self, task) -> str:
+        raise RuntimeError("index corrupt")
+
+
+async def test_recall_failure_becomes_an_error_event_not_an_exception():
+    """같은 실패가 execute 에선 TaskResult 인데 stream 에서만 예외면 소비자가
+    두 경로를 다르게 다뤄야 한다."""
+    from malkuth.core.events import ErrorEvent
+
+    executor = make_executor([text("done")], recall=FailingRecall())
+
+    events = [event async for event in executor.stream(make_task())]
+
+    assert isinstance(events[-1], ErrorEvent)
+    assert events[-1].error.code == ErrorCode.MEM_004
+
+
+async def test_recall_failure_in_execute_is_a_failed_result():
+    executor = make_executor([text("done")], recall=FailingRecall())
+
+    result = await executor.execute(make_task())
+
+    assert result.status.value == "failed"
+
+
+@pytest.mark.parametrize("arguments", [{}, {"query": ""}, {"query": "   "}])
+async def test_memory_search_rejects_a_missing_query(arguments):
+    """모델이 보내는 인자는 신뢰할 수 없다 — KeyError 로 터지면 원인이 안 보인다."""
+
+    class Memory:
+        async def search(self, query: str, **kwargs):  # pragma: no cover - 도달 안 함
+            return []
+
+    with pytest.raises(MalkuthError) as exc_info:
+        await run_memory_search(Memory(), arguments)
+
+    assert exc_info.value.code == ErrorCode.VAL_001
+
+
+@pytest.mark.parametrize(
+    ("given", "expected"),
+    [(None, 6), ("3", 3), (0, 1), (999, 50), (True, 6), ("x", 6)],
+)
+async def test_memory_search_coerces_k(given, expected):
+    """null / 문자열 / 범위 밖 값을 그대로 넘기면 검색이 터지거나 예산을 넘긴다."""
+
+    class Memory:
+        def __init__(self) -> None:
+            self.k: int | None = None
+
+        async def search(self, query: str, **kwargs):
+            self.k = kwargs.get("k")
+            return []
+
+    memory = Memory()
+
+    await run_memory_search(memory, {"query": "q", "k": given})
+
+    assert memory.k == expected

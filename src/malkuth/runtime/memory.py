@@ -162,7 +162,13 @@ class ServiceMemoryAccess:
             The rendered context, or an empty string when nothing survives the
             threshold and budget.
         """
-        aliases = [space.alias for space in self.token.spaces]
+        if not policy.auto:
+            # 정책이 껐는데 500건씩 훑으면 아무 것도 쓰지 않을 데이터를 읽는다
+            return ""
+
+        # 같은 별칭이 여러 스코프에 있을 수 있다 — dedup 하지 않으면 중복 읽기와
+        # 중복 히트로 예산이 낭비된다 (해석은 토큰이 하므로 결과는 같다)
+        aliases = list(dict.fromkeys(space.alias for space in self.token.spaces))
         if not aliases:
             return ""
 

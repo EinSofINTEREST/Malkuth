@@ -11,12 +11,16 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Final
 
+from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
 from malkuth.core.skill import SkillSpec
 
 if TYPE_CHECKING:
     from malkuth.core.agent import MemoryAccess
 
 MEMORY_SEARCH_TOOL: Final = "memory_search"
+DEFAULT_K: Final = 6
+MAX_K: Final = 50
+"""한 번에 돌려줄 수 있는 상한 — 모델이 큰 값을 보내도 예산을 지킨다."""
 
 MEMORY_SEARCH_SPEC: Final = SkillSpec(
     name=MEMORY_SEARCH_TOOL,
@@ -33,13 +37,26 @@ MEMORY_SEARCH_SPEC: Final = SkillSpec(
             },
             "k": {
                 "type": "integer",
-                "default": 6,
+                "default": DEFAULT_K,
                 "description": "Maximum results to return.",
             },
         },
         "required": ["query"],
     },
 )
+
+
+def _coerce_k(value: object) -> int:
+    """``k`` 를 양의 정수로 강제한다 — 모델은 null 이나 문자열을 보낼 수 있다."""
+    if value is None:
+        return DEFAULT_K
+    if not isinstance(value, int | str | float) or isinstance(value, bool):
+        return DEFAULT_K
+    try:
+        k = int(value)
+    except (TypeError, ValueError):
+        return DEFAULT_K
+    return max(1, min(k, MAX_K))
 
 
 async def run_memory_search(
@@ -58,7 +75,17 @@ async def run_memory_search(
         Entries with their provenance — 모델이 기억과 현재 입력을 구분할 수
         있도록 출처를 함께 돌려줍니다.
     """
-    found = await memory.search(arguments["query"], k=arguments.get("k", 6))
+    query = arguments.get("query")
+    if not isinstance(query, str) or not query.strip():
+        # 모델이 보내는 인자는 신뢰할 수 없다 — KeyError 로 터지면 원인이 안 보인다
+        raise MalkuthError(
+            category=ErrorCategory.VALIDATION,
+            code=ErrorCode.VAL_001,
+            message=f"{MEMORY_SEARCH_TOOL} requires a non-empty 'query'",
+            details={"tool": MEMORY_SEARCH_TOOL},
+        )
+
+    found = await memory.search(query, k=_coerce_k(arguments.get("k")))
     return [
         {
             "content": scored.entry.content,

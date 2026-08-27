@@ -254,7 +254,8 @@ async def test_recall_respects_the_min_score_threshold(access):
     assert context == ""
 
 
-async def test_recall_is_skipped_when_the_policy_disables_it(access):
+async def test_recall_is_skipped_when_the_policy_disables_it(access, monkeypatch):
+    """정책이 껐는데 500건씩 훑으면 쓰지도 않을 데이터를 읽는다."""
     from malkuth.modules.memoryset import RecallSpec
 
     adapter, space_id, registry = access
@@ -262,8 +263,46 @@ async def test_recall_is_skipped_when_the_policy_disables_it(access):
     await adapter.append("longterm", entry=item)
     registry.indexes[space_id].add(item, ChunkSpec(max_tokens=400, overlap_tokens=40))
 
+    reads: list[str] = []
+    original = adapter.service.read
+    monkeypatch.setattr(
+        adapter.service,
+        "read",
+        lambda token, alias, **kw: (reads.append(alias), original(token, alias, **kw))[1],
+    )
+
     context = await adapter.recall_for_task(
         "sidecar", policy=RecallSpec(auto=False, k=3, min_score=0.0)
     )
 
     assert context == ""
+    assert reads == []
+
+
+async def test_recall_reads_each_alias_once(access, monkeypatch):
+    """같은 별칭이 여러 스코프에 있으면 중복 읽기와 중복 히트로 예산이 낭비된다."""
+    from malkuth.memory.service import MemorySpace
+    from malkuth.modules.memoryset import MemoryScope, RecallSpec
+
+    adapter, space_id, _registry = access
+    # 같은 별칭을 group 스코프에도 둔다 — 토큰은 둘 다 담는다
+    adapter.token = adapter.token.__class__(
+        agent=adapter.token.agent,
+        group="research",
+        spaces=(
+            *adapter.token.spaces,
+            MemorySpace(alias="longterm", scope=MemoryScope.GROUP, owner="research"),
+        ),
+    )
+
+    reads: list[str] = []
+    original = adapter.service.read
+    monkeypatch.setattr(
+        adapter.service,
+        "read",
+        lambda token, alias, **kw: (reads.append(alias), original(token, alias, **kw))[1],
+    )
+
+    await adapter.recall_for_task("sidecar", policy=RecallSpec(auto=True, k=3, min_score=0.0))
+
+    assert reads == ["longterm"]

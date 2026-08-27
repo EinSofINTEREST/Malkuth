@@ -406,6 +406,18 @@ class Executor:
                 return
             yield event
 
+    def _recall_failure(self, err: BaseException) -> MalkuthError:
+        """회상 실패를 구조화 에러로 만든다 — 기억이 없다고 태스크가 죽지는 않는다."""
+        if isinstance(err, MalkuthError):
+            return err
+        return MalkuthError(
+            category=ErrorCategory.MEMORY,
+            code=ErrorCode.MEM_004,
+            message="auto-recall failed",
+            agent=self._agent,
+            details={"cause": type(err).__name__},
+        )
+
     def _timeout_event(self, task: TaskRequest) -> ErrorEvent:
         """태스크 상한 초과를 종료 이벤트로 만든다."""
         return ErrorEvent(
@@ -422,7 +434,16 @@ class Executor:
 
     async def _stream(self, task: TaskRequest) -> AsyncIterator[TaskEvent]:
         """이벤트를 발행하며 루프를 돈다 (상한은 stream 이 적용)."""
-        prompt = await self._initial_prompt(task)
+        try:
+            prompt = await self._initial_prompt(task)
+        except asyncio.CancelledError:
+            self._cleanup()
+            raise
+        except Exception as err:
+            # 같은 실패가 execute 에서는 TaskResult 인데 stream 에서만 예외로
+            # 새어나가면 소비자가 두 경로를 다르게 다뤄야 한다
+            yield ErrorEvent(task_id=task.task_id, error=self._recall_failure(err).payload())
+            return
         usage = ModelUsage()
         # 태스크가 기본값을 그대로 쓰면 executor 설정을 따른다 —
         # `or` 로 고르면 TaskConfig 의 기본값(20)이 항상 이겨 설정이 무시된다

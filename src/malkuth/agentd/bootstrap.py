@@ -191,7 +191,13 @@ class Bootstrap:
         mcp_servers, degraded = await self._start_mcp_servers(agent)
 
         # 4. tool registry 구성 — 네임스페이스 충돌 검사
-        tools = build_tool_registry(skillsets, mcp_servers, agent=agent)
+        tools = build_tool_registry(
+            skillsets,
+            mcp_servers,
+            agent=agent,
+            # memory space 를 선언한 에이전트만 memory_search 를 본다
+            with_memory=bool(self._manifest.spec.memory.spaces),
+        )
 
         return BootstrapResult(
             promptset=promptset,

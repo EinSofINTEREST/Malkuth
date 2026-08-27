@@ -287,3 +287,27 @@ async def test_registry_includes_skillset_and_mcp_tools():
 
 def test_empty_result_reports_healthy():
     assert BootstrapResult().health().status is HealthState.HEALTHY
+
+
+# --- memory_search 배선 -------------------------------------------------------
+
+
+async def test_startup_registers_memory_search_for_agents_with_memory():
+    """파라미터만 만들고 기동 경로에 넘기지 않으면 실제로는 등록되지 않는다."""
+    from malkuth.memory.tool import MEMORY_SEARCH_TOOL
+
+    manifest = manifest_with(
+        memory={"spaces": [{"ref": "memorysets/agent-longterm@0.1.0", "as": "longterm"}]}
+    )
+
+    result = await bootstrap(manifest).run()
+
+    assert MEMORY_SEARCH_TOOL in result.tools
+
+
+async def test_startup_omits_memory_search_without_declared_spaces():
+    from malkuth.memory.tool import MEMORY_SEARCH_TOOL
+
+    result = await bootstrap(manifest_with()).run()
+
+    assert MEMORY_SEARCH_TOOL not in result.tools

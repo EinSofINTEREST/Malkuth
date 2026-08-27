@@ -25,7 +25,8 @@ from malkuth.core.errors import MalkuthError
 from malkuth.core.manifest import AgentManifest
 from tests.fixtures.builders import make_task
 
-ECHO_MANIFEST = Path(__file__).resolve().parents[3] / "agents" / "echo" / "manifest.yaml"
+REPO_ROOT = Path(__file__).resolve().parents[3]
+ECHO_MANIFEST = REPO_ROOT / "agents" / "echo" / "manifest.yaml"
 
 
 def write(tmp_path: Path, body: str) -> Path:
@@ -154,30 +155,52 @@ async def test_echo_streams_token_then_done():
 # --- 실행기 선택 --------------------------------------------------------------
 
 
-def test_echo_executor_is_opt_in(monkeypatch):
+async def test_echo_executor_is_opt_in(monkeypatch):
     """테스트 이미지만 echo 대역을 쓴다."""
     monkeypatch.setenv(EXECUTOR_ENV, ECHO_EXECUTOR)
 
-    executor = build_executor(load_manifest(ECHO_MANIFEST))
+    executor = await build_executor(load_manifest(ECHO_MANIFEST))
 
     assert isinstance(executor, EchoExecutor)
 
 
-def test_base_image_does_not_default_to_echo(monkeypatch):
-    """base 이미지가 echo 로 돌면 모든 에이전트가 대역이 된다 — 조용히 떨어지지 않는다."""
+async def test_base_image_does_not_default_to_echo(monkeypatch):
+    """base 이미지가 echo 로 돌면 모든 에이전트가 대역이 된다.
+
+    이제 표준 경로는 실 provider 를 세운다 — echo 로 조용히 떨어지지 않는다.
+    """
     monkeypatch.delenv(EXECUTOR_ENV, raising=False)
+    monkeypatch.setenv("MALKUTH_ROOT", str(REPO_ROOT))
+
+    executor = await build_executor(load_manifest(ECHO_MANIFEST))
+
+    assert not isinstance(executor, EchoExecutor)
+
+
+async def test_unbound_provider_is_rejected(monkeypatch):
+    """바인딩 없는 provider 를 조용히 넘기면 운영에서 가짜 응답이 나간다."""
+    monkeypatch.delenv(EXECUTOR_ENV, raising=False)
+    manifest = load_manifest(ECHO_MANIFEST)
+    other = manifest.model_copy(
+        update={
+            "spec": manifest.spec.model_copy(
+                update={"model": manifest.spec.model.model_copy(update={"provider": "openai"})}
+            )
+        }
+    )
 
     with pytest.raises(MalkuthError) as exc_info:
-        build_executor(load_manifest(ECHO_MANIFEST))
+        await build_executor(other)
 
     assert exc_info.value.code == "CFG_001"
+    assert exc_info.value.details["provider"] == "openai"
 
 
-def test_unknown_executor_selection_is_rejected(monkeypatch):
+async def test_unknown_executor_selection_is_rejected(monkeypatch):
     monkeypatch.setenv(EXECUTOR_ENV, "mystery")
 
     with pytest.raises(MalkuthError) as exc_info:
-        build_executor(load_manifest(ECHO_MANIFEST))
+        await build_executor(load_manifest(ECHO_MANIFEST))
 
     assert exc_info.value.code == "CFG_001"
     assert exc_info.value.details["executor"] == "mystery"
@@ -222,3 +245,69 @@ def test_another_agents_token_is_rejected():
     )
 
     assert response.status_code == 401
+
+
+# --- 노출과 실행의 일치 ---------------------------------------------------------
+
+
+async def researcher_with_memory(monkeypatch):
+    """memory space 를 선언한 researcher manifest."""
+    import yaml
+
+    from malkuth.core.manifest import AgentManifest
+
+    monkeypatch.delenv(EXECUTOR_ENV, raising=False)
+    monkeypatch.setenv("MALKUTH_ROOT", str(REPO_ROOT))
+    doc = yaml.safe_load((REPO_ROOT / "agents" / "researcher" / "manifest.yaml").read_text("utf-8"))
+    doc["spec"]["memory"] = {
+        "spaces": [{"ref": "memorysets/agent-longterm@0.1.0", "as": "longterm"}]
+    }
+    return await build_executor(AgentManifest.model_validate(doc))
+
+
+async def test_unrunnable_tools_are_not_advertised(monkeypatch):
+    """실행할 수 없는 tool 을 보이면 모델이 고를 때마다 거부되어 루프에 빠진다."""
+    from malkuth.memory.tool import MEMORY_SEARCH_TOOL
+
+    executor = await researcher_with_memory(monkeypatch)
+
+    advertised = {spec.name for spec in executor._tool_schemas}
+    assert MEMORY_SEARCH_TOOL not in advertised
+    assert "search" in advertised
+
+
+async def test_every_advertised_tool_is_runnable(monkeypatch):
+    """노출과 실행이 어긋나면 그 자체가 결함이다."""
+    executor = await researcher_with_memory(monkeypatch)
+
+    for spec in executor._tool_schemas:
+        assert executor._tools.timeout_for(spec.name) >= 0.0
+        assert spec.name in executor._tools._skills
+
+
+def test_mcp_entries_never_reach_the_tool_schemas():
+    """registry 는 MCP tool 을 **서버 이름 문자열**로 담는다.
+
+    그대로 넘기면 provider 가 ``to_tool_schema()`` 를 부르다 AttributeError 로
+    터진다 — #78 이 세션을 세워도 스키마 조회 경로가 따로 필요하다.
+    """
+    from malkuth.agentd.__main__ import _executable_schemas
+    from malkuth.agentd.tools import AgentToolRegistry
+    from malkuth.core.skill import SkillSpec
+
+    class Result:
+        tools = {
+            "search": SkillSpec(name="search", description="d", parameters={}),
+            "mcp__filesystem__read_file": "filesystem",  # 서버 이름 문자열
+        }
+
+    class LiveMcp:
+        async def call_tool(self, name, arguments):  # pragma: no cover - 도달 안 함
+            return None
+
+    registry = AgentToolRegistry(agent="researcher", mcp=LiveMcp())
+
+    schemas = _executable_schemas(Result(), registry)
+
+    assert all(isinstance(spec, SkillSpec) for spec in schemas)
+    assert [spec.name for spec in schemas] == ["search"]

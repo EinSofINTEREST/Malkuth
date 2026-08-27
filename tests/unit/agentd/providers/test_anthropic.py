@@ -1,0 +1,269 @@
+"""Anthropic provider binding tests.
+
+**실 API 를 호출하지 않는다** — 스크립트된 클라이언트로만 검증한다 (06 규칙).
+CI 에 API key 가 없어도 통과해야 한다.
+"""
+
+from __future__ import annotations
+
+import anthropic
+import httpx
+import pytest
+
+from malkuth.agentd.providers.anthropic import DEFAULT_MAX_TOKENS, AnthropicModel
+from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
+from malkuth.core.manifest import ModelConfig
+from malkuth.core.skill import SkillSpec
+
+MODEL = "claude-sonnet-5"
+
+
+class Block:
+    """provider 응답 블록 대역."""
+
+    def __init__(self, **fields: object) -> None:
+        self.__dict__.update(fields)
+
+
+class Usage:
+    def __init__(self, input_tokens: int = 0, output_tokens: int = 0) -> None:
+        self.input_tokens = input_tokens
+        self.output_tokens = output_tokens
+
+
+class Message:
+    def __init__(self, content: list[Block], usage: Usage | None = None) -> None:
+        self.content = content
+        self.usage = usage or Usage()
+
+
+class FakeMessages:
+    """``client.messages`` 대역 — 요청을 기록하고 스크립트된 응답을 낸다."""
+
+    def __init__(self, result: object) -> None:
+        self._result = result
+        self.requests: list[dict] = []
+
+    async def create(self, **request: object) -> object:
+        self.requests.append(request)
+        if isinstance(self._result, Exception):
+            raise self._result
+        return self._result
+
+
+class FakeClient:
+    def __init__(self, result: object) -> None:
+        self.messages = FakeMessages(result)
+
+
+def model(result: object, **overrides: object) -> AnthropicModel:
+    config = ModelConfig(provider="anthropic", name=MODEL, **overrides)  # type: ignore[arg-type]
+    return AnthropicModel(config=config, agent="researcher", client=FakeClient(result))
+
+
+STATUS_BY_ERROR = {
+    anthropic.RateLimitError: 429,
+    anthropic.BadRequestError: 400,
+    anthropic.InternalServerError: 500,
+}
+
+
+def api_error(kind: type[anthropic.APIStatusError], message: str = "boom"):
+    """SDK 에러를 실제 타입과 상태코드로 만든다.
+
+    지금 구현은 status 를 보지 않지만, 모든 에러를 429 로 만들어두면 나중에
+    상태코드 분기가 생겼을 때 **테스트가 잘못된 방향으로 통과**한다.
+    """
+    request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    response = httpx.Response(STATUS_BY_ERROR[kind], request=request)
+    return kind(message, response=response, body=None)
+
+
+# --- 요청 구성 ----------------------------------------------------------------
+
+
+async def test_manifest_decides_the_model():
+    """모델명을 코드에 하드코딩하지 않는다 (02 Manifest Rules 3)."""
+    provider = model(Message([Block(type="text", text="done")]))
+
+    await provider.run("prompt", [])
+
+    assert provider.client.messages.requests[0]["model"] == MODEL
+
+
+async def test_max_tokens_falls_back_to_the_default():
+    """SDK 가 필수로 요구하므로 manifest 가 비워두면 기본값을 쓴다."""
+    provider = model(Message([Block(type="text", text="done")]))
+
+    await provider.run("prompt", [])
+
+    assert provider.client.messages.requests[0]["max_tokens"] == DEFAULT_MAX_TOKENS
+
+
+async def test_declared_limits_reach_the_request():
+    provider = model(Message([Block(type="text", text="done")]), max_tokens=1024, temperature=0.3)
+
+    await provider.run("prompt", [])
+
+    request = provider.client.messages.requests[0]
+    assert request["max_tokens"] == 1024
+    assert request["temperature"] == 0.3
+
+
+async def test_temperature_is_omitted_when_undeclared():
+    """선언하지 않은 값을 임의로 채우면 manifest 가 계약이 아니게 된다."""
+    provider = model(Message([Block(type="text", text="done")]))
+
+    await provider.run("prompt", [])
+
+    assert "temperature" not in provider.client.messages.requests[0]
+
+
+async def test_tool_schemas_keep_the_mcp_namespace():
+    """이름이 곧 출처 판별이다 — 네임스페이스가 깎이면 에러 코드가 뒤바뀐다."""
+    spec = SkillSpec(
+        name="mcp__filesystem__read_file",
+        description="파일을 읽는다",
+        parameters={"type": "object", "properties": {"path": {"type": "string"}}},
+    )
+    provider = model(Message([Block(type="text", text="done")]))
+
+    await provider.run("prompt", [spec])
+
+    tool = provider.client.messages.requests[0]["tools"][0]
+    assert tool["name"] == "mcp__filesystem__read_file"
+    assert tool["input_schema"]["properties"] == {"path": {"type": "string"}}
+
+
+async def test_tools_are_omitted_when_none_are_bound():
+    provider = model(Message([Block(type="text", text="done")]))
+
+    await provider.run("prompt", [])
+
+    assert "tools" not in provider.client.messages.requests[0]
+
+
+# --- 응답 해석 ----------------------------------------------------------------
+
+
+async def test_text_response_is_final():
+    provider = model(Message([Block(type="text", text="answer")]))
+
+    response = await provider.run("prompt", [])
+
+    assert response.content == "answer"
+    assert response.is_final
+
+
+async def test_tool_use_becomes_a_tool_call():
+    provider = model(
+        Message(
+            [
+                Block(type="text", text="살펴보겠습니다"),
+                Block(type="tool_use", id="tu-1", name="search", input={"query": "q"}),
+            ]
+        )
+    )
+
+    response = await provider.run("prompt", [])
+
+    assert not response.is_final
+    assert response.tool_calls[0].name == "search"
+    assert response.tool_calls[0].arguments == {"query": "q"}
+    assert response.content == "살펴보겠습니다"
+
+
+async def test_usage_is_collected():
+    """토큰 집계가 빠지면 비용 관측과 quota 감시가 함께 무너진다."""
+    provider = model(Message([Block(type="text", text="x")], usage=Usage(120, 45)))
+
+    response = await provider.run("prompt", [])
+
+    assert response.usage.input_tokens == 120
+    assert response.usage.output_tokens == 45
+
+
+async def test_unreadable_response_is_llm_004():
+    """조용히 빈 응답으로 처리하면 태스크가 성공한 것처럼 끝난다."""
+    provider = model(Message([Block(type="tool_use")]))  # id/name 없음
+
+    with pytest.raises(MalkuthError) as exc_info:
+        await provider.run("prompt", [])
+
+    assert exc_info.value.code == ErrorCode.LLM_004
+    assert exc_info.value.category is ErrorCategory.MODEL
+    assert not exc_info.value.retryable
+
+
+# --- 에러 변환 ----------------------------------------------------------------
+
+
+async def test_rate_limit_is_retryable_llm_001():
+    provider = model(api_error(anthropic.RateLimitError))
+
+    with pytest.raises(MalkuthError) as exc_info:
+        await provider.run("prompt", [])
+
+    assert exc_info.value.code == ErrorCode.LLM_001
+    assert exc_info.value.retryable
+
+
+async def test_context_overflow_is_llm_002_and_not_retryable():
+    """같은 프롬프트로 다시 보내도 길이는 같다 — 재시도는 낭비다."""
+    provider = model(api_error(anthropic.BadRequestError, "prompt is too long: 300000 tokens"))
+
+    with pytest.raises(MalkuthError) as exc_info:
+        await provider.run("prompt", [])
+
+    assert exc_info.value.code == ErrorCode.LLM_002
+    assert not exc_info.value.retryable
+
+
+async def test_other_bad_requests_are_not_disguised_as_context_overflow():
+    """설정 오류를 LLM_002 로 덮으면 운영자가 프롬프트만 줄이다 시간을 버린다."""
+    provider = model(api_error(anthropic.BadRequestError, "unknown model: typo"))
+
+    with pytest.raises(anthropic.BadRequestError):
+        await provider.run("prompt", [])
+
+
+async def test_server_error_is_retryable_llm_003():
+    provider = model(api_error(anthropic.InternalServerError))
+
+    with pytest.raises(MalkuthError) as exc_info:
+        await provider.run("prompt", [])
+
+    assert exc_info.value.code == ErrorCode.LLM_003
+    assert exc_info.value.retryable
+
+
+async def test_connection_error_is_retryable_llm_003():
+    request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    provider = model(anthropic.APIConnectionError(request=request))
+
+    with pytest.raises(MalkuthError) as exc_info:
+        await provider.run("prompt", [])
+
+    assert exc_info.value.code == ErrorCode.LLM_003
+
+
+# --- 재시도 계층 --------------------------------------------------------------
+
+
+def test_sdk_retries_are_disabled():
+    """provider 도 재시도하면 backoff 가 곱해져 rate limit 을 더 오래 문다."""
+    provider = AnthropicModel(
+        config=ModelConfig(provider="anthropic", name=MODEL), agent="researcher"
+    )
+
+    assert provider.client.max_retries == 0
+
+
+async def test_malformed_tool_arguments_are_llm_004():
+    """input 이 매핑이 아니면 ValueError 가 executor 로 그대로 샌다."""
+    provider = model(Message([Block(type="tool_use", id="tu-1", name="search", input=["query"])]))
+
+    with pytest.raises(MalkuthError) as exc_info:
+        await provider.run("prompt", [])
+
+    assert exc_info.value.code == ErrorCode.LLM_004

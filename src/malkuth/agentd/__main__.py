@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -16,9 +17,13 @@ import uvicorn
 import yaml
 
 from malkuth.agentd.server import AgentRuntime, create_app
+from malkuth.agentd.tools import AgentToolRegistry
 from malkuth.core.agent import HealthState, HealthStatus
 from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
 from malkuth.core.manifest import AgentManifest
+from malkuth.core.skill import SkillSpec
+from malkuth.core.tools import is_mcp_tool
+from malkuth.memory.tool import MEMORY_SEARCH_TOOL
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
@@ -32,6 +37,13 @@ TOKEN_ENV = "MALKUTH_AGENT_TOKEN"  # noqa: S105 — 값이 아니라 키 이름�
 EXECUTOR_ENV = "MALKUTH_EXECUTOR"
 
 ECHO_EXECUTOR = "echo"
+
+ROOT_ENV = "MALKUTH_ROOT"
+DEFAULT_ROOT = "/app"
+"""모듈 registry 루트 — 이미지가 modules/ 를 어디에 두는지."""
+
+ANTHROPIC_PROVIDER = "anthropic"
+"""이 이미지가 바인딩한 모델 provider — 다른 provider 선언은 CFG_001 로 거부한다."""
 """테스트 이미지가 선택하는 대역 — base 이미지의 기본값이 되어서는 안 된다."""
 
 log = structlog.get_logger(__name__)
@@ -101,7 +113,7 @@ def build_app(manifest: AgentManifest, executor: Any, *, token: str | None = Non
     return create_app(runtime, token=token)
 
 
-def build_executor(manifest: AgentManifest) -> Any:
+async def build_executor(manifest: AgentManifest) -> Any:
     """Select the executor this image should serve.
 
     이 이미지가 서빙할 실행기를 고릅니다. 기본은 manifest 기반 표준 실행기이고,
@@ -133,16 +145,81 @@ def build_executor(manifest: AgentManifest) -> Any:
             details={"executor": declared},
         )
 
-    # 표준 경로: manifest 의 모듈/모델 선언을 따르는 실행기.
-    # 모델 provider 바인딩(#14)이 서기 전까지는 기동 시점에 명확히 실패한다 —
-    # 조용히 대역으로 떨어지면 운영에서 가짜 응답이 나간다
-    raise MalkuthError(
-        category=ErrorCategory.CONFIG,
-        code=ErrorCode.CFG_001,
-        message="no model provider bound for this agent image",
+    # 표준 경로: manifest 의 모듈/모델 선언을 따르는 실행기
+    if manifest.spec.model.provider != ANTHROPIC_PROVIDER:
+        # 조용히 대역으로 떨어지면 운영에서 가짜 응답이 나간다
+        raise MalkuthError(
+            category=ErrorCategory.CONFIG,
+            code=ErrorCode.CFG_001,
+            message="no model provider bound for this provider",
+            agent=manifest.name,
+            details={"provider": manifest.spec.model.provider},
+        )
+
+    from malkuth.agentd.bootstrap import Bootstrap
+    from malkuth.agentd.executor import Executor
+    from malkuth.agentd.providers.anthropic import AnthropicModel
+    from malkuth.modules.promptset import PromptsetLoader
+    from malkuth.modules.registry import ModuleRegistry
+    from malkuth.modules.skillset import SkillsetLoader
+
+    registry = ModuleRegistry.under(Path(os.environ.get(ROOT_ENV, DEFAULT_ROOT)))
+    result = await Bootstrap(
+        manifest,
+        promptset_loader=PromptsetLoader(registry),
+        skillset_loader=SkillsetLoader(registry),
+    ).run()
+
+    registry_tools = AgentToolRegistry(agent=manifest.name, skillsets=result.skillsets)
+
+    return Executor(
         agent=manifest.name,
-        details={"hint": f"set {EXECUTOR_ENV}={ECHO_EXECUTOR} for the test image"},
+        model=AnthropicModel(config=manifest.spec.model, agent=manifest.name),
+        tools=registry_tools,
+        render=lambda task: _render(result, task),
+        tool_schemas=_executable_schemas(result, registry_tools),
     )
+
+
+def _executable_schemas(result: Any, tools: AgentToolRegistry) -> list[SkillSpec]:
+    """Advertise only the tools this executor can actually run.
+
+    실행할 수 없는 tool 을 모델에게 보이면 **tool 에러 루프**에 빠집니다 —
+    모델이 고를 때마다 거부되고, 그 실패를 보고 다시 고릅니다.
+
+    지금 빠지는 것:
+
+    - ``memory_search`` — ``MemoryAccess`` 주입 경로가 아직 없습니다 (#111)
+    - MCP tool — 전송 구현과 **스키마 조회 경로**가 아직 없습니다 (#78)
+    """
+    runnable: list[SkillSpec] = []
+    for name, spec in result.tools.items():
+        if name == MEMORY_SEARCH_TOOL and tools.memory is None:
+            continue
+        if is_mcp_tool(name):
+            # registry 는 MCP tool 을 **서버 이름 문자열**로 담는다 — 스키마는
+            # 세션이 갖고 있고, 그 전송 바인딩은 #78 이 세운다. 문자열을 그대로
+            # 넘기면 provider 가 to_tool_schema() 를 부르다 AttributeError 로
+            # 터진다
+            continue
+        runnable.append(spec)
+    return runnable
+
+
+def _render(result: Any, task: Any) -> str:
+    """promptset 으로 태스크 프롬프트를 렌더링한다.
+
+    ``node_id`` 가 없는 direct 요청은 ``default`` 템플릿을 쓴다
+    (04 Compatibility Rules 4).
+    """
+    if result.promptset is None:
+        raise MalkuthError(
+            category=ErrorCategory.MODULE,
+            code=ErrorCode.MOD_003,
+            message="agent has no promptset to render with",
+        )
+    rendered: str = result.promptset.render(task.template_name, **task.input)
+    return rendered
 
 
 def main() -> None:
@@ -151,7 +228,8 @@ def main() -> None:
     에이전트 데몬을 실행합니다 — manifest 로드 → 실행기 선택 → Control API 서빙.
     """
     manifest = load_manifest(Path(os.environ.get(MANIFEST_ENV, DEFAULT_MANIFEST_PATH)))
-    app = build_app(manifest, build_executor(manifest), token=os.environ.get(TOKEN_ENV))
+    executor = asyncio.run(build_executor(manifest))
+    app = build_app(manifest, executor, token=os.environ.get(TOKEN_ENV))
 
     log.info(
         "agentd starting",

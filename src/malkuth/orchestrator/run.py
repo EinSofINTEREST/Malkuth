@@ -15,6 +15,7 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
 from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
+from malkuth.orchestrator.runstore import RunRecord
 from malkuth.orchestrator.telemetry import (
     STATUS_COMPLETED,
     STATUS_FAILED,
@@ -26,6 +27,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from malkuth.observability.metrics import Metrics
+    from malkuth.orchestrator.runstore import RunStore
 
 DEFAULT_MAX_CONCURRENT_RUNS = 10
 DEFAULT_MAX_SERVICE_RUNS = 5
@@ -99,11 +101,53 @@ class RunManager:
         max_concurrent_runs: int = DEFAULT_MAX_CONCURRENT_RUNS,
         max_service_runs: int = DEFAULT_MAX_SERVICE_RUNS,
         metrics: Metrics | None = None,
+        store: RunStore | None = None,
     ) -> None:
         self._max_mission = max_concurrent_runs
         self._max_service = max_service_runs
         self._runs: dict[str, RunHandle] = {}
         self._metrics = metrics
+        self._store = store
+
+    @property
+    def store(self) -> RunStore | None:
+        """이 manager 가 기록을 남기는 저장소 — 미주입 시 None."""
+        return self._store
+
+    def publish(self, handle: RunHandle) -> None:
+        """Make this run visible to other processes.
+
+        run 을 프로세스 밖에서 볼 수 있게 기록합니다 — 저장소가 없으면
+        무동작이라 기존 배선이 그대로 동작합니다.
+        """
+        if self._store is None:
+            return
+        self._store.upsert(
+            RunRecord(
+                run_id=handle.run_id,
+                graph=handle.graph,
+                mode=str(handle.mode),
+                status=str(handle.status),
+                iteration=handle.iteration,
+                failure_streak=handle.failure_streak,
+                drain=handle.drain_requested,
+            )
+        )
+
+    def sync_drain(self, handle: RunHandle) -> bool:
+        """Pick up a drain requested by another process.
+
+        다른 프로세스가 남긴 drain 요청을 읽어 핸들에 반영합니다 — 이것이
+        없으면 저장소에 요청이 쌓여도 run 은 계속 돕니다.
+
+        Returns:
+            Whether a drain is now requested.
+        """
+        if self._store is not None and not handle.drain_requested:
+            record = self._store.get(handle.run_id)
+            if record is not None and record.drain:
+                handle.request_drain()
+        return handle.drain_requested
 
     @property
     def runs(self) -> dict[str, RunHandle]:
@@ -167,6 +211,7 @@ class RunManager:
 
         handle = RunHandle(run_id=resolved_id, graph=topology.name, mode=mode)
         self._runs[handle.run_id] = handle
+        self.publish(handle)
         telemetry = self._telemetry(handle)
         if telemetry is not None:
             telemetry.run_started()
@@ -203,6 +248,7 @@ class RunManager:
             return
 
         run.status = status
+        self.publish(run)
         telemetry = self._telemetry(run)
         if telemetry is not None:
             telemetry.run_finished(status=status.value)
@@ -228,6 +274,7 @@ class ServiceRunner:
         *,
         sleep: Callable[[float], Awaitable[None]] | None = None,
         metrics: Metrics | None = None,
+        store: RunStore | None = None,
     ) -> None:
         if topology.mode is not GraphMode.SERVICE:
             raise MalkuthError(
@@ -248,11 +295,40 @@ class ServiceRunner:
         self._service = topology.spec.service
         self._graph = graph
         self._sleep = sleep or _no_sleep
+        self._store = store
         self.delays: list[float] = []
         self._telemetry = (
             None
             if metrics is None
             else OrchestratorTelemetry(metrics, graph=topology.name, mode=topology.mode)
+        )
+
+    def _drain_wanted(self, handle: RunHandle) -> bool:
+        """이번 iteration 을 더 돌지 — 다른 프로세스의 요청도 함께 본다.
+
+        저장소를 읽지 않으면 프로세스 밖에서 남긴 drain 요청이 영원히
+        전달되지 않는다 (#102).
+        """
+        if self._store is not None and not handle.drain_requested:
+            record = self._store.get(handle.run_id)
+            if record is not None and record.drain:
+                handle.request_drain()
+        return handle.drain_requested
+
+    def _publish(self, handle: RunHandle) -> None:
+        """iteration 진행을 프로세스 밖에서 볼 수 있게 남긴다."""
+        if self._store is None:
+            return
+        self._store.upsert(
+            RunRecord(
+                run_id=handle.run_id,
+                graph=handle.graph,
+                mode=str(handle.mode),
+                status=str(handle.status),
+                iteration=handle.iteration,
+                failure_streak=handle.failure_streak,
+                drain=handle.drain_requested,
+            )
         )
 
     def _record_iteration(self, status: str) -> None:
@@ -287,7 +363,7 @@ class ServiceRunner:
         state.setdefault(_TRACE_ID_KEY, handle.run_id)
         idle_streak = 0
 
-        while not handle.drain_requested:
+        while not self._drain_wanted(handle):
             if max_iterations is not None and handle.iteration >= max_iterations:
                 break
 
@@ -309,6 +385,7 @@ class ServiceRunner:
 
             handle.failure_streak = 0
             self._record_iteration(STATUS_COMPLETED)
+            self._publish(handle)
             idle_streak = await self._apply_idle_policy(state, idle_streak, is_idle)
 
         handle.status = RunStatus.STOPPED

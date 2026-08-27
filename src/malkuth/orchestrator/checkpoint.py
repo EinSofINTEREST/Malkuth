@@ -6,8 +6,9 @@ Checkpointer 설정과 에러 변환. 노드 완료마다 state 를 저장해 �
 
 from __future__ import annotations
 
+import asyncio
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
 
@@ -99,15 +100,17 @@ def build_checkpointer(
         if resolved is CheckpointerKind.REDIS:
             from langgraph.checkpoint.redis import RedisSaver  # type: ignore[import-not-found]
 
-            saver: BaseCheckpointSaver[Any] = RedisSaver.from_conn_string(url)
-            return saver
+            saver = RedisSaver(redis_url=url)
+            saver.setup()
+            redis_saver: BaseCheckpointSaver[Any] = saver
+            return redis_saver
 
-        from langgraph.checkpoint.postgres import (  # type: ignore[import-not-found]
-            PostgresSaver,
-        )
-
-        postgres_saver: BaseCheckpointSaver[Any] = PostgresSaver.from_conn_string(url)
-        return postgres_saver
+        # **비동기 saver 여야 한다**: 오케스트레이터는 `ainvoke` 로 그래프를
+        # 굴리는데 동기 PostgresSaver 는 `aget_tuple` 이 NotImplementedError 다.
+        #
+        # ``from_conn_string`` 은 context manager 를 돌려준다 — 그것을
+        # checkpointer 로 쓰면 그래프에 물리는 순간 깨진다
+        return cast("BaseCheckpointSaver[Any]", _deferred_postgres_saver(url))
     except ImportError as err:
         raise MalkuthError(
             category=ErrorCategory.CONFIG,
@@ -115,6 +118,64 @@ def build_checkpointer(
             message=f"checkpointer backend not installed: {resolved}",
             details={"checkpointer": str(resolved)},
         ) from err
+
+
+def _deferred_postgres_saver(url: str) -> Any:
+    """Build an async Postgres saver whose schema is prepared on first use.
+
+    ``build_checkpointer`` 는 동기이고 CLI 는 ``asyncio.run`` 밖에서 부른다 —
+    커넥션 열기와 ``setup()`` 은 모두 비동기라 여기서 미룬다.
+
+    LangGraph 는 checkpointer 를 **isinstance 로 검사**하므로 덕타이핑 래퍼는
+    통하지 않는다 — 실제 saver 를 상속한다.
+    """
+    from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+    from psycopg import AsyncConnection
+    from psycopg.rows import dict_row
+
+    class DeferredAsyncPostgresSaver(AsyncPostgresSaver):
+        """첫 사용 시 커넥션을 열고 스키마를 준비하는 saver."""
+
+        def __init__(self) -> None:
+            self._url = url
+            self._prepared = False
+            self._lock = asyncio.Lock()
+            # 부모 생성자는 커넥션을 요구한다 — 준비 전에는 넘길 것이 없다
+            self.conn = None  # type: ignore[assignment]
+            self.pipe = None
+            self.serde = AsyncPostgresSaver.serde
+
+        async def _prepare(self) -> None:
+            if self._prepared:
+                return
+            async with self._lock:
+                if self._prepared:
+                    return
+                connection = await AsyncConnection.connect(
+                    self._url, autocommit=True, row_factory=dict_row
+                )
+                AsyncPostgresSaver.__init__(self, conn=connection)
+                await AsyncPostgresSaver.setup(self)
+                self._prepared = True
+
+        async def aget_tuple(self, config: Any) -> Any:
+            await self._prepare()
+            return await AsyncPostgresSaver.aget_tuple(self, config)
+
+        async def alist(self, config: Any, **kwargs: Any) -> Any:
+            await self._prepare()
+            async for item in AsyncPostgresSaver.alist(self, config, **kwargs):
+                yield item
+
+        async def aput(self, config: Any, *args: Any, **kwargs: Any) -> Any:
+            await self._prepare()
+            return await AsyncPostgresSaver.aput(self, config, *args, **kwargs)
+
+        async def aput_writes(self, config: Any, *args: Any, **kwargs: Any) -> Any:
+            await self._prepare()
+            return await AsyncPostgresSaver.aput_writes(self, config, *args, **kwargs)
+
+    return DeferredAsyncPostgresSaver()
 
 
 async def _guarded(

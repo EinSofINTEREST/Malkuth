@@ -43,11 +43,13 @@ def _content_for(prompt: str, digest: str) -> str:
     에이전트 이름을 하드코딩하지 않고 프롬프트에서 읽으므로, 새 에이전트가
     늘어도 이 대역을 고치지 않는다.
     """
-    asked = _ASKS_FOR.search(prompt)
-    if asked is None:
+    # **마지막** 매치를 쓴다: 계약은 템플릿 끝에 붙고, 그 앞의 렌더된 사용자
+    # 입력에 같은 문구가 섞이면 대역이 입력에 휘둘린다
+    matches = _ASKS_FOR.findall(prompt)
+    if not matches:
         return f"fake-response:{digest}"
 
-    keys = [key.strip() for key in asked.group(1).split(",") if key.strip()]
+    keys = [key.strip() for key in matches[-1].split(",") if key.strip()]
     return json.dumps({key: f"fake-{key}:{digest}" for key in keys})
 
 

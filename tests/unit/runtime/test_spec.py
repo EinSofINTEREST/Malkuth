@@ -13,6 +13,7 @@ from malkuth.runtime.spec import (
     DEFAULT_CONTROL_PORT,
     DEFAULT_NETWORK,
     DEFAULT_PID_LIMIT,
+    TMPFS_OPTIONS,
     build_container_spec,
     container_name,
 )
@@ -51,6 +52,24 @@ def test_root_filesystem_is_read_only_with_writable_tmpfs():
 
     assert spec.read_only_rootfs is True
     assert "/tmp" in spec.tmpfs  # noqa: S108 - 컨테이너 내부 경로
+
+
+def test_the_workspace_is_declared_writable():
+    """02 Security 3 은 /workspace 를 명시적 writable 경로로 규정한다."""
+    assert "/workspace" in build_container_spec(agent_manifest()).tmpfs
+
+
+@pytest.mark.parametrize("path", ["/tmp", "/workspace"])  # noqa: S108 - 컨테이너 내부 경로
+def test_writable_paths_are_mounted_writable_by_the_container_user(path):
+    """옵션을 비워 두면 root 755 로 생성되어 uid 1000 이 쓸 수 없다.
+
+    목록에 있는지만 보면 이 결함을 놓친다 — 실제로 놓쳤고, Claude Code
+    에이전트가 파일 생성 태스크에서 부딪혀 발견했다 (#136).
+    """
+    rendered = build_container_spec(agent_manifest()).to_docker_kwargs()
+
+    assert rendered["tmpfs"][path] == TMPFS_OPTIONS
+    assert "1777" in rendered["tmpfs"][path]
 
 
 def test_pid_limit_is_applied():

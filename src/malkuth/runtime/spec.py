@@ -21,8 +21,24 @@ DEFAULT_CONTROL_PORT: Final = 8080
 DEFAULT_PID_LIMIT: Final = 256
 DEFAULT_BASE_IMAGE: Final = "malkuth/agent-base:0.1.0"
 
-# 컨테이너가 쓸 수 있어야 하는 임시 경로 — read-only rootfs 위의 tmpfs
+# 컨테이너가 쓸 수 있어야 하는 임시 경로 — read-only rootfs 위의 tmpfs.
+#
+# **작업대이지 출력함이 아니다**: tmpfs 라 재시작 시 소멸하고, 다음 노드는
+# 다른 컨테이너라 여기 남긴 파일을 보지 못한다. 산출물은 graph state 또는
+# artifact 저장소로 간다 (02 Statelessness / Output Discipline). 정당한 용도는
+# 태스크 한 번 안의 scratch 뿐 — 02 가 허용하는 "재시작 시 소실 전제" 범위다
 _WRITABLE_TMPFS: Final = ("/tmp", "/workspace")  # noqa: S108 - 컨테이너 내부 경로
+
+TMPFS_OPTIONS: Final = "mode=1777"
+"""tmpfs 마운트 옵션.
+
+옵션을 비워 두면 root 소유 755 로 생성되어 **컨테이너 사용자(uid 1000)가 쓸 수
+없다.** ``/tmp`` 만 우연히 동작하는데, Docker 가 그 경로에만 1777 을 주기
+때문이다 — ``/workspace`` 는 그 예외에 해당하지 않아 조용히 막혔다.
+
+sticky bit(1) 는 유지한다: 컨테이너 안에 사용자는 하나뿐이지만, 표준
+``/tmp`` 의미와 어긋나게 둘 이유가 없다.
+"""
 
 # 컨테이너가 호스트 네트워크/PID/IPC 를 공유하면 격리가 무너진다
 _FORBIDDEN_NETWORKS: Final = frozenset({"host", "none", "bridge", "container"})
@@ -82,7 +98,7 @@ class ContainerSpec:
             "user": self.user,
             "read_only": self.read_only_rootfs,
             "cap_drop": list(self.cap_drop),
-            "tmpfs": dict.fromkeys(self.tmpfs, ""),
+            "tmpfs": dict.fromkeys(self.tmpfs, TMPFS_OPTIONS),
             "volumes": {
                 volume["name"]: {
                     "bind": volume["mount_path"],

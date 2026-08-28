@@ -391,6 +391,7 @@ def _control_clients(args: argparse.Namespace) -> dict[str, Any]:
     빠뜨리면 모든 노드 호출이 401 이 됩니다. ``--agent-token`` 이 우선하고,
     없으면 ``MALKUTH_AGENT_TOKEN`` 을 봅니다 (compose 와 같은 키).
     """
+    from malkuth.core.errors import NETWORK_RETRY
     from malkuth.runtime.control import ControlClient
     from malkuth.runtime.tokens import AGENT_TOKEN_ENV
 
@@ -402,7 +403,11 @@ def _control_clients(args: argparse.Namespace) -> dict[str, Any]:
         name, _, url = entry.partition("=")
         if not name or not url:
             continue
-        clients[name] = ControlClient(url, agent=name, token=token)
+        # 05 Retry Layering — runtime 이 Control API 재시도 주체다.
+        # 여기서 켜지 않으면 정책은 정의만 되고 아무 일도 하지 않는다.
+        # 읽기(health/card)만 재시도한다 — invoke 는 부수효과를 낳고
+        # node 재시도(NodeSpec.retry)와 곱해진다
+        clients[name] = ControlClient(url, agent=name, token=token, retry=NETWORK_RETRY)
     return clients
 
 

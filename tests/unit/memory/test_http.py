@@ -236,3 +236,89 @@ async def test_read_maps_transport_failure_to_mem_004():
         await access.read("longterm")
 
     assert exc_info.value.code == ErrorCode.MEM_004
+
+
+# --- 광고 --------------------------------------------------------------------
+# `/v1/spaces` 는 에이전트가 **자기 범위를 확인하는** 창구다. 광고가 실제 권한과
+# 어긋나면 에이전트는 자기 권한을 잘못 알고, 쓰기를 시도해 401 을 받는다 (#188)
+
+
+def advertise(agent: str, *, group: str | None = None, **declarations) -> list[dict[str, str]]:
+    """한 에이전트에게 `/v1/spaces` 가 무엇을 광고하는지."""
+    from fastapi.testclient import TestClient
+
+    tokens = TokenRegistry()
+    secret = tokens.issue(build_token(agent=agent, group=group, **declarations))
+    indexer = IndexRegistry()
+    store = SqliteMemoryStore()
+    try:
+        app = create_app(
+            MemoryService(store=store), Recall(indexes=indexer.indexes), tokens, indexer=indexer
+        )
+        with TestClient(app) as client:
+            return client.get(  # type: ignore[no-any-return]
+                "/v1/spaces", headers={"Authorization": f"Bearer {secret}"}
+            ).json()
+    finally:
+        store.close()
+
+
+def mode_of(spaces: list[dict[str, str]], alias: str) -> str:
+    return next(space["mode"] for space in spaces if space["alias"] == alias)
+
+
+def test_a_global_space_is_advertised_read_only_without_writers():
+    """`writers` 미지정이면 전 에이전트 read-only — rw 로 광고하면 거짓말이다."""
+    spaces = advertise("researcher", global_spaces=[("org", ())])
+
+    assert mode_of(spaces, "org") == "ro"
+
+
+def test_a_global_space_is_advertised_writable_to_a_declared_writer():
+    """쓸 수 있는 에이전트에게까지 ro 로 보이면 반대 방향으로 틀린다."""
+    spaces = advertise("librarian", global_spaces=[("org", ("librarian",))])
+
+    assert mode_of(spaces, "org") == "rw"
+
+
+def test_a_local_space_is_still_advertised_writable():
+    """local 은 mode 가 정본이다 — global 수정이 나머지를 끌고 가면 안 된다."""
+    spaces = advertise("researcher", local=[("longterm", "researcher")])
+
+    assert mode_of(spaces, "longterm") == "rw"
+
+
+def test_a_read_only_group_space_is_advertised_read_only():
+    """group 의 ro 선언도 그대로 보여야 한다."""
+    from malkuth.core.manifest import MemoryMode as Mode
+
+    spaces = advertise("researcher", group="research", group_spaces=[("knowledge", Mode.RO)])
+
+    assert mode_of(spaces, "knowledge") == "ro"
+
+
+def test_the_advertised_mode_matches_what_append_actually_does():
+    """광고와 실제가 갈리면 이 endpoint 는 쓸모가 없다."""
+    from fastapi.testclient import TestClient
+
+    tokens = TokenRegistry()
+    secret = tokens.issue(build_token(agent="researcher", group=None, global_spaces=[("org", ())]))
+    indexer = IndexRegistry()
+    store = SqliteMemoryStore()
+    try:
+        app = create_app(
+            MemoryService(store=store), Recall(indexes=indexer.indexes), tokens, indexer=indexer
+        )
+        headers = {"Authorization": f"Bearer {secret}"}
+        with TestClient(app) as client:
+            advertised = mode_of(client.get("/v1/spaces", headers=headers).json(), "org")
+            written = client.post(
+                "/v1/append",
+                json={"space": "org", "entry": entry("org", "x").model_dump(mode="json")},
+                headers=headers,
+            )
+    finally:
+        store.close()
+
+    assert advertised == "ro"
+    assert written.status_code == 401

@@ -115,11 +115,21 @@ uv run malkuth run graphs/feed-monitor.yaml --service --iterations 2 \
 `--iterations` 없는 service run 은 중단할 때까지 돕니다. `Ctrl-C` 는 drain 요청이므로
 진행 중인 iteration 을 끝낸 뒤 정지합니다 — 중간에 끊기지 않습니다.
 
-기대기 전에 알아야 할 한계가 둘 있습니다. `--checkpointer` 는 현재 `memory` 로만 동작합니다 —
-CLI 가 `postgres`/`redis` 의 접속 URL 을 넘길 통로가 없습니다
-([#220](https://github.com/EinSofINTEREST/Malkuth/issues/220)). 그동안 영속 checkpoint 는
-라이브러리 API 로 접근할 수 있습니다. 그리고 `run-list` / `run-drain` / `run-resume` 는
-아직 제공되지 않는 control plane 프로세스를 필요로 합니다
+checkpoint 백엔드는 설정이 정하고, `--checkpointer` 는 한 번의 실행에 대한 override 입니다.
+`postgres`/`redis` 는 접속 URL 이 추가로 필요한데, 자격증명이 파일에 남지 않도록 밖에서
+주는 것이 기본 경로입니다:
+
+```bash
+MALKUTH_ENV=prod \
+MALKUTH_ORCHESTRATOR__CHECKPOINTER_URL=postgresql://user:pass@host:5432/malkuth \
+  uv run malkuth run graphs/research-pipeline.yaml --agent ...
+```
+
+영속 백엔드에서는 같은 `--run-id` 로 다시 실행하면 마지막 checkpoint 에서 이어집니다 —
+다른 프로세스에서도 됩니다. 기본값 `memory` 는 프로세스와 함께 사라지므로 재개할 수 없습니다.
+
+알아야 할 한계가 하나 남아 있습니다. `run-list` / `run-drain` / `run-resume` 는 아직
+제공되지 않는 control plane 프로세스를 필요로 합니다
 ([#221](https://github.com/EinSofINTEREST/Malkuth/issues/221)).
 
 ### 상주 프로세스

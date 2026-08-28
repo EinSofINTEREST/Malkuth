@@ -22,7 +22,7 @@ from malkuth.cli.integrity import (
     ghost_containers,
     orphan_checkpoints,
 )
-from malkuth.config import load_config
+from malkuth.config import DEFAULT_CONFIG_DIR, ENVIRONMENT_ENV, load_config, resolve_environment
 from malkuth.core.errors import MalkuthError
 from malkuth.core.manifest import AgentManifest, GroupManifest
 from malkuth.deploy import ValidationReport, validate_deployment
@@ -217,7 +217,7 @@ def cmd_config(args: argparse.Namespace) -> int:
 
     환경의 해석된 설정을 보여줍니다 — 환경변수 오버라이드가 반영된 결과입니다.
     """
-    config = load_config(args.environment, config_dir=args.config_dir)
+    config = load_config(resolve_environment(args.environment), config_dir=args.config_dir)
     emit(config.model_dump(mode="json"), as_json=True)
     return EXIT_OK
 
@@ -246,6 +246,29 @@ def cmd_check(args: argparse.Namespace) -> int:
     return EXIT_OK if not found else EXIT_FAILED
 
 
+def checkpointer_for(args: argparse.Namespace) -> Any:
+    """Build the checkpointer a run should use.
+
+    설정이 backend 와 URL 을 쥐고, ``--checkpointer`` 는 override 입니다.
+    URL 을 받을 자리가 없어 `--checkpointer postgres` 가 **어떤 조합으로도**
+    동작하지 않았습니다 (#220) — `configs/prod.yaml` 의 `checkpointer: postgres`
+    선언도 도달 불가능했습니다.
+
+    자격증명은 파일에 굽지 않는 것이 기본이므로 URL 은
+    ``MALKUTH_ORCHESTRATOR__CHECKPOINTER_URL`` 로 덮어쓸 수 있습니다.
+    """
+    from malkuth.orchestrator.checkpoint import build_checkpointer
+
+    orchestrator = load_config(
+        resolve_environment(getattr(args, "environment", None)),
+        config_dir=getattr(args, "config_dir", DEFAULT_CONFIG_DIR),
+    ).orchestrator
+    return build_checkpointer(
+        args.checkpointer or orchestrator.checkpointer,
+        url=orchestrator.checkpointer_url,
+    )
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     """Submit a mission run and wait for it to finish.
 
@@ -257,7 +280,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     """
     import asyncio
 
-    from malkuth.orchestrator.checkpoint import build_checkpointer, close_checkpointer
+    from malkuth.orchestrator.checkpoint import close_checkpointer
     from malkuth.orchestrator.submit import RunSubmitter
     from malkuth.runtime.nodes import ControlNodeRuntime
 
@@ -283,7 +306,7 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     # CLI 는 단발 실행이라 scrape 대상이 아니다 — 서버는 띄우지 않고 registry 만
     # 물려 각 계층의 집계가 실제로 돌게 한다 (상주 프로세스는 agentd 쪽)
-    checkpointer = build_checkpointer(args.checkpointer)
+    checkpointer = checkpointer_for(args)
     submitter = RunSubmitter(
         runtime=ControlNodeRuntime(clients=_control_clients(args)),
         checkpointer=checkpointer,
@@ -525,15 +548,26 @@ def build_parser() -> argparse.ArgumentParser:
     status.set_defaults(handler=cmd_status)
 
     config = subcommands.add_parser("config", help="show resolved configuration")
-    config.add_argument("environment", nargs="?", default="dev")
-    config.add_argument("--config-dir", default="configs", dest="config_dir")
+    config.add_argument("environment", nargs="?", default=None)
+    config.add_argument("--config-dir", default=DEFAULT_CONFIG_DIR, dest="config_dir")
     config.set_defaults(handler=cmd_config)
 
     run = subcommands.add_parser("run", help="submit a mission run")
     run.add_argument("graph", help="path to the graph topology yaml")
     run.add_argument("--input", default=None, help="initial state as json")
     run.add_argument("--run-id", default=None, dest="run_id")
-    run.add_argument("--checkpointer", default="default")
+    run.add_argument(
+        "--checkpointer",
+        default=None,
+        help="override the configured checkpoint backend (memory|postgres|redis)",
+    )
+    run.add_argument(
+        "--env",
+        default=None,
+        dest="environment",
+        help=f"configuration environment (default: ${ENVIRONMENT_ENV}, else dev)",
+    )
+    run.add_argument("--config-dir", default=DEFAULT_CONFIG_DIR, dest="config_dir")
     run.add_argument(
         "--agent",
         action="append",

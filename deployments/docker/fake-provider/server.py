@@ -76,17 +76,29 @@ def _content_for(prompt: str, digest: str) -> str:
 
 
 _LIST_KEYS = frozenset({"findings", "new_items", "seen_ids", "spaces", "pending_spaces"})
-"""state schema 가 리스트로 선언한 키 — 대역도 그 계약을 지켜야 한다.
+"""state schema 가 리스트로 선언한 키."""
 
-전부 문자열로 채우면 promptset 의 `{type: array}` 검증에 걸리고, 걸리지 않는
-경로에서는 **선언과 다른 타입이 state 에 들어간다.**
-"""
+_BOOL_KEYS = frozenset({"needs_research"})
+"""state schema 가 불리언으로 선언한 키 — 그래프의 조건 분기가 이것을 읽는다."""
+
+_INT_KEYS = frozenset({"notified", "compacted"})
+"""state schema 가 정수로 선언한 키."""
 
 
 def _value_for(key: str, digest: str) -> object:
-    """키가 요구하는 형태로 값을 만든다."""
+    """키가 요구하는 형태로 값을 만든다.
+
+    전부 문자열로 채우면 **선언과 다른 타입이 state 에 들어간다** — 그것을
+    소비하는 노드가 런타임에 깨지고, 원인이 몇 단계 뒤에서 드러난다.
+    대역이 계약을 지켜야 E2E 가 계약 위반을 잡을 수 있다.
+    """
     if key in _LIST_KEYS:
         return [f"fake-{key}:{digest}"]
+    if key in _BOOL_KEYS:
+        # 조건 분기가 이 값을 읽는다 — 문자열이면 항상 참이라 분기가 죽는다
+        return True
+    if key in _INT_KEYS:
+        return 1
     return f"fake-{key}:{digest}"
 
 

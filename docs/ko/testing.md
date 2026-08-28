@@ -85,9 +85,11 @@ pytest-cov `--cov-fail-under=70` 로 강제. 핵심 경로 90%+ 와 에러 변�
   바인딩은 존재하고 대역 endpoint 로 검증되지만, E2E 스택이 아직 그것을
   제공하지 않습니다 — 메모리 축적이 후속 태스크 프롬프트로 들어가는 것은
   유닛에서만 증명됩니다. 순위 품질은 어느 쪽이든 측정되지 않습니다 (위 항목).
-- **service run 은 오케스트레이터 재시작을 넘습니다 — 에이전트 재시작은
-  아직입니다.** checkpoint, 저장된 iteration 회차, 외부에서 남긴 drain 요청이
-  모두 새 오케스트레이터 프로세스(같은 Postgres checkpointer + run store)를
-  넘어 살아남습니다 (`tests/e2e/test_service_restart.py`). 덮이지 **않은**
-  것은 iteration 도중 **에이전트** 컨테이너를 죽이는 경우입니다 — 여기서
-  태운 재시작 경계는 오케스트레이터의 것이지 에이전트의 것이 아닙니다.
+- **service run 은 두 재시작 경계를 모두 넘습니다 — 자동 복구는 아직입니다.**
+  오케스트레이터 재시작은 checkpoint·저장된 iteration 회차·외부 drain 요청을
+  이어받고 (`tests/e2e/test_service_restart.py`), 에이전트 컨테이너를 죽이면
+  run 이 `GRAPH_005` 로 정지해 그 사실이 다른 프로세스에서도 보이며,
+  에이전트가 돌아오면 `resume_service` 로 이어집니다
+  (`tests/e2e/test_agent_kill.py`). 덮이지 **않은** 것은 runtime 이 죽은
+  에이전트를 **스스로 재시작**하는 경로입니다 (02 Lifecycle 의 backoff 정책)
+  — 여기서는 테스트가 운영자를 대신해 되살립니다.

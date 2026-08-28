@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
 from malkuth.orchestrator.topology import NodeSpec, resolve_import_ref
@@ -167,9 +167,44 @@ def merge_output(
                 node_id=node.id,
             )
         path = source.removeprefix(_OUTPUT_PREFIX) if source.startswith(_OUTPUT_PREFIX) else source
-        update[state_key] = _read_path(output, path, node_id=node.id, source=source)
+        value = _read_path(output, path, node_id=node.id, source=source)
+        if schema is not None:
+            # **변환 결과**를 쓴다: 검증만 하고 원값을 넣으면 "3" 이 int 필드에
+            # 문자열로 남아, 계약을 강제한다면서 계약과 다른 값을 넣게 된다
+            value = _coerced(schema, state_key, value, node_id=node.id)
+        update[state_key] = value
 
     return update
+
+
+def _coerced(schema: type[BaseModel], field: str, value: Any, *, node_id: str) -> Any:
+    """Validate one projected value against its declared field.
+
+    투영값 하나를 선언된 필드로 검증하고, **변환된 값**을 돌려줍니다.
+
+    **모델 전체가 아니라 필드 단위로 본다**: 노드는 state 일부만 돌려주므로,
+    전체를 검증하면 아직 채워지지 않은 필수 필드에 걸린다.
+
+    Returns:
+        The value as the declared type sees it.
+
+    Raises:
+        MalkuthError: GRAPH/``GRAPH_003`` if the value does not satisfy the
+            declared type — 선언과 다른 타입이 들어가면 그것을 소비하는 노드가
+            런타임에 깨지고, 원인이 몇 단계 뒤에서 드러난다.
+    """
+    declared = schema.model_fields.get(field)
+    if declared is None:  # 앞선 known 검사가 이미 걸렀다
+        return value
+    try:
+        return TypeAdapter(declared.annotation).validate_python(value)
+    except ValidationError as err:
+        raise _state_error(
+            f"output does not satisfy the state field: {field}",
+            node_id=node_id,
+            field=field,
+            problem=err.errors()[0]["msg"] if err.errors() else "type mismatch",
+        ) from err
 
 
 def validate_state(schema: type[BaseModel], state: dict[str, Any]) -> dict[str, Any]:

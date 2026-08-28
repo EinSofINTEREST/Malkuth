@@ -273,6 +273,29 @@ def test_run_without_agent_addresses_fails_at_the_node(workspace, capsys):
     assert "failed" in capsys.readouterr().out
 
 
+def test_run_closes_the_checkpointer_it_opened(workspace, monkeypatch):
+    """여는 쪽이 닫는다 — 프로세스 종료에 기대면 소유자가 코드에 드러나지 않는다.
+
+    상주 실행(service)에서는 그 기대 자체가 성립하지 않는다.
+    """
+    import malkuth.orchestrator.checkpoint as checkpoint_module
+
+    closed: list[object] = []
+    real = checkpoint_module.close_checkpointer
+
+    async def recording(checkpointer):
+        closed.append(checkpointer)
+        await real(checkpointer)
+
+    monkeypatch.setattr(checkpoint_module, "close_checkpointer", recording)
+    graph = str(workspace / "graphs" / "solo-graph.yaml")
+
+    # 노드는 에이전트 주소가 없어 실패하지만, 정리는 그와 무관하게 일어나야 한다
+    run_cli(["--root", str(workspace), "run", graph, "--input", '{"query": "q"}'])
+
+    assert closed, "checkpointer 를 만든 곳이 닫지 않으면 커넥션이 샌다"
+
+
 def test_run_parses_agent_addresses():
     args = build_parser().parse_args(
         ["run", "g.yaml", "--agent", "planner=http://a:8080", "--agent", "writer=http://b:8080"]

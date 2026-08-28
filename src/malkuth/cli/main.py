@@ -257,7 +257,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     """
     import asyncio
 
-    from malkuth.orchestrator.checkpoint import build_checkpointer
+    from malkuth.orchestrator.checkpoint import build_checkpointer, close_checkpointer
     from malkuth.orchestrator.submit import RunSubmitter
     from malkuth.runtime.nodes import ControlNodeRuntime
 
@@ -283,16 +283,25 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     # CLI 는 단발 실행이라 scrape 대상이 아니다 — 서버는 띄우지 않고 registry 만
     # 물려 각 계층의 집계가 실제로 돌게 한다 (상주 프로세스는 agentd 쪽)
+    checkpointer = build_checkpointer(args.checkpointer)
     submitter = RunSubmitter(
         runtime=ControlNodeRuntime(clients=_control_clients(args)),
-        checkpointer=build_checkpointer(args.checkpointer),
+        checkpointer=checkpointer,
         metrics=Metrics(),
     )
 
     if getattr(args, "service", False):
-        return _run_service(submitter, topology, payload, args)
+        return _run_service(submitter, topology, payload, args, checkpointer=checkpointer)
 
-    result = asyncio.run(submitter.submit(topology, payload, run_id=args.run_id))
+    async def run_once() -> Any:
+        # 여는 쪽이 닫는다 — checkpointer 를 만든 것이 여기이므로 정리도 여기서.
+        # 프로세스 종료에 기대면 소유자가 코드에 드러나지 않는다
+        try:
+            return await submitter.submit(topology, payload, run_id=args.run_id)
+        finally:
+            await close_checkpointer(checkpointer)
+
+    result = asyncio.run(run_once())
 
     emit(
         {
@@ -308,7 +317,12 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 
 def _run_service(
-    submitter: Any, topology: Any, payload: dict[str, Any], args: argparse.Namespace
+    submitter: Any,
+    topology: Any,
+    payload: dict[str, Any],
+    args: argparse.Namespace,
+    *,
+    checkpointer: Any = None,
 ) -> int:
     """Drive a service graph until interrupted or bounded.
 
@@ -341,6 +355,11 @@ def _run_service(
             if installed:
                 with contextlib.suppress(NotImplementedError):
                     loop.remove_signal_handler(signal.SIGINT)
+            # 상주 실행이라 더 중요하다 — 정리하지 않으면 커넥션을 물고 있는다
+            if checkpointer is not None:
+                from malkuth.orchestrator.checkpoint import close_checkpointer
+
+                await close_checkpointer(checkpointer)
         return handle
 
     try:

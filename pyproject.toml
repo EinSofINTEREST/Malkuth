@@ -23,6 +23,8 @@ dependencies = [
     "mcp>=1.1.0",
     "psycopg[binary]>=3.2.0",
     "anthropic>=0.40.0",
+    "langgraph-checkpoint-postgres>=3.1.2",
+    "langgraph-checkpoint-redis>=0.5.2",
 ]
 
 [dependency-groups]

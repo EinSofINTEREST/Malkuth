@@ -65,14 +65,21 @@ def client(server: FlakyServer, waits: list[float], **kwargs: Any) -> ControlCli
     )
 
 
-async def test_a_transient_health_failure_is_retried(waits):
-    """#184 — 이 배선이 없어 순간 장애가 곧바로 unhealthy 판정이 됐다."""
-    server = FlakyServer(failures=2)
+async def test_health_is_not_retried(waits):
+    """#217 — health 는 **위층에** 재시도를 갖고 있다. 안에서 또 하면 이중이다.
 
-    health = await client(server, waits).health()
+    `HealthMonitor` 가 연속 실패를 세어 임계에서 Unhealthy 로 전이시킨다.
+    여기서 backoff 를 돌면 한 번의 확인이 monitor 의 timeout(3초)을 넘겨
+    모든 확인이 timeout 으로 잘리고 실제 원인이 사라진다.
+    """
+    server = FlakyServer(failures=1)
 
-    assert health.status == "healthy"
-    assert len(server.calls) == 3
+    with pytest.raises(MalkuthError) as excinfo:
+        await client(server, waits).health()
+
+    assert excinfo.value.code == ErrorCode.NET_001
+    assert len(server.calls) == 1, "health 가 안에서 재시도하면 이중 재시도다"
+    assert waits == []
 
 
 async def test_the_card_read_is_retried(waits):
@@ -98,20 +105,20 @@ async def test_invoke_is_not_retried(waits):
 
 async def test_retry_is_off_unless_the_assembly_turns_it_on(waits):
     """미주입이면 재시도하지 않는다 — 조립하는 쪽이 켠다."""
-    server = FlakyServer(failures=1)
+    server = FlakyServer(failures=1, body={"name": "researcher"})
 
     with pytest.raises(MalkuthError):
-        await client(server, waits, retry=None).health()
+        await client(server, waits, retry=None).card()
 
     assert len(server.calls) == 1
 
 
 async def test_exhausted_retries_surface_the_last_error(waits):
     """감싸서 올리면 호출자의 카테고리 기반 처리가 깨진다."""
-    server = FlakyServer(failures=99)
+    server = FlakyServer(failures=99, body={"name": "researcher"})
 
     with pytest.raises(MalkuthError) as excinfo:
-        await client(server, waits).health()
+        await client(server, waits).card()
 
     assert excinfo.value.code == ErrorCode.NET_001
     assert len(server.calls) == NETWORK_RETRY.max_attempts

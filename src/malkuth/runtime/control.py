@@ -168,12 +168,21 @@ class ControlClient:
         return adapter.validate_python(json.loads(raw))
 
     async def health(self) -> HealthStatus:
-        """Read aggregated agent health.
+        """Read aggregated agent health — deliberately without retry.
 
         에이전트 상태를 조회합니다. ``/health`` 는 무인증 경로입니다
         (Docker healthcheck 가 직접 호출).
+
+        **여기서 재시도하지 않는 것이 계약이다** (#217): health 확인은 이미
+        위층에 재시도를 갖고 있다 — `HealthMonitor` 가 연속 실패를 세어
+        임계(기본 3회)에서 Unhealthy 로 전이시킨다. 안에서 또 재시도하면 05
+        Retry Layering 이 금지하는 이중 재시도가 되고, 한 번의 확인이 backoff
+        만으로 monitor 의 timeout(기본 3초)을 넘겨 **모든 확인이 timeout 으로
+        잘린다** — 실제 원인(`NET_001`)이 기록되지 않는다.
+
+        `card` 처럼 한 번의 성공이 필요한 읽기는 그대로 재시도한다.
         """
-        payload = await self._retrying_read(
+        payload = await self._request_json(
             "GET",
             "/v1/health",
             timeout_s=DEFAULT_HEALTH_TIMEOUT_S,

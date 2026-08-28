@@ -39,8 +39,45 @@ services:
       timeout: 3s
       retries: 15
 
+  # 09 Access Enforcement 1 — **저장소 자격증명은 이 컨테이너만 갖는다.**
+  # 에이전트는 불투명 토큰으로 HTTP 를 통해서만 닿는다 (#181, #206)
+  memory-service:
+    image: malkuth/memory-service:${IMAGE_TAG:-0.1.0}
+    build:
+      context: ../..
+      dockerfile: deployments/docker/memory-service.Dockerfile
+      args:
+        BASE_TAG: ${IMAGE_TAG:-0.1.0}
+    networks: [malkuth-e2e-net]
+    read_only: true
+    user: "1000:1000"
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    environment:
+      # 대역이 임베딩을 낸다 — 실 embedding API 는 부르지 않는다 (06)
+      MALKUTH_EMBEDDING_BASE_URL: http://fake-provider:8000
+      # 토큰은 기동하며 발급된다 — 공유 볼륨으로 에이전트에 전달한다.
+      # 정적 env 로는 순서가 맞지 않는다 (서비스가 뜨기 전에 값이 없다)
+      MALKUTH_MEMORY_TOKENS_PATH: /tokens/memory.json
+    ports:
+      - "18090:8090"
+    volumes:
+      - ../..:/repo:ro
+      - memory-tokens:/tokens
+    tmpfs:
+      - /tmp:size=16m
+    depends_on:
+      fake-provider:
+        condition: service_healthy
+
   fake-provider:
     image: malkuth/fake-provider:${IMAGE_TAG:-0.1.0}
+    environment:
+      # memoryset 선언과 맞춰야 한다 — 어긋나면 append 는 되고 검색이 MEM_003 로
+      # 죽는다 (#159 가 그 불일치를 거부한다)
+      FAKE_EMBEDDING_DIMENSIONS: "1536"
     build:
       context: ../..
       dockerfile: deployments/docker/fake-provider.Dockerfile
@@ -83,6 +120,14 @@ services:
       args:
         BASE_TAG: ${IMAGE_TAG:-0.1.0}
         AGENT: planner
+    # 토큰은 Memory Service 가 기동하며 발급한다 — 읽기 전용으로 받는다
+    volumes:
+      - memory-tokens:/tokens:ro
+    depends_on:
+      fake-provider:
+        condition: service_healthy
+      memory-service:
+        condition: service_healthy
     ports:
       - "18082:8080"
       - "19102:19102"
@@ -90,6 +135,11 @@ services:
       - "19082:9090"
     # 앵커 뒤에 두어 포트만 덮어쓴다
     environment: &reference-env
+      # 09 — 에이전트는 HTTP 로만 메모리에 닿는다. DSN 은 여기 없다.
+      # 토큰은 서비스가 기동하며 발급하므로 파일로 받는다 (정적 env 로는
+      # 순서가 맞지 않는다)
+      MALKUTH_MEMORY_URL: http://memory-service:8090
+      MALKUTH_MEMORY_TOKEN_FILE: /tokens/memory.json
       MALKUTH_A2A_PORT: "19102"
       # peer 는 **컨테이너 네트워크에서** 이 이름으로 닿는다
       MALKUTH_A2A_ADVERTISED_HOST: agent-planner
@@ -111,6 +161,14 @@ services:
       args:
         BASE_TAG: ${IMAGE_TAG:-0.1.0}
         AGENT: researcher
+    # 토큰은 Memory Service 가 기동하며 발급한다 — 읽기 전용으로 받는다
+    volumes:
+      - memory-tokens:/tokens:ro
+    depends_on:
+      fake-provider:
+        condition: service_healthy
+      memory-service:
+        condition: service_healthy
     ports:
       - "18083:8080"
       - "19103:19103"
@@ -131,6 +189,14 @@ services:
       args:
         BASE_TAG: ${IMAGE_TAG:-0.1.0}
         AGENT: writer
+    # 토큰은 Memory Service 가 기동하며 발급한다 — 읽기 전용으로 받는다
+    volumes:
+      - memory-tokens:/tokens:ro
+    depends_on:
+      fake-provider:
+        condition: service_healthy
+      memory-service:
+        condition: service_healthy
     ports:
       - "18084:8080"
       - "19104:19104"
@@ -143,6 +209,10 @@ services:
       MALKUTH_A2A_ADVERTISED_HOST: agent-writer
 
 volumes:
+  # Memory Service 가 발급한 토큰을 에이전트가 읽어 간다 — 값은 불투명 토큰이라
+  # 저장소 자격증명이 아니다 (09 Access Enforcement 1)
+  memory-tokens:
+
   # checkpoint 는 **재시작을 넘겨 살아남아야** 검증이 성립한다.
   # 기본은 호스트의 /data 아래 — 경로가 없는 환경(CI)은 MALKUTH_E2E_DATA 로
   # 옮긴다. bind 대상이 없으면 compose 가 기동 자체를 거부하기 때문이다

@@ -14,10 +14,18 @@ import httpx
 
 from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
 from malkuth.memory.entry import MemoryEntry
-from malkuth.memory.recall import ScoredEntry
+from malkuth.memory.recall import (
+    ScoredEntry,
+    apply_budget,
+    render_context,
+    resolve_corrections,
+    superseded_ids,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+
+    from malkuth.modules.memoryset import RecallSpec
 
 DEFAULT_TIMEOUT_S = 30.0
 
@@ -113,6 +121,34 @@ class HttpMemoryAccess:
             )
             for item in found
         ]
+
+    async def recall_for_task(self, query: str, *, policy: RecallSpec) -> str:
+        """Recall once for a task entry, ready for prompt injection.
+
+        태스크 진입 시 1회 회상해 프롬프트에 붙일 텍스트를 만듭니다.
+
+        **검색은 서비스가 한다**: 인덱스는 서비스 쪽에 있으므로 여기서는
+        정책(threshold / budget)만 적용합니다 — 경계를 클라이언트가 다시
+        구현하면 두 곳이 갈라집니다.
+
+        Args:
+            query: The task text to recall against.
+            policy: The memoryset recall policy (k / min_score / budget_tokens).
+
+        Returns:
+            The rendered context, or an empty string when auto-recall is off or
+            nothing survived the threshold.
+        """
+        if not policy.auto:
+            return ""
+
+        found = await self.search(query, k=policy.k)
+        # 정정 체인은 최신 항목만 주입한다 (09 Rule 4)
+        current = resolve_corrections(found, superseded_ids(scored.entry for scored in found))
+        selected = apply_budget(
+            current, min_score=policy.min_score, budget_tokens=policy.budget_tokens
+        )
+        return render_context(selected)
 
     async def append(self, space: str, **kwargs: Any) -> MemoryEntry:
         """rw 권한이 있는 space 에만 추가합니다 — 아니면 ``MEM_001``."""

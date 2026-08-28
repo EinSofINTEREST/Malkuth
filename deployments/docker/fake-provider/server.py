@@ -155,6 +155,22 @@ def _vector(text: str) -> list[float]:
     return [value / norm for value in vector] if norm else vector
 
 
+_SEEN: list[str] = []
+"""대역이 받은 프롬프트 — E2E 가 **주입된 내용**을 확인하는 유일한 창구다.
+
+auto-recall 은 프롬프트에 붙는 것이 전부라, 저장이 됐다는 것만으로는 증명되지
+않는다 (#206). 대역이니 기억해도 되지만 무한히 쌓이면 곤란하므로 상한을 둔다.
+"""
+
+MAX_SEEN = 50
+
+
+def _remember(prompt: str) -> None:
+    """최근 프롬프트를 기억한다 — 오래된 것부터 버린다."""
+    _SEEN.append(prompt)
+    del _SEEN[:-MAX_SEEN]
+
+
 class Handler(BaseHTTPRequestHandler):
     """Minimal request handler — one endpoint, no auth."""
 
@@ -169,11 +185,12 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         # 경로로 갈라야 한다 — 모델과 embedding 은 응답 모양이 다르다
-        answer = (
-            embed(payload)
-            if self.path.rstrip("/").endswith("/embeddings")
-            else respond_to(prompt_of(payload))
-        )
+        if self.path.rstrip("/").endswith("/embeddings"):
+            answer = embed(payload)
+        else:
+            prompt = prompt_of(payload)
+            _remember(prompt)
+            answer = respond_to(prompt)
         body = json.dumps(answer).encode()
         self.send_response(200)
         self.send_header("content-type", "application/json")
@@ -182,8 +199,15 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self) -> None:  # noqa: N802
-        """헬스 확인 — compose 의 healthcheck 가 호출한다."""
-        body = b'{"status":"healthy"}'
+        """헬스 확인, 그리고 받은 프롬프트 조회.
+
+        ``/prompts`` 는 **E2E 전용**이다: auto-recall 은 프롬프트에 붙는 것이
+        전부라, 그것을 보지 않으면 주입을 증명할 수 없다.
+        """
+        if self.path.rstrip("/").endswith("/prompts"):
+            body = json.dumps(_SEEN).encode()
+        else:
+            body = b'{"status":"healthy"}'
         self.send_response(200)
         self.send_header("content-type", "application/json")
         self.send_header("content-length", str(len(body)))

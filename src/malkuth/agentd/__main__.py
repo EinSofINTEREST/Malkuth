@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import inspect
+import json
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -37,6 +38,8 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from fastapi import FastAPI
+
+    from malkuth.core.agent import TaskRequest
 
 CONTROL_PORT = 8080
 """Control port — 컨테이너 내부 고정 (02 Network). A2A 포트는 runtime 이 할당한다."""
@@ -274,7 +277,7 @@ async def build_executor(manifest: AgentManifest, *, metrics: Metrics | None = N
     registry_tools = AgentToolRegistry(
         agent=manifest.name,
         skillsets=result.skillsets,
-        memory=_memory_access(),
+        memory=_memory_access(manifest.name),
         # 03 은 "실행 중 peer 에게 위임한다" 를 규정하는데, 이 조립이 없어
         # 에이전트는 **받을 수는 있고 걸 수는 없었다** (#193)
         peers=build_peer_client(manifest),
@@ -288,6 +291,9 @@ async def build_executor(manifest: AgentManifest, *, metrics: Metrics | None = N
         tool_schemas=_executable_schemas(result, registry_tools),
         telemetry=_telemetry_for(manifest, metrics),
         artifacts=_artifact_store(manifest),
+        # 09 Context Assembly — 태스크 진입 시 1회 회상해 프롬프트에 붙인다.
+        # 이것이 없으면 memoryset 의 recall 선언이 아무 일도 하지 않는다
+        recall=_task_recall(manifest, registry, registry_tools.memory),
         output_keys=lambda task: _template_output_keys(result, task),
         # 05 Retry Layering — 모델 호출의 재시도 주체는 agentd 다.
         # 여기서 켜지 않으면 정책은 정의만 되고 아무 일도 하지 않는다
@@ -344,14 +350,84 @@ def _artifact_quotas() -> dict[Any, int]:
     return quotas
 
 
-def _memory_access() -> Any:
+MEMORY_TOKEN_FILE_ENV = "MALKUTH_MEMORY_TOKEN_FILE"  # noqa: S105 — 키 이름이지 값이 아니다
+"""토큰이 담긴 파일 — Memory Service 가 **기동하며 발급**하므로, 정적 env 로는
+순서가 맞지 않는 배치에서 쓴다. 값 자체는 여전히 불투명 토큰이다.
+
+`{agent: token}` JSON 이면 이 에이전트의 것을 고르고, 아니면 파일 내용을 그대로
+토큰으로 본다.
+"""
+
+
+def _memory_token(agent: str) -> str | None:
+    """이 에이전트의 메모리 토큰 — env 우선, 없으면 파일."""
+    token = os.environ.get(MEMORY_TOKEN_ENV)
+    if token:
+        return token
+
+    path = os.environ.get(MEMORY_TOKEN_FILE_ENV)
+    if not path:
+        return None
+    try:
+        raw = Path(path).read_text("utf-8").strip()
+    except OSError as err:
+        # 파일이 있어야 붙을 수 있는 배치인데 못 읽었다 — 조용히 넘기면
+        # 에이전트가 메모리 없이 떠서 원인이 한참 뒤에 드러난다
+        log.warning("memory token file unreadable", agent=agent, exc_info=err)
+        return None
+
+    try:
+        issued = json.loads(raw)
+    except ValueError:
+        return raw or None
+    return issued.get(agent) if isinstance(issued, dict) else None
+
+
+def _recall_policy(manifest: AgentManifest, registry: Any) -> Any:
+    """이 에이전트에게 적용되는 auto-recall 정책.
+
+    space 를 여럿 선언하면 **첫 번째**의 정책을 쓴다 — 회상은 태스크당 1회이고
+    (09 Rule 1), 정책이 여럿이면 어느 예산을 쓸지가 모호해진다.
+    """
+    spaces = manifest.spec.memory.spaces
+    if not spaces:
+        return None
+
+    from malkuth.modules.memoryset import MemorysetLoader
+
+    return MemorysetLoader(registry).load(spaces[0].ref).manifest.spec.recall
+
+
+def _task_recall(manifest: AgentManifest, registry: Any, memory: Any) -> Any:
+    """Build the once-per-task recall the executor calls.
+
+    태스크마다 1회 회상하는 콜러블을 만듭니다 — 미선언이거나 메모리가 없으면
+    None 이라 실행기가 회상 단계를 건너뜁니다.
+    """
+    policy = _recall_policy(manifest, registry)
+    if memory is None or policy is None or not policy.auto:
+        return None
+
+    recall_for_task = getattr(memory, "recall_for_task", None)
+    if recall_for_task is None:
+        return None
+
+    async def recall(task: TaskRequest) -> str:
+        # 회상 질의는 태스크 입력이다 — 프롬프트 전체를 쓰면 템플릿 문구가
+        # 검색을 지배한다
+        return str(await recall_for_task(json.dumps(task.input, ensure_ascii=False), policy=policy))
+
+    return recall
+
+
+def _memory_access(agent: str) -> Any:
     """Build memory access from the injected endpoint.
 
     runtime 이 주소와 불투명 토큰을 주입했을 때만 만듭니다 — **DB 자격증명은
     컨테이너에 들어오지 않습니다** (09 Access Enforcement 1).
     """
     url = os.environ.get(MEMORY_URL_ENV)
-    token = os.environ.get(MEMORY_TOKEN_ENV)
+    token = _memory_token(agent)
     if not url or not token:
         return None
 

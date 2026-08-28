@@ -10,6 +10,10 @@ FROM malkuth/agent-base:${BASE_TAG}
 
 USER root
 
+# 토큰을 쓸 자리를 **이미지 안에** uid 1000 소유로 만들어 둔다: named volume 은
+# 마운트 지점의 소유권을 물려받으므로, 없으면 root 소유로 생겨 쓰지 못한다
+RUN install -d -o 1000 -g 1000 /tokens
+
 # 선언을 읽어 space 와 토큰을 조립한다 — 읽기만 하므로 read-only 로 마운트한다
 ENV MALKUTH_REPO_ROOT=/repo \
     MALKUTH_CONFIG_DIR=/repo/configs

@@ -67,6 +67,8 @@ services:
     ports:
       - "18082:8080"
       - "19102:19102"
+      # 05 의 지표가 실제 run 으로 채워지는지 확인하려면 긁을 수 있어야 한다
+      - "19082:9090"
     # 앵커 뒤에 두어 포트만 덮어쓴다
     environment: &reference-env
       MALKUTH_A2A_PORT: "19102"
@@ -93,6 +95,8 @@ services:
     ports:
       - "18083:8080"
       - "19103:19103"
+      # 05 의 지표가 실제 run 으로 채워지는지 확인하려면 긁을 수 있어야 한다
+      - "19083:9090"
     environment:
       <<: *reference-env
       MALKUTH_A2A_PORT: "19103"
@@ -111,6 +115,8 @@ services:
     ports:
       - "18084:8080"
       - "19104:19104"
+      # 05 의 지표가 실제 run 으로 채워지는지 확인하려면 긁을 수 있어야 한다
+      - "19084:9090"
     environment:
       <<: *reference-env
       MALKUTH_A2A_PORT: "19104"

@@ -81,11 +81,14 @@ What the suite does **not** prove, so nobody mistakes green for complete:
   are all checked across live containers in `tests/e2e/test_a2a.py`. The depth
   limit is verified by *injecting* a depth, not by an agent actually delegating
   onward — an agent calling a peer mid-task is still unproven end to end.
-- **Auto-recall is not covered end to end.** The embedding provider binding
-  exists and is exercised against a fake endpoint, but the E2E stack does not
-  yet serve one — so memory accumulation feeding a later task's prompt is
-  proven only in unit tests. Ranking quality remains unmeasured either way
-  (see the embedding note above).
+- **Auto-recall now runs end to end; its ranking quality does not.** A stored
+  fact reaches a later task's prompt across the live stack — the agent talks to
+  a containerised Memory Service over HTTP, the fake provider supplies the
+  embeddings, and `tests/e2e/test_auto_recall.py` asserts on the prompt the
+  model actually received. What that does *not* measure is **which** memories
+  win: `HashEmbedder` and the fake endpoint are deterministic but do not model
+  semantic similarity, so relevance ordering stays unproven (see the embedding
+  note above).
 - **Service runs survive both restart boundaries; automatic agent recovery is
   not covered.** An orchestrator restart carries checkpoints, the stored
   iteration count, and an externally-left drain request

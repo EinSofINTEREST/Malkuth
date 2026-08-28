@@ -86,9 +86,12 @@ What the suite does **not** prove, so nobody mistakes green for complete:
   yet serve one — so memory accumulation feeding a later task's prompt is
   proven only in unit tests. Ranking quality remains unmeasured either way
   (see the embedding note above).
-- **Service runs survive an orchestrator restart, not an agent one.** A service
-  run's checkpoints, its stored iteration count, and an externally-left drain
-  request all survive a new orchestrator process reopening the same Postgres
-  checkpointer and run store (`tests/e2e/test_service_restart.py`). What is
-  *not* covered is killing an **agent** container mid-iteration: the restart
-  boundary exercised here is the orchestrator's, not the agent's.
+- **Service runs survive both restart boundaries; automatic agent recovery is
+  not covered.** An orchestrator restart carries checkpoints, the stored
+  iteration count, and an externally-left drain request
+  (`tests/e2e/test_service_restart.py`); killing an agent container halts the
+  run with `GRAPH_005`, records that halt where another process can read it,
+  and lets `resume_service` continue once the agent is back
+  (`tests/e2e/test_agent_kill.py`). What is *not* covered is the runtime
+  **restarting a dead agent on its own** (02 Lifecycle's backoff policy) —
+  here the agent is revived by the test, standing in for an operator.

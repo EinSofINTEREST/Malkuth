@@ -175,7 +175,42 @@ def _deferred_postgres_saver(url: str) -> Any:
             await self._prepare()
             return await AsyncPostgresSaver.aput_writes(self, config, *args, **kwargs)
 
+        async def aclose(self) -> None:
+            """Close the connection this saver opened.
+
+            **여는 쪽이 닫는다.** 커넥션은 `_prepare` 안에서 이 객체가 열었고
+            밖에서 넘겨받은 것이 아니므로, 정리 책임도 여기 있다. 한 번도
+            쓰이지 않아 아직 열지 않았다면 할 일이 없다.
+
+            상주 프로세스(service run)는 이것을 부르지 않으면 커넥션을 물고
+            있는다 — CLI 단발 실행은 프로세스 종료로 정리되지만 그것에
+            기대면 소유자가 코드에 드러나지 않는다.
+            """
+            if not self._prepared:
+                return
+            async with self._lock:
+                if not self._prepared:
+                    return
+                await self.conn.close()
+                self._prepared = False
+
     return DeferredAsyncPostgresSaver()
+
+
+async def close_checkpointer(checkpointer: BaseCheckpointSaver[Any]) -> None:
+    """Release whatever the checkpointer holds.
+
+    checkpointer 가 쥔 자원을 놓아줍니다. 백엔드마다 정리할 것이 다르고
+    (in-memory 는 아무 것도 없다) 호출자는 어느 백엔드인지 알 필요가 없어야
+    하므로, 그 분기를 여기서 흡수합니다.
+
+    Args:
+        checkpointer: The checkpointer built by `build_checkpointer`.
+    """
+    closer = getattr(checkpointer, "aclose", None)
+    if closer is None:
+        return
+    await closer()
 
 
 async def _guarded(

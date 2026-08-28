@@ -17,7 +17,7 @@ import os
 import pytest
 
 from malkuth.core.agent import TaskResult
-from malkuth.orchestrator.checkpoint import build_checkpointer
+from malkuth.orchestrator.checkpoint import build_checkpointer, close_checkpointer
 from malkuth.orchestrator.run import RunStatus
 from malkuth.orchestrator.submit import RunSubmitter
 from tests.fixtures.topologies import make_mission
@@ -82,3 +82,42 @@ async def test_two_runs_do_not_share_a_thread():
     assert first is not None
     assert second is not None
     assert first.config["configurable"]["thread_id"] != second.config["configurable"]["thread_id"]
+
+
+# --- 커넥션 수명 --------------------------------------------------------------
+# 여는 코드만 있고 닫는 코드가 없으면 "소유자가 명확하다" 고 볼 수 없다
+
+
+@requires_postgres
+async def test_closing_releases_the_connection():
+    """상주 프로세스는 프로세스 종료에 기댈 수 없다 — 물고 있으면 샌다."""
+    checkpointer = build_checkpointer("postgres", url=URL)
+    await checkpointer.aget_tuple({"configurable": {"thread_id": "pg-close"}})
+    assert checkpointer.conn is not None
+
+    await close_checkpointer(checkpointer)
+
+    assert checkpointer.conn.closed
+
+
+@requires_postgres
+async def test_closing_an_unused_checkpointer_is_harmless():
+    """한 번도 쓰이지 않았으면 열린 것이 없다 — 정리가 실패하면 안 된다."""
+    await close_checkpointer(build_checkpointer("postgres", url=URL))
+
+
+@requires_postgres
+async def test_reuse_after_close_reopens():
+    """닫은 뒤 다시 쓰면 살아나야 한다 — 아니면 정리가 곧 파괴가 된다."""
+    checkpointer = build_checkpointer("postgres", url=URL)
+    await checkpointer.aget_tuple({"configurable": {"thread_id": "pg-reopen"}})
+    await close_checkpointer(checkpointer)
+
+    assert await checkpointer.aget_tuple({"configurable": {"thread_id": "pg-reopen"}}) is None
+    assert not checkpointer.conn.closed
+    await close_checkpointer(checkpointer)
+
+
+async def test_closing_an_in_memory_checkpointer_is_a_noop():
+    """호출자는 어느 백엔드인지 알 필요가 없어야 한다."""
+    await close_checkpointer(build_checkpointer("memory"))

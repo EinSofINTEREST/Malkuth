@@ -25,15 +25,18 @@ services:
     cap_drop: [ALL]
     security_opt:
       - no-new-privileges:true
-    pids_limit: 256
     tmpfs:
       - /tmp:size=64m
       - /workspace:size=64m
+    # 02 Docker Isolation Rules 4 의 세 상한을 **한 자리에** 선언한다 —
+    # `pids_limit` 과 `deploy.resources.limits.pids` 로 나눠 쓰면 compose 가
+    # 값이 어긋난다며 프로젝트를 통째로 거절한다 (#226)
     deploy:
       resources:
         limits:
           cpus: "0.5"
           memory: 256M
+          pids: 256
 
 networks:
   # 전용 bridge — 에이전트는 이 네트워크에만 붙는다. host 네트워크 모드 금지

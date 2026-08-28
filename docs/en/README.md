@@ -20,6 +20,12 @@ framework built on LangGraph.
 | [ci/conventions.md](ci/conventions.md) | Repository governance and CI design rules |
 | [ci/status-checks.md](ci/status-checks.md) | Single source of truth for required status check names |
 
+## Commands
+
+Setup, quality gates, images and stacks, the CLI, the long-running processes, and
+configuration overrides are documented in the
+[root README](../../README.md#commands) — the English front page of the project.
+
 ## Language Policy
 
 - `docs/en/` is the source of truth — written first

@@ -1,0 +1,39 @@
+apiVersion: malkuth/v1
+kind: Promptset
+metadata:
+  name: writer
+  version: 0.3.0
+  description: 수집된 근거를 보고서로 정리하는 에이전트 프롬프트
+
+spec:
+  engine: jinja2
+  default_locale: en
+  templates:
+    system:
+      file: templates/system.j2
+    writer:
+      file: templates/writer.j2
+      output_keys: [report]
+      variables:
+        findings: {type: array, required: true}
+    notifier:
+      file: templates/notifier.j2
+      output_keys: [notified]
+      variables:
+        new_items: {type: array, required: true}
+    compactor:
+      file: templates/compactor.j2
+      output_keys: [compacted]
+      variables:
+        pending_spaces: {type: array, required: true}
+    drafter:
+      file: templates/drafter.j2
+      output_keys: [draft]
+      variables:
+        query: {type: string, required: true}
+        # 첫 회차에는 비어 있다 — 검토 의견이 다음 회차의 입력이 된다
+        notes: {type: array, required: false}
+    default:
+      file: templates/default.j2
+      variables:
+        query: {type: string, required: true}

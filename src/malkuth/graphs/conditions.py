@@ -37,3 +37,13 @@ def needs_compaction(state: dict[str, Any]) -> bool:
 def maintenance_idle(state: dict[str, Any]) -> bool:
     """압축할 space 가 없는지 — ``needs_compaction`` 의 여집합."""
     return not needs_compaction(state)
+
+
+def draft_approved(state: dict[str, Any]) -> bool:
+    """검토를 통과했는지 — 통과하면 순환을 벗어난다."""
+    return bool(state.get("approved"))
+
+
+def needs_revision(state: dict[str, Any]) -> bool:
+    """다시 써야 하는지 — 04 는 이 순환에 max_iterations 를 요구한다."""
+    return not draft_approved(state)

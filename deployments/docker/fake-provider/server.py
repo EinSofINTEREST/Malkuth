@@ -75,10 +75,10 @@ def _content_for(prompt: str, digest: str) -> str:
     return json.dumps({key: _value_for(key, digest) for key in keys})
 
 
-_LIST_KEYS = frozenset({"findings", "new_items", "seen_ids", "spaces", "pending_spaces"})
+_LIST_KEYS = frozenset({"findings", "new_items", "seen_ids", "spaces", "pending_spaces", "notes"})
 """state schema 가 리스트로 선언한 키."""
 
-_BOOL_KEYS = frozenset({"needs_research"})
+_BOOL_KEYS = frozenset({"needs_research", "approved"})
 """state schema 가 불리언으로 선언한 키 — 그래프의 조건 분기가 이것을 읽는다."""
 
 _INT_KEYS = frozenset({"notified", "compacted"})

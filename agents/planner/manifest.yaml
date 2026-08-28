@@ -2,7 +2,7 @@ apiVersion: malkuth/v1
 kind: Agent
 metadata:
   name: planner
-  version: 0.3.0
+  version: 0.4.0
   group: research
   description: 질의를 실행 가능한 리서치 계획으로 나누는 에이전트
 
@@ -14,7 +14,7 @@ spec:
     effort: high
 
   promptset:
-    ref: promptsets/planner@0.2.0
+    ref: promptsets/planner@0.3.0
 
   memory:
     spaces:

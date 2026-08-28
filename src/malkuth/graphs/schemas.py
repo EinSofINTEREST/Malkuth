@@ -55,3 +55,17 @@ class MaintenanceState(BaseModel):
     """compaction trigger 에 도달해 압축이 필요한 space."""
 
     compacted: int = 0
+
+
+class DraftReviewState(BaseModel):
+    """State for the refinement-loop reference graph.
+
+    재작업 순환 그래프의 state — 검토 의견이 다음 회차의 입력이 된다.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    query: str
+    draft: str | None = None
+    approved: bool = False
+    notes: list[str] = Field(default_factory=list)

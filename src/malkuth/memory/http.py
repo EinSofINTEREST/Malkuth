@@ -19,6 +19,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 
 from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
+from malkuth.core.manifest import MemoryMode
 from malkuth.memory.entry import MemoryEntry
 from malkuth.modules.memoryset import ChunkSpec, MemoryKind
 
@@ -229,10 +230,20 @@ def create_app(
 
     @app.get("/v1/spaces")
     async def spaces(http_request: Request) -> list[dict[str, str]]:
-        """이 토큰이 닿을 수 있는 space — 에이전트가 자기 범위를 확인한다."""
+        """이 토큰이 닿을 수 있는 space — 에이전트가 자기 범위를 확인한다.
+
+        광고하는 mode 는 **실제 권한**이다 (`may_write`). global 은 권한이
+        `writers` 에서 나오고 `mode` 는 기본값 rw 로 남으므로, `mode` 를 그대로
+        내보내면 쓸 수 없는 space 가 rw 로 보인다 — 에이전트가 그것을 믿고
+        쓰기를 시도하면 401 을 받는다.
+        """
         token = granted(http_request)
         return [
-            {"alias": space.alias, "scope": str(space.scope), "mode": str(space.mode)}
+            {
+                "alias": space.alias,
+                "scope": str(space.scope),
+                "mode": str(MemoryMode.RW if space.may_write(token.agent) else MemoryMode.RO),
+            }
             for space in token.spaces
         ]
 

@@ -1,4 +1,4 @@
-.PHONY: help install lint fmt typecheck test test-integration test-e2e check build up down \
+.PHONY: help install lint fmt typecheck test test-integration test-e2e check build build-base up down \
 	e2e-up e2e-down clean
 
 UV ?= uv
@@ -35,7 +35,7 @@ test-e2e: ## 전체 스택 E2E 테스트 (nightly)
 	@$(RUN) pytest tests/e2e -m e2e --no-cov; \
 		status=$$?; [ $$status -eq 0 ] || [ $$status -eq 5 ]
 
-e2e-up: ## E2E 스택 기동 (fake provider + 에이전트)
+e2e-up: build-base ## E2E 스택 기동 (fake provider + 에이전트)
 	IMAGE_TAG=$(IMAGE_TAG) docker compose -f $(DOCKER_DIR)/compose.e2e.yaml up -d --build
 
 e2e-down: ## E2E 스택 정지
@@ -47,8 +47,12 @@ DOCKER_DIR := deployments/docker
 # latest 태그 배포 금지 — 이미지 태그는 semver (02 Base Image 2)
 IMAGE_TAG ?= 0.1.0
 
-build: ## 에이전트 base image + 테스트 echo image 빌드
+# compose 파일들이 `FROM` 으로 확장하는 바탕 — compose 는 이것을 빌드하지 않는다.
+# 스택을 올리는 타깃은 전부 이것을 선행해야 한다 (#222)
+build-base: ## agent-base 이미지 빌드
 	docker build -t malkuth/agent-base:$(IMAGE_TAG) -f $(DOCKER_DIR)/agent-base.Dockerfile .
+
+build: build-base ## 에이전트 base image + 테스트 echo image 빌드
 	docker build -t malkuth/agent-echo:$(IMAGE_TAG) \
 		--build-arg BASE_TAG=$(IMAGE_TAG) \
 		-f $(DOCKER_DIR)/agent-echo.Dockerfile .
@@ -56,8 +60,8 @@ build: ## 에이전트 base image + 테스트 echo image 빌드
 		--build-arg BASE_TAG=$(IMAGE_TAG) \
 		-f $(DOCKER_DIR)/agent-claude-code.Dockerfile .
 
-up: ## 개발 스택 기동
-	IMAGE_TAG=$(IMAGE_TAG) docker compose -f $(DOCKER_DIR)/compose.yaml up -d
+up: build-base ## 개발 스택 기동
+	IMAGE_TAG=$(IMAGE_TAG) docker compose -f $(DOCKER_DIR)/compose.yaml up -d --build
 
 down: ## 개발 스택 정지
 	IMAGE_TAG=$(IMAGE_TAG) docker compose -f $(DOCKER_DIR)/compose.yaml down -v

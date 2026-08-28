@@ -403,6 +403,7 @@ class ServiceRunner:
             except asyncio.CancelledError:
                 # 협조적 취소는 그대로 전파한다 (drain/shutdown 경로)
                 handle.status = RunStatus.STOPPED
+                self._publish(handle)
                 raise
             except MalkuthError as err:
                 if self._record_failure(handle, err):
@@ -421,6 +422,9 @@ class ServiceRunner:
 
         handle.status = RunStatus.STOPPED
         handle.state = state
+        # 최종 상태를 남기지 않으면 저장소에 running 인 채로 남아, 재개가
+        # "살아있는 run" 으로 오인해 거부한다
+        self._publish(handle)
         return handle
 
     async def _iterate(self, handle: RunHandle, state: dict[str, Any]) -> dict[str, Any]:
@@ -472,6 +476,8 @@ class ServiceRunner:
             },
         )
         handle.error.__cause__ = err
+        # halted 를 남겨야 재개가 가능하다 — resume_service 는 halted 만 허용한다
+        self._publish(handle)
         return True
 
     async def _apply_idle_policy(

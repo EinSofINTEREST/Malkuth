@@ -14,13 +14,20 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 import structlog
 
 from malkuth.core.agent import TaskStatus
-from malkuth.core.errors import CircuitBreaker, ErrorCategory, ErrorCode, MalkuthError
+from malkuth.core.errors import (
+    CircuitBreaker,
+    ErrorCategory,
+    ErrorCode,
+    MalkuthError,
+    RetryPolicy,
+)
 from malkuth.observability.circuit import CircuitTelemetry
 from malkuth.protocols.a2a.errors import submit_failed, task_rejected, unreachable
 from malkuth.protocols.telemetry import STATUS_COMPLETED, STATUS_FAILED, A2aTelemetry
+from malkuth.resilience import retrying
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Awaitable, Callable, Mapping
 
     from malkuth.core.agent import TaskRequest, TaskResult
     from malkuth.observability.metrics import Metrics
@@ -92,6 +99,11 @@ class A2AClient:
     allowlist: Allowlist
     transport: PeerTransport
     timeout_s: float = DEFAULT_CALL_TIMEOUT_S
+    retry: RetryPolicy | None = None
+    """도달 실패 재시도 정책 (05 Retry Layering — caller 가 재시도 주체다).
+    미주입 시 재시도하지 않는다 — 조립하는 쪽이 켠다."""
+    retry_sleep: Callable[[float], Awaitable[None]] | None = None
+    """06 은 시간 의존 로직이 테스트에서 실제로 자는 것을 금지한다."""
     breakers: dict[str, CircuitBreaker] = field(default_factory=dict)
     # 주입 지점은 하나다 — telemetry 와 metrics 를 따로 받으면 한쪽만 주입됐을 때
     # 계측이 조용히 반쪽이 되거나 서로 다른 registry 로 흩어진다
@@ -159,7 +171,7 @@ class A2AClient:
 
         started = time.monotonic()
         try:
-            result = await self._send(callee, delegated, token)
+            result = await self._attempt(callee, delegated, token)
         except MalkuthError as err:
             # A2A_003 은 peer 가 살아서 "그 태스크는 못 한다" 고 답한 것이다.
             # 이를 실패로 세면 멀쩡한 peer 가 도달 불가(A2A_002)로 차단된다
@@ -198,6 +210,33 @@ class A2AClient:
         )
         self._record(callee, status=STATUS_COMPLETED)
         return result
+
+    async def _attempt(self, callee: str, task: TaskRequest, token: str) -> TaskResult:
+        """Send once, retrying only what the policy allows.
+
+        정책이 허용하는 실패만 재시도하며 보냅니다.
+
+        **위임은 부수효과를 낳는다** (05 Rules 5): 재시도가 같은 a2a task_id 를
+        유지해야 callee 의 멱등 처리가 걸린다 — 그래서 `task` 를 다시 만들지
+        않고 그대로 넘긴다.
+
+        `A2A_003` 은 재시도하지 않는다 — peer 가 **살아서** "그 태스크는 못
+        한다" 고 답한 것이라, 다시 보내도 같은 답이 온다 (retryable=False).
+        """
+        if self.retry is None:
+            return await self._send(callee, task, token)
+
+        async def send() -> TaskResult:
+            return await self._send(callee, task, token)
+
+        return await retrying(
+            self.retry,
+            send,
+            sleep=self.retry_sleep,
+            a2a_caller=self.agent,
+            a2a_callee=callee,
+            a2a_task_id=task.task_id,
+        )
 
     def _record(self, callee: str, *, status: str) -> None:
         """peer 호출을 메트릭에 남긴다 — telemetry 미주입 시 무동작."""

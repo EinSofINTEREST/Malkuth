@@ -15,11 +15,12 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from malkuth.core.agent import HealthStatus, TaskRequest, TaskResult
-from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
+from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError, RetryPolicy
 from malkuth.core.events import TaskEvent
+from malkuth.resilience import retrying
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Awaitable, Callable
 
     from pydantic import TypeAdapter
 
@@ -52,8 +53,15 @@ class ControlClient:
         token: str | None = None,
         client: httpx.AsyncClient | None = None,
         timeout_s: float = DEFAULT_TIMEOUT_S,
+        retry: RetryPolicy | None = None,
+        retry_sleep: Callable[[float], Awaitable[None]] | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
+        # 05 Retry Layering — runtime 이 Control API 재시도 주체다.
+        # 미주입 시 재시도하지 않는다 — 조립하는 쪽이 켠다
+        self._retry = retry
+        # 06 은 시간 의존 로직이 테스트에서 실제로 자는 것을 금지한다
+        self._retry_sleep = retry_sleep
         self._agent = agent
         self._token = token
         self._timeout_s = timeout_s
@@ -165,7 +173,7 @@ class ControlClient:
         에이전트 상태를 조회합니다. ``/health`` 는 무인증 경로입니다
         (Docker healthcheck 가 직접 호출).
         """
-        payload = await self._request_json(
+        payload = await self._retrying_read(
             "GET",
             "/v1/health",
             timeout_s=DEFAULT_HEALTH_TIMEOUT_S,
@@ -178,7 +186,7 @@ class ControlClient:
 
         A2A AgentCard 를 조회합니다.
         """
-        payload: dict[str, Any] = await self._request_json("GET", "/v1/card")
+        payload: dict[str, Any] = await self._retrying_read("GET", "/v1/card")
         return payload
 
     async def cancel(self, task_id: str) -> None:
@@ -214,6 +222,23 @@ class ControlClient:
         return await self._request_json(
             "POST", path, body=body, timeout_s=timeout_s, task_id=task_id
         )
+
+    async def _retrying_read(
+        self, method: str, path: str, *, timeout_s: float | None = None, **kwargs: Any
+    ) -> Any:
+        """Read through the Control API, retrying transport failures.
+
+        **읽기만 재시도합니다** (05 Rules 5). `/invoke` 는 부수효과를 낳고,
+        node 재시도(`NodeSpec.retry`)와 곱해집니다 — 05 Retry Layering 은
+        재시도를 한 계층에서만 하라고 규정합니다.
+        """
+        if self._retry is None:
+            return await self._request_json(method, path, timeout_s=timeout_s, **kwargs)
+
+        async def read() -> Any:
+            return await self._request_json(method, path, timeout_s=timeout_s, **kwargs)
+
+        return await retrying(self._retry, read, sleep=self._retry_sleep, agent=self._agent)
 
     async def _request_json(
         self,

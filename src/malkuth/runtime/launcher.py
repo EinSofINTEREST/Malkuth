@@ -10,22 +10,25 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
 from malkuth.core.errors import NETWORK_RETRY, ErrorCategory, ErrorCode, MalkuthError
 from malkuth.memory.http import MEMORY_TOKEN_ENV, MEMORY_URL_ENV
 from malkuth.runtime.control import ControlClient
+from malkuth.runtime.lifecycle import AgentLifecycle, AgentState
 from malkuth.runtime.ports import A2APortAllocator
 from malkuth.runtime.spec import build_container_spec
 from malkuth.runtime.tokens import TokenIssuer, authenticated_env
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Mapping
 
     from malkuth.core.manifest import AgentManifest
+    from malkuth.observability.metrics import Metrics
     from malkuth.runtime.docker.engine import ContainerHandle, DockerEngine
 
 log = structlog.get_logger(__name__)
@@ -42,6 +45,8 @@ class LaunchedAgent:
     agent: str
     handle: ContainerHandle
     client: ControlClient
+    lifecycle: AgentLifecycle = field(default_factory=lambda: AgentLifecycle(agent=""))
+    """이 레플리카의 02 lifecycle 상태 — 기동·health·정지가 여기로 모인다."""
     # 포트 회수는 **어느 레플리카였는지** 알아야 한다 — 기동 시점의 값을
     # 들고 있지 않으면 정지가 엉뚱한 레플리카의 포트를 놓아준다
     replica: int = 0
@@ -88,8 +93,16 @@ class AgentLauncher:
     engine: DockerEngine
     issuer: TokenIssuer = field(default_factory=TokenIssuer)
     ports: A2APortAllocator | None = None
+    metrics: Metrics | None = None
+    """`malkuth_agent_health` 를 채울 registry — 미주입 시 계측하지 않는다."""
+    health_interval_s: float | None = None
+    """health 폴링 주기. **None 이면 감시하지 않는다** — 루프의 소유자가
+    분명해야 하므로 감시를 원하는 조립만 켠다 (02 Lifecycle Rules 3)."""
+    health_sleep: Callable[[float], object] | None = None
+    """06 은 시간 의존 로직이 테스트에서 실제로 자는 것을 금지한다."""
     launched: dict[tuple[str, int], LaunchedAgent] = field(default_factory=dict)
     _cursors: dict[str, int] = field(default_factory=dict, init=False)
+    _monitors: dict[tuple[str, int], asyncio.Task[None]] = field(default_factory=dict, init=False)
     """기동된 레플리카 — 키는 **(에이전트, replica)** 다.
 
     이름만으로 잡으면 두 번째 레플리카가 첫 핸들을 덮어 컨테이너를 미아로
@@ -146,6 +159,12 @@ class AgentLauncher:
             network=self.engine.network,
         )
 
+        # 02 Lifecycle — 이미지는 배포 파이프라인이 굽는다 (Rule 1). runtime 이
+        # 보는 것은 Built 이후다
+        lifecycle = AgentLifecycle(agent=agent)
+        lifecycle.transition(AgentState.BUILT)
+        lifecycle.transition(AgentState.STARTING)
+
         handle = await self.engine.start(spec)
         client = ControlClient(
             f"http://127.0.0.1:{handle.control_port}",
@@ -156,8 +175,11 @@ class AgentLauncher:
             token=self.issuer.issue(agent),
         )
 
-        launched = LaunchedAgent(agent=agent, handle=handle, client=client, replica=replica)
+        launched = LaunchedAgent(
+            agent=agent, handle=handle, client=client, replica=replica, lifecycle=lifecycle
+        )
         self.launched[agent, replica] = launched
+        self._watch(launched)
         log.info(
             "agent launched",
             agent=agent,
@@ -166,6 +188,73 @@ class AgentLauncher:
             port=handle.control_port,
         )
         return launched
+
+    def _watch(self, launched: LaunchedAgent) -> None:
+        """Start this replica's health loop, when supervision is on.
+
+        02 Lifecycle Rules 3 — Ready 인 에이전트는 주기적으로 확인한다.
+
+        **첫 성공이 Ready 로 올린다**: 02 Rule 2 는 "기동 → initialize() →
+        health OK 가 되어야 그래프에 attach" 라고 규정한다. 기동만으로 Ready 를
+        선언하면 initialize 가 끝내 실패한 컨테이너가 태스크를 받는다.
+        기동 성공 판정은 **runtime 이** 하므로 monitor 가 아니라 여기서 올린다.
+        """
+        if self.health_interval_s is None:
+            return
+
+        from malkuth.runtime.health import HealthMonitor
+
+        monitor = HealthMonitor(
+            agent=launched.agent,
+            probe=launched.client,
+            lifecycle=launched.lifecycle,
+            interval_s=self.health_interval_s,
+            metrics=self.metrics,
+            sleep=self.health_sleep,
+            on_state=lambda state: self._promote(launched, state),
+        )
+        self._monitors[launched.agent, launched.replica] = asyncio.create_task(
+            self._poll(launched, monitor)
+        )
+
+    async def _poll(self, launched: LaunchedAgent, monitor: Any) -> None:
+        """Drive one replica's health loop until it is stopped.
+
+        레플리카 하나의 health 루프를 정지될 때까지 돌립니다.
+
+        루프가 예외로 죽으면 그 레플리카는 **영원히 감시되지 않는다** —
+        조용히 사라지지 않도록 남기고, 다른 레플리카는 계속 돈다.
+        """
+        try:
+            await monitor.run()
+        except asyncio.CancelledError:
+            raise
+        except Exception as err:
+            log.error(
+                "agent health loop stopped",
+                agent=launched.agent,
+                container_id=launched.handle.short_id,
+                exc_info=err,
+            )
+
+    async def _unwatch(self, launched: LaunchedAgent) -> None:
+        """이 레플리카의 health 루프를 멈춘다 — 정지한 컨테이너를 계속 두드리지 않는다."""
+        task = self._monitors.pop((launched.agent, launched.replica), None)
+        if task is None:
+            return
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    def _promote(self, launched: LaunchedAgent, state: AgentState) -> None:
+        """첫 health 성공을 Ready 로 올린다.
+
+        02 Rule 2 — 기동만으로 Ready 를 선언하면 `initialize()` 가 끝내
+        실패한 컨테이너가 태스크를 받는다. 그 판정은 monitor 가 아니라
+        **runtime 이** 한다 (lifecycle 은 성공을 Ready 로 올리지 않는다).
+        """
+        if state is AgentState.STARTING:
+            launched.lifecycle.transition(AgentState.READY)
 
     def replicas_of(self, agent: str) -> list[LaunchedAgent]:
         """이 에이전트의 기동된 레플리카 — replica 순서로."""
@@ -214,8 +303,14 @@ class AgentLauncher:
             else self.replicas_of(agent)
         )
         for launched in targets:
+            await self._unwatch(launched)
+            # 02 Lifecycle 5 — 정지 전에 새 태스크 수락을 멈춘다.
+            # STARTING 에서 바로 멈추는 경우도 있어 Draining 을 강요하지 않는다
+            if launched.lifecycle.state is AgentState.READY:
+                launched.lifecycle.transition(AgentState.DRAINING)
             await launched.aclose()
             await self.engine.stop(launched.handle)
+            launched.lifecycle.transition(AgentState.STOPPED)
             del self.launched[agent, launched.replica]
             if self.ports is not None:
                 self.ports.release(agent, replica=launched.replica)

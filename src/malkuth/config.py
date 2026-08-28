@@ -220,6 +220,12 @@ def env_overrides(environ: Mapping[str, str] | None = None) -> dict[str, Any]:
     ``MALKUTH_`` 환경변수를 중첩 매핑으로 모읍니다.
     ``MALKUTH_RUNTIME__NETWORK=x`` → ``{"runtime": {"network": "x"}}``.
 
+    **중첩 구분자가 있는 것만** 설정 override 로 봅니다. 컨테이너에 주입되는
+    런타임 env (``MALKUTH_AGENT_TOKEN``, ``MALKUTH_A2A_PORT`` 등) 가 같은
+    접두사를 쓰기 때문입니다 — 구분 없이 받으면 그 환경에서 설정 검증이
+    통째로 실패합니다 (#182). 최상위 설정 키는 전부 섹션이므로 스칼라
+    override 를 잃지 않습니다.
+
     Args:
         environ: Source environment (defaults to the process environment).
 
@@ -235,7 +241,11 @@ def env_overrides(environ: Mapping[str, str] | None = None) -> dict[str, Any]:
     for key, value in source.items():
         if not key.startswith(ENV_PREFIX):
             continue
-        path = key[len(ENV_PREFIX) :].lower().split(NESTED_SEPARATOR)
+        suffix = key[len(ENV_PREFIX) :]
+        if NESTED_SEPARATOR not in suffix:
+            # 런타임 env — 설정 키가 아니다
+            continue
+        path = suffix.lower().split(NESTED_SEPARATOR)
         if not all(path):
             continue
         paths.append((path, value))

@@ -236,6 +236,48 @@ def test_malformed_override_key_is_ignored():
     assert env_overrides({ENV_PREFIX: "x", f"{ENV_PREFIX}RUNTIME__": "y"}) == {}
 
 
+# --- 런타임 env 와의 분리 (#182) -------------------------------------------
+# 컨테이너에 주입되는 MALKUTH_* 런타임 env 가 설정 키로 오인되면, 그 환경에서
+# load_config 가 통째로 실패한다
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["AGENT_TOKEN", "A2A_PORT", "MANIFEST", "EXECUTOR", "MEMORY_TOKEN", "METRICS_PORT"],
+)
+def test_runtime_env_is_not_a_config_override(name):
+    """컨테이너가 주입하는 env 는 설정 키가 아니다 — 구분자가 없다."""
+    assert env_overrides({f"{ENV_PREFIX}{name}": "value"}) == {}
+
+
+def test_config_loads_inside_a_container_environment(tmp_path):
+    """compose 가 주입하는 조합 그대로 — 여기서 깨지면 컨테이너가 뜨지 않는다."""
+    (tmp_path / "dev.yaml").write_text("memory:\n  backend: sqlite\n", encoding="utf-8")
+
+    config = load_config(
+        "dev",
+        config_dir=tmp_path,
+        environ={
+            f"{ENV_PREFIX}AGENT_TOKEN": "e2e-token",
+            f"{ENV_PREFIX}A2A_PORT": "19102",
+            f"{ENV_PREFIX}MEMORY_URL": "http://memory:8090",
+            f"{ENV_PREFIX}MEMORY_TOKEN": "opaque",
+            f"{ENV_PREFIX}METRICS_PORT": "9090",
+        },
+    )
+
+    assert config.memory.backend == "sqlite"
+
+
+def test_a_runtime_env_does_not_shadow_its_section():
+    """MALKUTH_MEMORY_TOKEN 이 memory 섹션 옆에 앉으면 설정이 오염된다."""
+    overrides = env_overrides(
+        {f"{ENV_PREFIX}MEMORY_TOKEN": "opaque", f"{ENV_PREFIX}MEMORY__BACKEND": "postgres"}
+    )
+
+    assert overrides == {"memory": {"backend": "postgres"}}
+
+
 def test_override_can_introduce_a_new_section():
     overrides = env_overrides({f"{ENV_PREFIX}MEMORY__BACKEND": "postgres"})
 

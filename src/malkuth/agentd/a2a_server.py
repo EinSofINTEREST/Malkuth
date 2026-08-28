@@ -80,6 +80,21 @@ def parse_peers(declared: str) -> dict[str, str]:
     return peers
 
 
+def reachable_peers(
+    agent: str, edges: frozenset[Edge], addresses: dict[str, str]
+) -> dict[str, str]:
+    """Narrow the injected addresses to peers this agent may actually call.
+
+    주입된 주소를 **이 에이전트가 실제로 부를 수 있는** peer 로 좁힙니다.
+
+    A2A 를 켜도 나가는 방향이 없는 에이전트가 있습니다 (받기만 하는 노드).
+    그런 에이전트에게 창구를 열면 모델이 고를 때마다 `A2A_004` 로 거부되어
+    한 턴이 낭비됩니다 — 광고는 실제 권한과 맞아야 합니다.
+    """
+    outbound = {edge.callee for edge in edges if edge.caller == agent}
+    return {name: url for name, url in addresses.items() if name in outbound}
+
+
 def build_peer_client(manifest: AgentManifest) -> Any:
     """Assemble the client this agent calls its peers with.
 
@@ -95,10 +110,14 @@ def build_peer_client(manifest: AgentManifest) -> Any:
     Returns:
         The client, or None when nothing is wired (주소나 서명 키 부재).
     """
-    peers = parse_peers(os.environ.get(PEERS_ENV, ""))
     secret = os.environ.get(SECRET_ENV, "")
-    if not peers or not secret:
-        # 주소가 없으면 부를 곳이 없고, 서명 키가 없으면 callee 가 거부한다
+    edges = parse_edges(os.environ.get(EDGES_ENV, ""))
+    reachable = reachable_peers(manifest.name, edges, parse_peers(os.environ.get(PEERS_ENV, "")))
+    if not reachable or not secret:
+        # 부를 수 있는 peer 가 없으면 창구를 열지 않는다: A2A 를 켜도 **나가는**
+        # 방향이 없는 에이전트가 있고(받기만 하는 노드), 그런 에이전트에게
+        # ask_peer 를 광고하면 모델이 고를 때마다 A2A_004 로 거부된다.
+        # 서명 키가 없으면 callee 가 거부한다
         return None
 
     from malkuth.protocols.a2a.client import A2AClient
@@ -107,11 +126,11 @@ def build_peer_client(manifest: AgentManifest) -> Any:
     return A2AClient(
         agent=manifest.name,
         allowlist=Allowlist(
-            edges=parse_edges(os.environ.get(EDGES_ENV, "")),
+            edges=edges,
             secret=secret.encode("utf-8"),
             max_depth=int(os.environ.get(MAX_DEPTH_ENV, str(_default_max_depth()))),
         ),
-        transport=SdkPeerTransport(agent=manifest.name, addresses=peers),
+        transport=SdkPeerTransport(agent=manifest.name, addresses=reachable),
     )
 
 

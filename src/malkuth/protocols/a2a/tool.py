@@ -23,6 +23,10 @@ if TYPE_CHECKING:
 
 ASK_PEER_TOOL: Final = "ask_peer"
 
+DELEGATION_NAMESPACE: Final = uuid.UUID("6f9619ff-8b86-d011-b42d-00c04fc964ff")
+"""위임 id 를 유도하는 고정 네임스페이스 — 값 자체에 의미는 없고, 같은 입력이
+같은 id 를 내도록 고정하는 것이 목적이다."""
+
 ASK_PEER_SPEC: Final = SkillSpec(
     name=ASK_PEER_TOOL,
     description=(
@@ -102,22 +106,27 @@ async def run_ask_peer(
             details={"tool": ASK_PEER_TOOL},
         )
 
-    result = await client.call(peer, _delegated(ctx, request))
+    result = await client.call(peer, _delegated(ctx, peer, request))
     return {"peer": peer, "output": result.output}
 
 
-def _delegated(ctx: SkillContext, request: str) -> TaskRequest:
+def _delegated(ctx: SkillContext, peer: str, request: str) -> TaskRequest:
     """Build the peer's task from the caller's context.
 
     **trace 를 물려준다**: 깊이가 이어지지 않으면 순환 위임이 상한에 걸리지
-    않는다. task_id 는 새로 뽑는다 — peer 에게는 별개의 태스크다.
+    않는다.
+
+    **task_id 는 결정적이다**: caller 의 태스크가 재시도되면 이 tool 도 다시
+    실행되는데, 그때마다 새 id 를 뽑으면 peer 가 **같은 위임을 두 번**
+    수행한다 (02 Rule 3 의 멱등성). caller 의 task_id 와 요청 내용으로
+    유도하면 같은 위임이 같은 id 를 받는다.
 
     trace 가 없으면 새로 시작한다 — 그러면 깊이가 0 부터라 상한이 무의미해지므로,
     executor 가 반드시 실어 준다.
     """
     trace = ctx.trace or TraceContext(trace_id=ctx.run_id)
     return TaskRequest(
-        task_id=str(uuid.uuid4()),
+        task_id=delegation_id(ctx, peer, request),
         run_id=ctx.run_id,
         node_id=None,
         input={"request": request},
@@ -126,4 +135,15 @@ def _delegated(ctx: SkillContext, request: str) -> TaskRequest:
     )
 
 
-__all__ = ["ASK_PEER_SPEC", "ASK_PEER_TOOL", "peer_spec", "run_ask_peer"]
+def delegation_id(ctx: SkillContext, peer: str, request: str) -> str:
+    """Derive a stable id for one delegation.
+
+    같은 위임에는 같은 id 를 준다 — caller 재시도가 peer 쪽에서 중복 실행으로
+    보이지 않게 한다. 한 태스크가 같은 peer 에게 **다른** 요청을 보내면 다른
+    id 가 나온다.
+    """
+    seed = f"{ctx.task_id}|{peer}|{request}"
+    return str(uuid.uuid5(DELEGATION_NAMESPACE, seed))
+
+
+__all__ = ["ASK_PEER_SPEC", "ASK_PEER_TOOL", "delegation_id", "peer_spec", "run_ask_peer"]

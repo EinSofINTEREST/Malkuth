@@ -237,3 +237,78 @@ def test_peer_addresses_are_parsed_from_the_runtime_injection():
         "planner": "http://agent-planner:19102",
         "writer": "http://agent-writer:19104",
     }
+
+
+# --- 리뷰 반영 --------------------------------------------------------------
+
+
+async def test_the_same_delegation_keeps_one_id():
+    """caller 가 재시도되면 이 tool 도 다시 실행된다 — 매번 새 id 를 뽑으면
+    peer 가 **같은 위임을 두 번** 수행한다 (02 Rule 3)."""
+    client = RecordingClient()
+    arguments = {"peer": "planner", "request": "계획을 다시 봐줘"}
+
+    await run_ask_peer(client, context(), arguments)  # type: ignore[arg-type]
+    await run_ask_peer(client, context(), arguments)  # type: ignore[arg-type]
+
+    first, second = (call[1].task_id for call in client.calls)
+    assert first == second
+
+
+async def test_a_different_request_gets_a_different_id():
+    """한 태스크가 같은 peer 에게 다른 것을 물으면 별개의 위임이다."""
+    client = RecordingClient()
+
+    await run_ask_peer(  # type: ignore[arg-type]
+        client, context(), {"peer": "planner", "request": "첫 질문"}
+    )
+    await run_ask_peer(  # type: ignore[arg-type]
+        client, context(), {"peer": "planner", "request": "다른 질문"}
+    )
+
+    first, second = (call[1].task_id for call in client.calls)
+    assert first != second
+
+
+async def test_a_different_caller_task_gets_a_different_id():
+    """다른 태스크의 같은 질문까지 합쳐지면 두 번째가 첫 답을 받는다."""
+    from dataclasses import replace as replace_ctx
+
+    client = RecordingClient()
+    arguments = {"peer": "planner", "request": "같은 질문"}
+
+    await run_ask_peer(client, context(), arguments)  # type: ignore[arg-type]
+    await run_ask_peer(  # type: ignore[arg-type]
+        client, replace_ctx(context(), task_id="task-2"), arguments
+    )
+
+    first, second = (call[1].task_id for call in client.calls)
+    assert first != second
+
+
+def test_an_agent_without_outbound_edges_gets_no_client(monkeypatch):
+    """A2A 를 켜도 **나가는** 방향이 없는 에이전트가 있다 (받기만 하는 노드).
+
+    그런 에이전트에게 창구를 열면 모델이 고를 때마다 `A2A_004` 로 거부된다.
+    """
+    from malkuth.agentd.a2a_server import EDGES_ENV, PEERS_ENV, SECRET_ENV, build_peer_client
+
+    # researcher>planner 만 선언 — planner 는 받기만 한다
+    monkeypatch.setenv(EDGES_ENV, "researcher>planner")
+    monkeypatch.setenv(PEERS_ENV, "researcher=agent-researcher:19103")
+    monkeypatch.setenv(SECRET_ENV, "unit-secret")
+
+    assert build_peer_client(manifest("planner")) is None
+
+
+def test_only_declared_directions_are_reachable():
+    """주입된 주소가 곧 권한은 아니다 — 선언된 방향만 부를 수 있다."""
+    from malkuth.agentd.a2a_server import parse_edges, reachable_peers
+
+    narrowed = reachable_peers(
+        "researcher",
+        parse_edges("researcher>planner"),
+        {"planner": "http://a:1", "writer": "http://b:2"},
+    )
+
+    assert narrowed == {"planner": "http://a:1"}

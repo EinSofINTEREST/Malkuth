@@ -56,7 +56,9 @@ _ALLOWED: Final[dict[AgentState, frozenset[AgentState]]] = {
     ),
     AgentState.DRAINING: frozenset({AgentState.STOPPED, AgentState.FAILED}),
     AgentState.STOPPED: frozenset({AgentState.STARTING}),
-    AgentState.FAILED: frozenset({AgentState.STARTING}),
+    # 재배포(Starting)뿐 아니라 **정리(Stopped)** 도 되어야 한다 — 실패한
+    # 에이전트를 멈출 수 없으면 그 컨테이너가 샌다
+    AgentState.FAILED: frozenset({AgentState.STARTING, AgentState.STOPPED}),
 }
 
 TERMINAL_STATES: Final = frozenset({AgentState.STOPPED, AgentState.FAILED})

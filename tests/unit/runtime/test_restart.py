@@ -1,0 +1,280 @@
+"""Automatic restart of an unhealthy agent.
+
+`RestartPolicy` 와 `plan_restart()`(상한 초과 시 `RT_008`)는 구현되어 있었는데
+**부르는 곳이 없었다** (#215). #213 이 상태를 `UNHEALTHY` 까지 옮겼고, 여기서
+그 다음을 잇는다.
+
+06 에 따라 실제로 자지 않는다 — backoff 대기를 주입해 기록만 한다.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from collections.abc import Callable
+from pathlib import Path
+
+import pytest
+import yaml
+from prometheus_client import CollectorRegistry
+
+from malkuth.core.agent import HealthState, HealthStatus
+from malkuth.core.manifest import AgentManifest
+from malkuth.observability.metrics import Metrics
+from malkuth.runtime.docker.engine import DockerEngine
+from malkuth.runtime.launcher import AgentLauncher
+from malkuth.runtime.lifecycle import AgentState, RestartPolicy
+from tests.fixtures.fake_docker import FakeDockerClient
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+
+
+@pytest.fixture(autouse=True)
+def always_sick(monkeypatch: pytest.MonkeyPatch) -> None:
+    """모든 Control 클라이언트를 결정적으로 아프게 만든다.
+
+    재기동된 레플리카는 launcher 가 **새로** 만드는 클라이언트를 쓰므로,
+    인스턴스만 갈아끼우면 그 뒤가 실제 네트워크를 두드린다 — Control API
+    재시도가 실제로 자면서(#217) 테스트가 실시간에 묶인다.
+    """
+    from malkuth.runtime.control import ControlClient
+
+    async def sick(self: ControlClient) -> HealthStatus:
+        return HealthStatus(status=HealthState.UNHEALTHY)
+
+    monkeypatch.setattr(ControlClient, "health", sick)
+
+
+def manifest() -> AgentManifest:
+    return AgentManifest.model_validate(
+        yaml.safe_load((REPO_ROOT / "agents" / "echo" / "manifest.yaml").read_text("utf-8"))
+    )
+
+
+class Recorder:
+    """대기를 기록만 하는 sleep 대역 — 실제로 자지 않는다."""
+
+    def __init__(self) -> None:
+        self.waits: list[float] = []
+
+    async def __call__(self, delay: float) -> None:
+        self.waits.append(delay)
+
+
+def launcher(client: FakeDockerClient, waits: Recorder, **kwargs) -> AgentLauncher:
+    """health 는 매번 통과, 재시작 backoff 만 기록한다."""
+
+    async def health_sleep(_delay: float) -> None:
+        await asyncio.sleep(0)
+
+    kwargs.setdefault("health_interval_s", 10.0)
+    return AgentLauncher(
+        engine=DockerEngine(client=client),
+        health_sleep=health_sleep,
+        restart_sleep=waits,
+        **kwargs,
+    )
+
+
+async def until(predicate: Callable[[], bool], *, timeout_s: float = 5.0) -> None:
+    """조건이 설 때까지 기다린다 — **서지 않으면 여기서 실패한다**.
+
+    회차(event loop turn)를 세는 방식은 CI 부하에서 조용히 포기하고, 그 뒤
+    단언이 엉뚱한 자리에서 터진다 — #215 의 CI 실패가 정확히 그랬다
+    (`replicas_of("echo")[0]` 이 재시작 도중의 빈 목록을 집었다).
+    마감을 두고, 못 서면 그 사실을 말한다.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_s
+    while not predicate():
+        if loop.time() >= deadline:
+            raise AssertionError(f"condition did not hold within {timeout_s}s")
+        await asyncio.sleep(0.001)
+
+
+async def spin(rounds: int) -> None:
+    """event loop 을 정해진 횟수만큼 양보한다 — *일어나지 않음*을 확인할 때 쓴다."""
+    for _ in range(rounds):
+        await asyncio.sleep(0)
+
+
+async def start_sick(agents: AgentLauncher) -> tuple:
+    """기동한다 — probe 는 fixture 가 클래스 수준에서 아프게 해 두었다."""
+    launched = await agents.start(manifest())
+    return launched, None
+
+
+async def restart_now(agents: AgentLauncher, launched) -> None:
+    """재시작을 **직접** 돌린다.
+
+    감시 루프를 기다리면 event loop 회차에 묶여, 스위트 전체가 돌 때 경합한다.
+    루프가 실제로 트리거하는지는 아래 `test_the_health_loop_triggers_a_restart`
+    가 따로 본다 — 여기서는 재시작 자체의 계약을 결정적으로 확인한다.
+    """
+    launched.lifecycle.record_health(healthy=False, threshold=1)
+    await agents._restart(launched)
+
+
+async def test_an_unhealthy_agent_is_restarted():
+    """#215 — RestartPolicy 를 부르는 곳이 없어 아픈 에이전트가 방치됐다."""
+    client = FakeDockerClient()
+    agents = launcher(client, Recorder())
+    launched, _ = await start_sick(agents)
+
+    await restart_now(agents, launched)
+
+    assert len(client.created) > 1, "컨테이너가 다시 세워지지 않았다"
+    await agents.stop_all()
+
+
+async def test_the_health_loop_triggers_a_restart():
+    """감시 루프가 Unhealthy 를 보면 재시작을 건다 — 이 배선이 #215 의 핵심이다."""
+    client = FakeDockerClient()
+    agents = launcher(client, Recorder())
+    await start_sick(agents)
+
+    await until(lambda: len(client.created) > 1)
+
+    assert len(client.created) > 1
+    await agents.stop_all()
+
+
+async def test_the_restart_waits_for_the_backoff():
+    """02 Rule 6 — 즉시 다시 세우면 crash loop 이 그대로 반복된다."""
+    waits = Recorder()
+    agents = launcher(FakeDockerClient(), waits)
+    launched, _ = await start_sick(agents)
+
+    await restart_now(agents, launched)
+
+    assert waits.waits == [RestartPolicy().initial_delay_s]
+    await agents.stop_all()
+
+
+async def test_the_restart_counter_is_filled():
+    """05 의 `ContainerRestartLoop` 알림은 이 카운터를 본다."""
+    metrics = Metrics(registry=CollectorRegistry())
+    waits = Recorder()
+    agents = launcher(FakeDockerClient(), waits, metrics=metrics)
+    launched, _ = await start_sick(agents)
+
+    await restart_now(agents, launched)
+
+    counter = metrics.counter("malkuth_container_restarts_total").labels(
+        agent="echo", reason="unhealthy"
+    )
+    assert counter._value.get() == 1.0
+    await agents.stop_all()
+
+
+async def test_the_restart_ceiling_marks_the_agent_failed():
+    """02 Rule 6 — 상한을 넘으면 Failed 로 가고 재시작을 멈춘다 (`RT_008`)."""
+    client = FakeDockerClient()
+    waits = Recorder()
+    agents = launcher(client, waits)
+    launched, _ = await start_sick(agents)
+    # `should_give_up` 은 **초과**(>)를 본다 — 상한 0 이면 첫 시도에서
+    # 포기하므로 재시작 회차를 기다리지 않고 그 경로를 직접 태운다
+    launched.lifecycle.restart_policy = RestartPolicy(max_in_window=0)
+
+    await until(lambda: launched.lifecycle.state is AgentState.FAILED)
+
+    assert launched.lifecycle.state is AgentState.FAILED
+    await agents.stop_all()
+
+
+async def test_the_restart_window_survives_the_restart():
+    """재시작이 lifecycle 을 **이어받아야** crash-loop 상한이 성립한다.
+
+    새로 만들면 `RestartPolicy` 의 창(window)이 매번 리셋되어
+    `should_give_up()` 이 영원히 참이 되지 않는다 — 무한히 되살아난다.
+
+    감시 루프가 걸어 주기를 기다리지 않고 재시작을 **직접** 돌린다 —
+    교체 도중에는 `replicas_of` 가 잠시 비므로, 그 틈을 폴링으로 넘겨다보면
+    빈 목록을 집는다. 루프가 실제로 트리거하는지는
+    `test_the_health_loop_triggers_a_restart` 가 따로 본다.
+    """
+    waits = Recorder()
+    agents = launcher(FakeDockerClient(), waits)
+    launched, _ = await start_sick(agents)
+    before = launched.lifecycle
+
+    await restart_now(agents, launched)
+
+    revived = agents.replicas_of("echo")[0]
+    assert revived.lifecycle is before, "재시작이 lifecycle 을 새로 만들면 상한이 리셋된다"
+    assert before.restart_policy.restarts_in_window() == 1
+    await agents.stop_all()
+
+
+async def test_a_failed_agent_stops_being_watched():
+    """포기한 에이전트를 계속 두드리면 runtime 이 그 대기에 묶인다."""
+    waits = Recorder()
+    agents = launcher(FakeDockerClient(), waits)
+    launched, _ = await start_sick(agents)
+    launched.lifecycle.restart_policy = RestartPolicy(max_in_window=0)
+
+    await restart_now(agents, launched)
+
+    # 감시가 남아 있으면 포기한 에이전트를 계속 두드린다
+    assert not agents._monitors
+
+
+async def test_routing_skips_an_unhealthy_replica():
+    """재시작 중인 레플리카로 보내면 그 태스크가 전부 실패한다."""
+    waits = Recorder()
+    agents = launcher(FakeDockerClient(), waits)
+    healthy = await agents.start(manifest(), replica=0)
+    healthy.client.health = _always_well  # type: ignore[method-assign]
+    sick, _ = await start_sick_replica(agents, replica=1)
+
+    await until(lambda: not sick.lifecycle.accepts_tasks)
+
+    assert all(agents.route("echo") is healthy.client for _ in range(3))
+    await agents.stop_all()
+
+
+async def _always_well() -> HealthStatus:
+    return HealthStatus(status=HealthState.HEALTHY)
+
+
+async def start_sick_replica(agents: AgentLauncher, *, replica: int) -> tuple:
+    launched = await agents.start(manifest(), replica=replica)
+    return launched, None
+
+
+class HangingSleep(Recorder):
+    """대기를 기록하고 **영원히 붙잡는다** — 재시작이 끝나지 않게 고정한다."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._blocked = asyncio.Event()
+
+    async def __call__(self, delay: float) -> None:
+        self.waits.append(delay)
+        await self._blocked.wait()
+
+
+async def test_restart_is_not_scheduled_twice():
+    """감시 루프는 Unhealthy 를 **매 확인마다** 보고한다 — 겹쳐 걸면 컨테이너가 난립한다.
+
+    재시작을 backoff 에서 붙잡아 두면, 그 사이 들어오는 보고가 새 재시작을
+    거는지 대기 횟수로 바로 드러난다.
+    """
+    waits = HangingSleep()
+    agents = launcher(FakeDockerClient(), waits)
+    await start_sick(agents)
+
+    await until(lambda: bool(waits.waits))
+    await spin(200)
+
+    assert waits.waits == [RestartPolicy().initial_delay_s]
+
+
+async def test_restart_is_off_without_supervision():
+    """감시를 켜지 않은 조립은 재시작도 하지 않는다 — 루프의 소유자가 없다."""
+    agents = AgentLauncher(engine=DockerEngine(client=FakeDockerClient()))
+
+    await agents.start(manifest())
+    await spin(30)
+
+    assert not agents._restarts

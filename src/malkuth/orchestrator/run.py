@@ -225,7 +225,7 @@ class RunManager:
         Raises:
             MalkuthError: NOT_FOUND/``VAL_001`` if the run is unknown.
         """
-        run = self._runs.get(run_id)
+        run = self._runs.get(run_id) or self._restore(run_id)
         if run is None:
             raise MalkuthError(
                 category=ErrorCategory.NOT_FOUND,
@@ -234,6 +234,37 @@ class RunManager:
                 details={"run_id": run_id},
             )
         return run
+
+    def _restore(self, run_id: str) -> RunHandle | None:
+        """Rebuild a handle for a run this process did not start.
+
+        이 프로세스가 시작하지 않은 run 의 핸들을 기록에서 복원합니다 —
+        `RunStore` 의 존재 이유가 "다른 프로세스가 닿는 것" 인데, 읽는 쪽이
+        없으면 재시작을 넘는 재개가 성립하지 않습니다 (#186).
+
+        복원한 핸들은 **`_runs` 에 넣지 않습니다**: `active` 가 그것을 세면
+        죽은 프로세스의 run 이 동시 실행 상한을 잠식합니다.
+
+        Returns:
+            The rebuilt handle, or None when no record exists.
+        """
+        if self._store is None:
+            return None
+        record = self._store.get(run_id)
+        if record is None:
+            return None
+
+        handle = RunHandle(
+            run_id=record.run_id,
+            graph=record.graph,
+            mode=GraphMode(record.mode),
+            status=RunStatus(record.status),
+            iteration=record.iteration,
+            failure_streak=record.failure_streak,
+        )
+        if record.drain:
+            handle.request_drain()
+        return handle
 
     def release(self, run_id: str, status: RunStatus) -> None:
         """Mark a run finished, freeing its slot.

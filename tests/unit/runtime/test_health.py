@@ -10,7 +10,7 @@ import asyncio
 import pytest
 
 from malkuth.core.agent import ComponentHealth, HealthState, HealthStatus
-from malkuth.core.errors import CircuitBreaker, ErrorCategory, ErrorCode
+from malkuth.core.errors import CircuitBreaker, ErrorCategory, ErrorCode, MalkuthError
 from malkuth.observability.metrics import Metrics
 from malkuth.runtime.health import HealthMonitor, HealthProbe, track_running
 from malkuth.runtime.lifecycle import AgentLifecycle, AgentState
@@ -135,6 +135,56 @@ async def test_threshold_failures_transition_to_unhealthy():
     assert states[0] is AgentState.READY
     assert states[1] is AgentState.READY
     assert states[2] is AgentState.UNHEALTHY
+
+
+async def test_an_unreachable_agent_reaches_unhealthy_in_the_declared_rounds():
+    """#217 — 확인 안에서 또 재시도하면 이 회차가 성립하지 않는다.
+
+    `NETWORK_RETRY` 를 health 안에서 돌리면 한 번의 확인이 backoff 만으로
+    3초를 넘겨 monitor 의 timeout 에 잘렸다. 02 가 규정한 "3회 연속 실패"가
+    실제로는 9회 시도 + 9초가 되고, 그 사이 아픈 에이전트는 방치된다.
+    """
+    refused = MalkuthError(
+        category=ErrorCategory.NETWORK, code=ErrorCode.NET_001, message="connection refused"
+    )
+    probe = FakeProbe([refused, refused, refused])
+    monitor = make_monitor(probe)
+
+    states = [await monitor.check_once() for _ in range(3)]
+
+    assert states[-1] is AgentState.UNHEALTHY
+    assert probe.calls == 3, "확인 한 번은 시도 한 번이다 — 안에서 재시도하면 이중이다"
+
+
+async def test_the_failure_reason_is_the_error_code():
+    """05 의 사고 대응은 **에러 코드 분포**로 원인을 가른다 (#217).
+
+    예외 클래스 이름만 남기면 `MalkuthError` 가 전부 같은 글자로 뭉개져,
+    도달 불가와 5xx 를 로그에서 구분할 수 없다.
+    """
+    recorded: list[str | None] = []
+    monitor = make_monitor(
+        FakeProbe(
+            [
+                MalkuthError(
+                    category=ErrorCategory.NETWORK,
+                    code=ErrorCode.NET_001,
+                    message="connection refused",
+                )
+            ]
+        )
+    )
+    original = monitor._record
+
+    def spy(*, healthy: bool, reason: str | None = None):
+        recorded.append(reason)
+        return original(healthy=healthy, reason=reason)
+
+    monitor._record = spy  # type: ignore[method-assign]
+
+    await monitor.check_once()
+
+    assert recorded == [str(ErrorCode.NET_001)]
 
 
 async def test_recovery_resets_the_failure_streak():

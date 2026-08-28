@@ -97,7 +97,7 @@ class HealthMonitor:
             status = await asyncio.wait_for(self.probe.health(), timeout=self.timeout_s)
         except (TimeoutError, Exception) as err:  # noqa: B014 — TimeoutError 를 명시해 의도를 남긴다
             self.breaker.record_failure()
-            return self._record(healthy=False, reason=type(err).__name__)
+            return self._record(healthy=False, reason=_reason(err))
 
         self.breaker.record_success()
         self.last_status = status.status
@@ -146,6 +146,17 @@ class HealthMonitor:
                 # Future/Task 를 건너뛰면 대기가 사라져 루프가 busy-run 한다
                 if inspect.isawaitable(result):
                     await result
+
+
+def _reason(err: BaseException) -> str:
+    """실패 원인을 **기계 판독 가능한** 이름으로 남긴다.
+
+    예외 클래스 이름만 남기면 `MalkuthError` 가 전부 같은 글자로 뭉개져,
+    도달 불가(`NET_001`)와 5xx(`NET_001` 아님)를 로그에서 구분할 수 없다 —
+    05 의 사고 대응은 에러 코드 분포를 보고 원인을 가른다 (#217).
+    """
+    code = getattr(err, "code", None)
+    return str(code) if code is not None else type(err).__name__
 
 
 def track_running(metrics: Metrics, agent: str, *, running: bool) -> None:

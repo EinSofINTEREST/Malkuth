@@ -14,6 +14,7 @@ from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
 from malkuth.core.skill import SkillSpec
 from malkuth.core.tools import namespaced
 from malkuth.memory.tool import MEMORY_SEARCH_SPEC, MEMORY_SEARCH_TOOL
+from malkuth.protocols.a2a.tool import ASK_PEER_SPEC, ASK_PEER_TOOL
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -95,6 +96,7 @@ def build_tool_registry(
     *,
     agent: str,
     with_memory: bool = False,
+    with_peers: bool = False,
     mcp_schemas: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> dict[str, SkillSpec]:
     """Merge skillset and MCP tools into one registry.
@@ -105,6 +107,9 @@ def build_tool_registry(
         skillsets: Loaded skillsets contributing tools.
         mcp_servers: Server name to its exposed tool names.
         agent: Agent name for error context.
+        with_peers: Register the framework ``ask_peer`` tool — A2A 가 켜진
+            에이전트만 봅니다. 부를 수 없는 tool 을 광고하면 모델이 고를 때마다
+            거부되어 루프에 빠집니다.
         with_memory: Register the framework ``memory_search`` tool — memory 가
             붙지 않았는데 노출하면 모델이 부를 수 없는 tool 을 본다.
         mcp_schemas: Namespaced tool name to its input schema — 이름만 담으면
@@ -158,6 +163,16 @@ def build_tool_registry(
                 tool=MEMORY_SEARCH_TOOL,
             )
         registry[MEMORY_SEARCH_TOOL] = MEMORY_SEARCH_SPEC
+
+    if with_peers:
+        if ASK_PEER_TOOL in registry:
+            raise _module_error(
+                ErrorCode.MOD_002,
+                f"tool name is reserved by the framework: {ASK_PEER_TOOL}",
+                agent,
+                tool=ASK_PEER_TOOL,
+            )
+        registry[ASK_PEER_TOOL] = ASK_PEER_SPEC
 
     return registry
 
@@ -215,6 +230,8 @@ class Bootstrap:
             agent=agent,
             # memory space 를 선언한 에이전트만 memory_search 를 본다
             with_memory=bool(self._manifest.spec.memory.spaces),
+            # A2A 를 켠 에이전트만 위임 창구를 본다 (03 Rule 1)
+            with_peers=self._manifest.spec.a2a.enabled,
             # 스키마를 흘리지 않으면 모델이 MCP tool 의 인자를 채울 수 없다
             mcp_schemas=self._mcp.schemas() if self._mcp is not None else None,
         )

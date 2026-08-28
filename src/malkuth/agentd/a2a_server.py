@@ -42,6 +42,13 @@ SECRET_ENV = "MALKUTH_A2A_SECRET"  # noqa: S105 — 키 이름이지 값이 아�
 
 MAX_DEPTH_ENV = "MALKUTH_A2A_MAX_DEPTH"
 
+PEERS_ENV = "MALKUTH_A2A_PEERS"
+"""peer 주소 — ``name=host:port`` 를 쉼표로. **runtime 이 주입한다.**
+
+03 Discovery: 에이전트는 peer 의 주소를 스스로 알아내지 않는다. 이 값이 없으면
+받을 수는 있어도 걸 수는 없다 — 그것이 #193 의 상태였다.
+"""
+
 log = structlog.get_logger(__name__)
 
 
@@ -57,6 +64,81 @@ def parse_edges(declared: str) -> frozenset[Edge]:
         if caller and callee:
             edges.add(Edge(caller=caller, callee=callee))
     return frozenset(edges)
+
+
+def parse_peers(declared: str) -> dict[str, str]:
+    """``name=host:port`` 목록을 주소 매핑으로.
+
+    빈 항목은 버린다 — 배선 실수 하나로 에이전트를 통째로 못 뜨게 하지 않는다.
+    선언되지 않은 peer 는 어차피 allowlist 가 거부한다.
+    """
+    peers: dict[str, str] = {}
+    for entry in declared.split(","):
+        name, _, address = entry.strip().partition("=")
+        if name and address:
+            peers[name] = address if "://" in address else f"http://{address}"
+    return peers
+
+
+def reachable_peers(
+    agent: str, edges: frozenset[Edge], addresses: dict[str, str]
+) -> dict[str, str]:
+    """Narrow the injected addresses to peers this agent may actually call.
+
+    주입된 주소를 **이 에이전트가 실제로 부를 수 있는** peer 로 좁힙니다.
+
+    A2A 를 켜도 나가는 방향이 없는 에이전트가 있습니다 (받기만 하는 노드).
+    그런 에이전트에게 창구를 열면 모델이 고를 때마다 `A2A_004` 로 거부되어
+    한 턴이 낭비됩니다 — 광고는 실제 권한과 맞아야 합니다.
+    """
+    outbound = {edge.callee for edge in edges if edge.caller == agent}
+    return {name: url for name, url in addresses.items() if name in outbound}
+
+
+def build_peer_client(manifest: AgentManifest) -> Any:
+    """Assemble the client this agent calls its peers with.
+
+    이 에이전트가 peer 를 부를 때 쓰는 클라이언트를 조립합니다.
+
+    03 은 "실행 중 에이전트가 allowlist 에 선언된 peer 에게 위임/질의한다" 를
+    규정하는데, 이것을 조립하는 곳이 없어 **받을 수는 있고 걸 수는 없는**
+    상태였다 (#193).
+
+    Args:
+        manifest: The agent manifest — 이름이 caller 신원이 된다.
+
+    Returns:
+        The client, or None when nothing is wired (주소나 서명 키 부재).
+    """
+    secret = os.environ.get(SECRET_ENV, "")
+    edges = parse_edges(os.environ.get(EDGES_ENV, ""))
+    reachable = reachable_peers(manifest.name, edges, parse_peers(os.environ.get(PEERS_ENV, "")))
+    if not reachable or not secret:
+        # 부를 수 있는 peer 가 없으면 창구를 열지 않는다: A2A 를 켜도 **나가는**
+        # 방향이 없는 에이전트가 있고(받기만 하는 노드), 그런 에이전트에게
+        # ask_peer 를 광고하면 모델이 고를 때마다 A2A_004 로 거부된다.
+        # 서명 키가 없으면 callee 가 거부한다
+        return None
+
+    from malkuth.protocols.a2a.client import A2AClient
+    from malkuth.protocols.a2a.sdk import SdkPeerTransport
+
+    return A2AClient(
+        agent=manifest.name,
+        allowlist=Allowlist(
+            edges=edges,
+            secret=secret.encode("utf-8"),
+            max_depth=int(os.environ.get(MAX_DEPTH_ENV, str(_default_max_depth()))),
+        ),
+        transport=SdkPeerTransport(agent=manifest.name, addresses=reachable),
+    )
+
+
+def _default_max_depth() -> int:
+    """server 쪽과 같은 기본값을 쓴다 — 두 방향이 어긋나면 깊이 판정이 갈린다."""
+    from malkuth.protocols.a2a.server import DEFAULT_MAX_DEPTH
+
+    return int(DEFAULT_MAX_DEPTH)
 
 
 def build_a2a_app(
@@ -165,6 +247,7 @@ def declared_edges() -> str:
 __all__ = [
     "ADVERTISED_HOST_ENV",
     "EDGES_ENV",
+    "PEERS_ENV",
     "MAX_DEPTH_ENV",
     "PORT_ENV",
     "SECRET_ENV",

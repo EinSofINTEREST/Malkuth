@@ -65,9 +65,9 @@ make e2e-up             # E2E 스택 — fake provider, memory service, 참조 �
 make e2e-down
 ```
 
-`make build` 를 먼저 돌리세요. compose 파일은 `malkuth/agent-base` 를 확장하지만 그것을
-빌드하지는 않기 때문에, 다시 굽지 않고 스택을 올리면 **옛 이미지를 검증**하게 됩니다
-([#222](https://github.com/EinSofINTEREST/Malkuth/issues/222)).
+두 `up` 타깃은 `malkuth/agent-base` 와 그 위 서비스를 먼저 다시 굽습니다 — `src/` 를
+고친 변경이 컨테이너까지 도달합니다. 프레임워크 코드는 base 이미지에만 들어 있어서,
+그것을 다시 굽지 않고 스택을 올리면 **옛 코드를 검증**하게 됩니다.
 
 E2E 스택이 노출하는 포트: 에이전트 control **18081-18084**, Memory Service **18090**,
 checkpoint Postgres **15433**, 에이전트 metrics **19082-19084**, A2A **19102-19104**.

@@ -77,9 +77,9 @@ make e2e-up             # E2E stack — fake provider, memory service, 4 referen
 make e2e-down
 ```
 
-Run `make build` first. The compose files extend `malkuth/agent-base` but do not build it,
-so bringing a stack up without rebuilding validates a stale image
-([#222](https://github.com/EinSofINTEREST/Malkuth/issues/222)).
+Both `up` targets rebuild `malkuth/agent-base` and the services on top of it first, so a
+change under `src/` reaches the containers. The framework code lives only in the base
+image — bringing a stack up without rebuilding it would validate stale code.
 
 The E2E stack publishes agent control ports on **18081-18084**, the Memory Service on
 **18090**, the checkpoint Postgres on **15433**, agent metrics on **19082-19084**, and A2A

@@ -10,7 +10,6 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -24,6 +23,7 @@ from malkuth.runtime.docker.engine import DockerEngine
 from malkuth.runtime.launcher import AgentLauncher
 from malkuth.runtime.lifecycle import AgentState, RestartPolicy
 from tests.fixtures.fake_docker import FakeDockerClient
+from tests.fixtures.waiting import spin, until
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
@@ -73,28 +73,6 @@ def launcher(client: FakeDockerClient, waits: Recorder, **kwargs) -> AgentLaunch
         restart_sleep=waits,
         **kwargs,
     )
-
-
-async def until(predicate: Callable[[], bool], *, timeout_s: float = 5.0) -> None:
-    """조건이 설 때까지 기다린다 — **서지 않으면 여기서 실패한다**.
-
-    회차(event loop turn)를 세는 방식은 CI 부하에서 조용히 포기하고, 그 뒤
-    단언이 엉뚱한 자리에서 터진다 — #215 의 CI 실패가 정확히 그랬다
-    (`replicas_of("echo")[0]` 이 재시작 도중의 빈 목록을 집었다).
-    마감을 두고, 못 서면 그 사실을 말한다.
-    """
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + timeout_s
-    while not predicate():
-        if loop.time() >= deadline:
-            raise AssertionError(f"condition did not hold within {timeout_s}s")
-        await asyncio.sleep(0.001)
-
-
-async def spin(rounds: int) -> None:
-    """event loop 을 정해진 횟수만큼 양보한다 — *일어나지 않음*을 확인할 때 쓴다."""
-    for _ in range(rounds):
-        await asyncio.sleep(0)
 
 
 async def start_sick(agents: AgentLauncher) -> tuple:

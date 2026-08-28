@@ -10,7 +10,6 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
 from pathlib import Path
 
 import yaml
@@ -23,6 +22,7 @@ from malkuth.runtime.docker.engine import DockerEngine
 from malkuth.runtime.launcher import AgentLauncher
 from malkuth.runtime.lifecycle import AgentState
 from tests.fixtures.fake_docker import FakeDockerClient
+from tests.fixtures.waiting import spin, until
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
@@ -98,24 +98,6 @@ async def start_with(agents: AgentLauncher, results: list[HealthStatus]):
     return launched, probe
 
 
-async def settle(rounds: int = 50) -> None:
-    """감시 태스크가 돌 기회를 준다 — 실제로 자지는 않는다."""
-    for _ in range(rounds):
-        await asyncio.sleep(0)
-
-
-async def until(predicate: Callable[[], bool], rounds: int = 400) -> None:
-    """조건이 설 때까지 event loop 을 양보한다.
-
-    회차를 고정하면 확인 하나가 몇 턴을 쓰는지에 테스트가 묶인다 — 조건으로
-    기다리되 상한을 두어 무한 대기는 막는다.
-    """
-    for _ in range(rounds):
-        if predicate():
-            return
-        await asyncio.sleep(0)
-
-
 # --- 상태 전이 ---------------------------------------------------------------
 
 
@@ -160,7 +142,7 @@ async def test_a_degraded_agent_still_accepts_tasks():
     agents = launcher(StepSleep(0))
     launched, _ = await start_with(agents, [degraded()])
 
-    await settle()
+    await until(lambda: launched.lifecycle.state is AgentState.READY)
 
     assert launched.lifecycle.state is AgentState.READY
     await agents.stop_all()
@@ -174,10 +156,10 @@ async def test_the_health_gauge_is_filled():
     metrics = Metrics(registry=CollectorRegistry())
     agents = launcher(StepSleep(0), metrics=metrics)
     await start_with(agents, [healthy()])
-
-    await settle()
-
     gauge = metrics.gauge("malkuth_agent_health").labels(agent="echo")
+
+    await until(lambda: gauge._value.get() == 1.0)
+
     assert gauge._value.get() == 1.0
     await agents.stop_all()
 
@@ -188,7 +170,7 @@ async def test_the_health_gauge_is_filled():
 async def test_stopping_moves_the_lifecycle_to_stopped():
     agents = launcher(StepSleep(0))
     launched, _ = await start_with(agents, [healthy()])
-    await settle()
+    await until(lambda: launched.lifecycle.state is AgentState.READY)
 
     await agents.stop("echo")
 
@@ -199,11 +181,11 @@ async def test_stopping_cancels_the_health_loop():
     """정지한 컨테이너를 계속 두드리면 runtime 이 그 대기에 묶인다."""
     agents = launcher(StepSleep(2))
     _, probe = await start_with(agents, [healthy()] * 50)
-    await settle()
+    await until(lambda: probe.calls > 0)
     seen = probe.calls
 
     await agents.stop("echo")
-    await settle()
+    await spin(50)
 
     assert probe.calls == seen
     assert not agents._monitors
@@ -227,7 +209,7 @@ async def test_the_loop_uses_the_injected_wait():
     agents = launcher(stepper)
     await start_with(agents, [healthy()])
 
-    await settle()
+    await until(lambda: bool(stepper.waits))
 
     assert stepper.waits and all(delay == 10.0 for delay in stepper.waits)
     await agents.stop_all()

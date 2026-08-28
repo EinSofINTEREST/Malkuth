@@ -131,14 +131,14 @@ async def test_replica_index_reaches_the_container_name(replica):
 # --- lifecycle 상태의 무결성 -------------------------------------------------
 
 
-async def test_launching_the_same_agent_twice_is_rejected():
-    """이름만으로 보관하므로 덮어쓰면 첫 컨테이너가 미아가 된다."""
+async def test_launching_the_same_replica_twice_is_rejected():
+    """덮어쓰면 첫 컨테이너가 미아가 된다 — **같은 레플리카**일 때만이다."""
     client = FakeDockerClient()
     launch = launcher(client)
     await launch.start(manifest())
 
     with pytest.raises(MalkuthError) as exc_info:
-        await launch.start(manifest(), replica=1)
+        await launch.start(manifest(), replica=0)
 
     assert exc_info.value.code == ErrorCode.RT_001
     # 거부는 기동 전에 — 컨테이너를 만들어놓고 버리면 안 된다
@@ -163,7 +163,8 @@ async def test_failed_stop_keeps_the_handle_for_retry():
     with pytest.raises(RuntimeError):
         await launch.stop("echo")
 
-    assert "echo" in launch.launched
+    # 내부 키가 아니라 동작으로 본다: 핸들이 남아야 다시 정리할 수 있다
+    assert launch.replicas_of("echo")
     assert launch.issuer.known("echo")
 
 
@@ -174,7 +175,7 @@ async def test_successful_stop_forgets_the_token():
 
     await launch.stop("echo")
 
-    assert "echo" not in launch.launched
+    assert not launch.replicas_of("echo")
     assert not launch.issuer.known("echo")
 
 
@@ -200,7 +201,8 @@ async def test_stop_all_cleans_every_agent_before_reporting_failure():
 
     assert exc_info.value.code == ErrorCode.RT_005
     # 실패한 쪽은 재시도용으로 남고, 멀쩡한 쪽은 끝까지 정리된다
-    assert set(launch.launched) == {"echo"}
+    assert launch.replicas_of("echo")
+    assert not launch.replicas_of("other")
     assert healthy.handle.container_id in client.removed
 
 

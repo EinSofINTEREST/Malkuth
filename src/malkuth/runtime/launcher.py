@@ -88,7 +88,13 @@ class AgentLauncher:
     engine: DockerEngine
     issuer: TokenIssuer = field(default_factory=TokenIssuer)
     ports: A2APortAllocator | None = None
-    launched: dict[str, LaunchedAgent] = field(default_factory=dict)
+    launched: dict[tuple[str, int], LaunchedAgent] = field(default_factory=dict)
+    _cursors: dict[str, int] = field(default_factory=dict, init=False)
+    """기동된 레플리카 — 키는 **(에이전트, replica)** 다.
+
+    이름만으로 잡으면 두 번째 레플리카가 첫 핸들을 덮어 컨테이너를 미아로
+    만든다. 01 Scalability 는 동일 manifest 의 N replica 기동을 규정한다.
+    """
 
     async def start(
         self,
@@ -116,13 +122,13 @@ class AgentLauncher:
             The launched agent — its client already carries the token.
         """
         agent = manifest.name
-        # 이름만으로 보관하므로 두 번째 기동은 첫 핸들을 덮어 컨테이너를 미아로 만든다.
-        # replica 라우팅은 ReplicaRouter 소관이지 이 계층이 아니다
-        if agent in self.launched:
+        # 같은 **레플리카**를 두 번 띄우면 첫 핸들을 덮어 컨테이너가 미아가 된다.
+        # 다른 레플리카는 별개의 컨테이너이므로 허용한다 (01 Scalability)
+        if (agent, replica) in self.launched:
             raise MalkuthError(
                 category=ErrorCategory.RUNTIME,
                 code=ErrorCode.RT_001,
-                message="agent is already launched",
+                message="agent replica is already launched",
                 agent=agent,
                 details={"replica": replica},
             )
@@ -151,7 +157,7 @@ class AgentLauncher:
         )
 
         launched = LaunchedAgent(agent=agent, handle=handle, client=client, replica=replica)
-        self.launched[agent] = launched
+        self.launched[agent, replica] = launched
         log.info(
             "agent launched",
             agent=agent,
@@ -161,28 +167,68 @@ class AgentLauncher:
         )
         return launched
 
-    async def stop(self, agent: str) -> None:
-        """Stop an agent and forget its token.
+    def replicas_of(self, agent: str) -> list[LaunchedAgent]:
+        """이 에이전트의 기동된 레플리카 — replica 순서로."""
+        return [launched for (name, _), launched in sorted(self.launched.items()) if name == agent]
+
+    def route(self, agent: str) -> ControlClient:
+        """Pick the next replica's client, round-robin.
+
+        레플리카 간 round-robin 으로 클라이언트를 고릅니다 (01 Scalability).
+
+        **health 를 보지 않는다**: `ReplicaRouter` 가 그 역할이지만
+        `AgentLifecycle` 이 프로덕션에서 돌지 않아 모든 레플리카가
+        `DECLARED` 에 머문다 — 그대로 쓰면 항상 `RT_009` 다 (#213).
+
+        Raises:
+            MalkuthError: RUNTIME/``RT_009`` if the agent has no launched replica.
+        """
+        replicas = self.replicas_of(agent)
+        if not replicas:
+            raise MalkuthError(
+                category=ErrorCategory.RUNTIME,
+                code=ErrorCode.RT_009,
+                message="no launched replica for agent",
+                agent=agent,
+                retryable=True,
+            )
+        cursor = self._cursors.get(agent, 0)
+        self._cursors[agent] = cursor + 1
+        return replicas[cursor % len(replicas)].client
+
+    async def stop(self, agent: str, *, replica: int | None = None) -> None:
+        """Stop an agent's replicas and forget its token.
 
         에이전트를 정지하고 토큰을 버립니다 — 죽은 토큰을 들고 있지 않습니다.
         컨테이너 정지가 실패하면 핸들을 **그대로 둡니다** — 유일한 재시도
         수단을 먼저 버리면 미아 컨테이너를 다시 정리할 방법이 없습니다.
-        """
-        launched = self.launched.get(agent)
-        if launched is None:
-            return
 
-        await launched.aclose()
-        await self.engine.stop(launched.handle)
-        del self.launched[agent]
-        self.issuer.forget(agent)
-        if self.ports is not None:
-            self.ports.release(agent, replica=launched.replica)
+        Args:
+            agent: The agent to stop.
+            replica: One replica, or **every** replica when omitted — 02 의
+                drain 은 에이전트 단위이므로 전부가 기본이다.
+        """
+        targets = (
+            [self.launched[agent, replica]]
+            if replica is not None and (agent, replica) in self.launched
+            else self.replicas_of(agent)
+        )
+        for launched in targets:
+            await launched.aclose()
+            await self.engine.stop(launched.handle)
+            del self.launched[agent, launched.replica]
+            if self.ports is not None:
+                self.ports.release(agent, replica=launched.replica)
+
+        # 토큰은 에이전트 단위다 — 레플리카가 남아 있으면 아직 버리지 않는다
+        if not self.replicas_of(agent):
+            self.issuer.forget(agent)
+            self._cursors.pop(agent, None)
 
     async def stop_all(self) -> None:
         """기동된 에이전트를 전부 정지한다 — 하나가 실패해도 나머지를 계속 정리한다."""
         failures: list[BaseException] = []
-        for agent in list(self.launched):
+        for agent in dict.fromkeys(name for name, _ in self.launched):
             try:
                 await self.stop(agent)
             except asyncio.CancelledError:
@@ -200,8 +246,19 @@ class AgentLauncher:
             ) from failures[0]
 
     def clients(self) -> dict[str, ControlClient]:
-        """노드 런타임이 쓰는 에이전트별 클라이언트 매핑."""
-        return {name: item.client for name, item in self.launched.items()}
+        """에이전트별 대표 클라이언트 — **레플리카가 여럿이면 라우팅되지 않는다.**
+
+        분산이 필요하면 `route` 를 쓴다: 이 매핑은 값이 고정이라 같은 레플리카만
+        계속 부른다.
+        """
+        return {name: replicas[0].client for name, replicas in self._by_agent().items()}
+
+    def _by_agent(self) -> dict[str, list[LaunchedAgent]]:
+        """에이전트별 레플리카 목록."""
+        grouped: dict[str, list[LaunchedAgent]] = {}
+        for (name, _), launched in sorted(self.launched.items()):
+            grouped.setdefault(name, []).append(launched)
+        return grouped
 
 
 __all__ = ["AgentLauncher", "LaunchedAgent"]

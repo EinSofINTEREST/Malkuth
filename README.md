@@ -71,7 +71,8 @@ export MALKUTH_TEST_REDIS_URL=redis://127.0.0.1:16379    # needs RediSearch (red
 
 ```bash
 make build              # malkuth/agent-base + agent-echo + agent-claude-code images
-make up / make down     # dev stack — one echo agent, control port on 18080
+make up                 # dev stack — one echo agent, control port on 18080
+make down
 make e2e-up             # E2E stack — fake provider, memory service, 4 reference agents
 make e2e-down
 ```

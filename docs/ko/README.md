@@ -59,7 +59,8 @@ export MALKUTH_TEST_REDIS_URL=redis://127.0.0.1:16379    # RediSearch 필요 (re
 
 ```bash
 make build              # malkuth/agent-base + agent-echo + agent-claude-code 이미지
-make up / make down     # 개발 스택 — echo 에이전트 1대, control port 18080
+make up                 # 개발 스택 — echo 에이전트 1대, control port 18080
+make down
 make e2e-up             # E2E 스택 — fake provider, memory service, 참조 에이전트 4대
 make e2e-down
 ```

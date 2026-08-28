@@ -256,7 +256,7 @@ async def build_executor(manifest: AgentManifest, *, metrics: Metrics | None = N
         )
 
     from malkuth.agentd.bootstrap import Bootstrap
-    from malkuth.agentd.executor import Executor
+    from malkuth.agentd.executor import MODEL_RETRY_POLICIES, Executor
     from malkuth.agentd.providers.anthropic import AnthropicModel
     from malkuth.modules.promptset import PromptsetLoader
     from malkuth.modules.registry import ModuleRegistry
@@ -284,6 +284,9 @@ async def build_executor(manifest: AgentManifest, *, metrics: Metrics | None = N
         telemetry=_telemetry_for(manifest, metrics),
         artifacts=_artifact_store(manifest),
         output_keys=lambda task: _template_output_keys(result, task),
+        # 05 Retry Layering — 모델 호출의 재시도 주체는 agentd 다.
+        # 여기서 켜지 않으면 정책은 정의만 되고 아무 일도 하지 않는다
+        retry_policies=MODEL_RETRY_POLICIES,
     )
 
 

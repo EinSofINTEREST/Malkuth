@@ -98,15 +98,11 @@ def build_checkpointer(
     # Redis/Postgres saver 는 선택 의존성 — 미설치 시 설정 오류로 보고한다
     try:
         if resolved is CheckpointerKind.REDIS:
-            from langgraph.checkpoint.redis import RedisSaver  # type: ignore[import-not-found]
-
-            saver = RedisSaver(redis_url=url)
-            saver.setup()
-            redis_saver: BaseCheckpointSaver[Any] = saver
-            return redis_saver
+            return cast("BaseCheckpointSaver[Any]", _deferred_redis_saver(url))
 
         # **비동기 saver 여야 한다**: 오케스트레이터는 `ainvoke` 로 그래프를
         # 굴리는데 동기 PostgresSaver 는 `aget_tuple` 이 NotImplementedError 다.
+        # 이것은 redis 경로에도 똑같이 적용된다 (위)
         #
         # ``from_conn_string`` 은 context manager 를 돌려준다 — 그것을
         # checkpointer 로 쓰면 그래프에 물리는 순간 깨진다
@@ -118,6 +114,62 @@ def build_checkpointer(
             message=f"checkpointer backend not installed: {resolved}",
             details={"checkpointer": str(resolved)},
         ) from err
+
+
+def _deferred_redis_saver(url: str) -> Any:
+    """Build an async Redis saver whose schema is prepared on first use.
+
+    postgres 와 같은 이유로 미룬다 — ``build_checkpointer`` 는 동기이고
+    ``setup()`` 은 비동기다. 다만 redis 는 생성자가 동기라 커넥션 자체는
+    바로 만들 수 있고, 미룰 것은 인덱스 준비뿐이다.
+    """
+    from langgraph.checkpoint.redis.aio import AsyncRedisSaver
+
+    class DeferredAsyncRedisSaver(AsyncRedisSaver):
+        """첫 사용 시 인덱스를 준비하는 saver."""
+
+        def __init__(self) -> None:
+            super().__init__(redis_url=url)
+            self._prepared = False
+            self._prepare_lock = asyncio.Lock()
+
+        async def _prepare(self) -> None:
+            if self._prepared:
+                return
+            async with self._prepare_lock:
+                if self._prepared:
+                    return
+                await AsyncRedisSaver.asetup(self)
+                self._prepared = True
+
+        async def aget_tuple(self, config: Any) -> Any:
+            await self._prepare()
+            return await AsyncRedisSaver.aget_tuple(self, config)
+
+        async def alist(self, config: Any, **kwargs: Any) -> Any:
+            await self._prepare()
+            async for item in AsyncRedisSaver.alist(self, config, **kwargs):
+                yield item
+
+        async def aput(self, config: Any, *args: Any, **kwargs: Any) -> Any:
+            await self._prepare()
+            return await AsyncRedisSaver.aput(self, config, *args, **kwargs)
+
+        async def aput_writes(self, config: Any, *args: Any, **kwargs: Any) -> Any:
+            await self._prepare()
+            return await AsyncRedisSaver.aput_writes(self, config, *args, **kwargs)
+
+        async def aclose(self) -> None:
+            """Release the client this saver opened — 여는 쪽이 닫는다.
+
+            라이브러리의 `__aexit__` 에 위임한다: 커넥션 풀 해제와 redisvl
+            인덱스의 클라이언트 참조 정리까지 거기 들어 있어, 직접
+            `aclose()` 만 부르면 그 둘이 빠진다.
+            """
+            await AsyncRedisSaver.__aexit__(self, None, None, None)
+            self._prepared = False
+
+    return DeferredAsyncRedisSaver()
 
 
 def _deferred_postgres_saver(url: str) -> Any:

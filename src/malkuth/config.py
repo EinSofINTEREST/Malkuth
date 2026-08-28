@@ -23,6 +23,20 @@ ENV_PREFIX = "MALKUTH_"
 
 NESTED_SEPARATOR = "__"
 DEFAULT_CONFIG_DIR = "configs"
+DEFAULT_ENVIRONMENT = "dev"
+ENVIRONMENT_ENV = "MALKUTH_ENV"
+
+
+def resolve_environment(
+    explicit: str | None = None, *, environ: Mapping[str, str] | None = None
+) -> str:
+    """Pick the configuration environment: explicit, then env var, then default.
+
+    설정 환경 이름을 정합니다 — 명시값 > ``MALKUTH_ENV`` > 기본값.
+    이름을 한 곳에서 정해야 CLI 와 상주 프로세스가 같은 설정을 본다.
+    """
+    source = os.environ if environ is None else environ
+    return explicit or source.get(ENVIRONMENT_ENV) or DEFAULT_ENVIRONMENT
 
 
 def config_error(message: str, **details: Any) -> MalkuthError:
@@ -103,6 +117,10 @@ class OrchestratorConfig(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     checkpointer: Literal["memory", "redis", "postgres"] = "memory"
+    checkpointer_url: str | None = None
+    """외부 checkpointer 의 접속 URL. 자격증명을 파일에 굽지 않도록
+    ``MALKUTH_ORCHESTRATOR__CHECKPOINTER_URL`` 로 덮어쓰는 것이 기본 경로다 —
+    이 필드가 없어 `checkpointer: postgres` 선언이 도달 불가능했다 (#220)."""
     max_concurrent_runs: int = Field(default=10, gt=0)
     max_service_runs: int = Field(default=5, gt=0)
     node_timeout_s: float = Field(default=300.0, gt=0)
@@ -284,7 +302,7 @@ def merge(base: Mapping[str, Any], overlay: Mapping[str, Any]) -> dict[str, Any]
 
 
 def load_config(
-    environment: str = "dev",
+    environment: str = DEFAULT_ENVIRONMENT,
     *,
     config_dir: str | Path = DEFAULT_CONFIG_DIR,
     environ: Mapping[str, str] | None = None,
@@ -339,6 +357,8 @@ def load_config(
 
 __all__ = [
     "DEFAULT_CONFIG_DIR",
+    "DEFAULT_ENVIRONMENT",
+    "ENVIRONMENT_ENV",
     "ENV_PREFIX",
     "NESTED_SEPARATOR",
     "A2AConfig",
@@ -357,5 +377,6 @@ __all__ = [
     "config_error",
     "env_overrides",
     "load_config",
+    "resolve_environment",
     "merge",
 ]

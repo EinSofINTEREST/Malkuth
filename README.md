@@ -128,11 +128,22 @@ uv run malkuth run graphs/feed-monitor.yaml --service --iterations 2 \
 A service run without `--iterations` runs until interrupted; `Ctrl-C` requests a drain, so
 it stops after finishing the current iteration rather than mid-flight.
 
-Two limits are worth knowing before you rely on them: `--checkpointer` currently only
-works as `memory`, because the CLI has no way to supply a connection URL for `postgres`
-or `redis` ([#220](https://github.com/EinSofINTEREST/Malkuth/issues/220)) — durable
-checkpointing is reachable through the library API meanwhile. And `run-list` /
-`run-drain` / `run-resume` need a control plane process that is not shipped yet
+The checkpoint backend comes from configuration — `--checkpointer` only overrides it for
+one run. `postgres` and `redis` additionally need a connection URL, which is best supplied
+out of band so credentials never land in a file:
+
+```bash
+MALKUTH_ENV=prod \
+MALKUTH_ORCHESTRATOR__CHECKPOINTER_URL=postgresql://user:pass@host:5432/malkuth \
+  uv run malkuth run graphs/research-pipeline.yaml --agent ...
+```
+
+With a durable backend, re-running the same `--run-id` resumes that run from its last
+checkpoint — including from a different process. The default `memory` backend disappears
+with the process, so runs on it cannot be resumed.
+
+One limit is worth knowing: `run-list` / `run-drain` / `run-resume` need a control plane
+process that is not shipped yet
 ([#221](https://github.com/EinSofINTEREST/Malkuth/issues/221)).
 
 ### Long-running processes

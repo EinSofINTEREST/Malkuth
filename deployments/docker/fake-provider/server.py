@@ -72,7 +72,22 @@ def _content_for(prompt: str, digest: str) -> str:
         return f"fake-response:{digest}"
 
     keys = [key.strip() for key in matches[-1].split(",") if key.strip()]
-    return json.dumps({key: f"fake-{key}:{digest}" for key in keys})
+    return json.dumps({key: _value_for(key, digest) for key in keys})
+
+
+_LIST_KEYS = frozenset({"findings", "new_items", "seen_ids", "spaces", "pending_spaces"})
+"""state schema 가 리스트로 선언한 키 — 대역도 그 계약을 지켜야 한다.
+
+전부 문자열로 채우면 promptset 의 `{type: array}` 검증에 걸리고, 걸리지 않는
+경로에서는 **선언과 다른 타입이 state 에 들어간다.**
+"""
+
+
+def _value_for(key: str, digest: str) -> object:
+    """키가 요구하는 형태로 값을 만든다."""
+    if key in _LIST_KEYS:
+        return [f"fake-{key}:{digest}"]
+    return f"fake-{key}:{digest}"
 
 
 def _embedding_dimensions() -> int:

@@ -20,7 +20,7 @@ spec:
       file: templates/watcher.j2
       output_keys: [new_items]
       variables:
-        feeds: {type: string, required: true}
+        feeds: {type: array, required: true}
     default:
       file: templates/default.j2
       variables:

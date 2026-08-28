@@ -12,9 +12,22 @@ from prometheus_client import CollectorRegistry
 from malkuth.agentd.executor import Executor, ExecutorConfig
 from malkuth.agentd.telemetry import ExecutorTelemetry, tool_source
 from malkuth.core.agent import TaskStatus, TraceContext
+from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
 from malkuth.observability.metrics import Metrics
 from tests.fixtures.builders import make_task
 from tests.fixtures.fake_model import FakeModel, FakeTools, calls, text
+
+
+def rate_limited() -> MalkuthError:
+    """provider 가 429 를 낸 상황 — anthropic 어댑터가 내는 것과 같은 모양."""
+    return MalkuthError(
+        category=ErrorCategory.RATE_LIMIT,
+        code=ErrorCode.LLM_001,
+        message="provider rate limited",
+        agent="researcher",
+        retryable=True,
+    )
+
 
 MCP_TOOL = "mcp__filesystem__read_file"
 SKILL_TOOL = "search"
@@ -197,6 +210,50 @@ async def test_model_failure_is_counted_before_it_propagates():
             status="failed",
         )
         == 1.0
+    )
+
+
+async def test_rate_limit_is_counted_under_its_own_status():
+    """`ModelRateLimited` 알림은 **이 값으로** 필터한다.
+
+    failed 로 뭉개면 알림이 영원히 침묵한다 — 05 status 표가 명시적으로
+    경고하는 상황이다.
+    """
+    metrics = make_metrics()
+    executor, _ = make_executor([rate_limited()], metrics=metrics)
+
+    await executor.execute(make_task(trace=GRAPH_TRACE))
+
+    assert (
+        value(
+            metrics,
+            "malkuth_model_requests_total",
+            agent="researcher",
+            provider="anthropic",
+            model="claude-sonnet-5",
+            status="rate_limited",
+        )
+        == 1.0
+    )
+
+
+async def test_rate_limit_does_not_also_count_as_failed():
+    """두 번 세면 실패율 알림이 rate limit 때마다 함께 울린다."""
+    metrics = make_metrics()
+    executor, _ = make_executor([rate_limited()], metrics=metrics)
+
+    await executor.execute(make_task(trace=GRAPH_TRACE))
+
+    assert (
+        value(
+            metrics,
+            "malkuth_model_requests_total",
+            agent="researcher",
+            provider="anthropic",
+            model="claude-sonnet-5",
+            status="failed",
+        )
+        == 0.0
     )
 
 

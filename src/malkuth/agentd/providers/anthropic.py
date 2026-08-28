@@ -28,11 +28,23 @@ DEFAULT_MAX_TOKENS = 4096
 
 
 def _model_error(
-    code: ErrorCode, message: str, *, agent: str, retryable: bool, cause: str
+    code: ErrorCode,
+    message: str,
+    *,
+    agent: str,
+    retryable: bool,
+    cause: str,
+    category: ErrorCategory = ErrorCategory.MODEL,
 ) -> MalkuthError:
-    """provider 실패를 MODEL 카테고리로 변환한다."""
+    """provider 실패를 구조화 에러로 변환한다.
+
+    기본은 MODEL 이지만 rate limit 은 **RATE_LIMIT** 으로 분리한다 —
+    05 Layer Rules 는 모델 호출 boundary 가 MODEL/RATE_LIMIT/TIMEOUT 셋을
+    낸다고 규정하고, RATE_LIMIT_RETRY 는 그 카테고리만 본다. 뭉개면
+    정책이 겨냥한 유일한 상황에 정책이 닿지 않는다.
+    """
     return MalkuthError(
-        category=ErrorCategory.MODEL,
+        category=category,
         code=code,
         message=message,
         agent=agent,
@@ -108,6 +120,8 @@ class AnthropicModel:
                 agent=self.agent,
                 retryable=True,
                 cause=type(err).__name__,
+                # 재시도 전략이 다르다 — 10초 시작 5회 (RATE_LIMIT_RETRY)
+                category=ErrorCategory.RATE_LIMIT,
             ) from err
         except anthropic.BadRequestError as err:
             if not _is_context_overflow(err):

@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
@@ -53,6 +53,8 @@ class MemoryDeployment:
 
     app: FastAPI
     tokens: dict[str, str] = field(default_factory=dict)
+    indexer: Any = None
+    """색인 큐 — **누군가 비워야** 저장한 기억이 검색된다 (09 Write Path)."""
 
 
 def _embedding_source(
@@ -137,6 +139,7 @@ def build_deployment(
     return MemoryDeployment(
         app=create_app(service, recall, tokens, indexer=indexer, chunk=chunk),
         tokens=issued,
+        indexer=indexer,
     )
 
 

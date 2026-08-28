@@ -9,14 +9,17 @@ Memory Service 를 프로세스로 실행한다 — ``python -m malkuth.memory``
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import os
 from pathlib import Path
+from typing import Any
 
 import structlog
 import uvicorn
 
 from malkuth.config import load_config
-from malkuth.memory.bootstrap import build_deployment
+from malkuth.memory.bootstrap import MemoryDeployment, build_deployment
 from malkuth.observability.metrics import DEFAULT_METRICS_PORT, Metrics, start_metrics_server
 
 log = structlog.get_logger(__name__)
@@ -87,7 +90,61 @@ def main() -> None:
 
     port = int(os.environ.get(PORT_ENV, DEFAULT_PORT))
     log.info("memory service starting", port=port)
-    uvicorn.run(deployment.app, host="0.0.0.0", port=port, log_config=None)  # noqa: S104
+    _serve(deployment, port, interval_s=config.memory.index_lag_target_s)
+
+
+def _serve(deployment: MemoryDeployment, port: int, *, interval_s: float) -> None:
+    """Serve the app while an indexer drains the write queue.
+
+    앱을 서빙하면서 **색인 큐를 비우는 루프**를 함께 돌립니다.
+
+    09 Write Path 는 저장과 색인의 분리를 규정합니다 — append 는 embedding 을
+    기다리지 않습니다. 그 대신 **누군가 큐를 비워야** 하고, 그 주체가 없으면
+    저장한 기억이 영원히 검색되지 않습니다 (#207).
+    """
+    asyncio.run(_run(deployment, port, interval_s=interval_s))
+
+
+async def _run(deployment: MemoryDeployment, port: int, *, interval_s: float) -> None:
+    """서버와 인덱서를 함께 돌린다 — 서버가 끝나면 인덱서도 정리한다."""
+    server = uvicorn.Server(
+        uvicorn.Config(deployment.app, host="0.0.0.0", port=port, log_config=None)  # noqa: S104
+    )
+    indexing = asyncio.create_task(_index_loop(deployment.indexer, interval_s))
+    try:
+        await server.serve()
+    finally:
+        indexing.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await indexing
+        # 종료 직전 한 번 더 비운다 — 버리면 그 항목은 영원히 검색되지 않는다
+        _drain_once(deployment.indexer)
+
+
+async def _index_loop(indexer: Any, interval_s: float) -> None:
+    """주기적으로 큐를 비운다 — 목표 지연은 설정이 정한다."""
+    if indexer is None:
+        return
+    while True:
+        await asyncio.sleep(interval_s)
+        _drain_once(indexer)
+
+
+def _drain_once(indexer: Any) -> None:
+    """한 번 비운다 — 실패가 서비스를 죽이지 않는다 (09 Write Path 3).
+
+    누적 실패는 `IndexQueue` 가 `MEM_003` 으로 드러내고 재시도를 위해 항목을
+    큐에 남긴다 — 여기서 또 재시도하면 이중이다.
+    """
+    if indexer is None:
+        return
+    try:
+        indexed = indexer.drain()
+    except Exception as err:  # noqa: BLE001 — 어떤 실패도 서비스를 죽이면 안 된다
+        log.warning("memory indexing pass failed", exc_info=err)
+        return
+    if indexed:
+        log.debug("memory indexing pass", **{"entries": indexed})
 
 
 if __name__ == "__main__":

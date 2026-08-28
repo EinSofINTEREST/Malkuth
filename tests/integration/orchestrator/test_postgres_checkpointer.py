@@ -35,10 +35,29 @@ class EchoRuntime:
         return TaskResult.completed(task, output={})
 
 
+@pytest.fixture
+async def checkpointers():
+    """테스트가 연 checkpointer 를 반드시 닫는다.
+
+    각 테스트가 손으로 닫으면 하나만 빠뜨려도 커넥션이 GC 까지 남는다 —
+    이 파일이 검증하는 것이 바로 그 수명이므로 여기서 새면 앞뒤가 맞지 않는다.
+    """
+    opened = []
+
+    def build(kind: str = "postgres", *, url: str | None = URL):
+        checkpointer = build_checkpointer(kind, url=url)
+        opened.append(checkpointer)
+        return checkpointer
+
+    yield build
+    for checkpointer in opened:
+        await close_checkpointer(checkpointer)
+
+
 @requires_postgres
-async def test_a_graph_run_completes_with_the_postgres_checkpointer():
+async def test_a_graph_run_completes_with_the_postgres_checkpointer(checkpointers):
     """#171 의 핵심 — 반환된 객체가 실제로 checkpointer 여야 한다."""
-    checkpointer = build_checkpointer("postgres", url=URL)
+    checkpointer = checkpointers()
     submitter = RunSubmitter(runtime=EchoRuntime(), checkpointer=checkpointer)
 
     result = await submitter.submit(make_mission(), {"query": "q"}, run_id="pg-complete")
@@ -47,9 +66,9 @@ async def test_a_graph_run_completes_with_the_postgres_checkpointer():
 
 
 @requires_postgres
-async def test_the_checkpoint_is_readable_after_the_run():
+async def test_the_checkpoint_is_readable_after_the_run(checkpointers):
     """저장만 되고 읽히지 않으면 재개가 불가능하다."""
-    checkpointer = build_checkpointer("postgres", url=URL)
+    checkpointer = checkpointers()
     submitter = RunSubmitter(runtime=EchoRuntime(), checkpointer=checkpointer)
     await submitter.submit(make_mission(), {"query": "q"}, run_id="pg-readable")
 
@@ -59,9 +78,9 @@ async def test_the_checkpoint_is_readable_after_the_run():
 
 
 @requires_postgres
-async def test_the_async_contract_is_served():
+async def test_the_async_contract_is_served(checkpointers):
     """동기 saver 를 돌려주면 ainvoke 가 NotImplementedError 로 죽는다."""
-    checkpointer = build_checkpointer("postgres", url=URL)
+    checkpointer = checkpointers()
 
     # 준비 전에도 비동기 계약이 있어야 한다 — 그래프가 그것으로 물린다
     assert hasattr(checkpointer, "aget_tuple")
@@ -69,9 +88,9 @@ async def test_the_async_contract_is_served():
 
 
 @requires_postgres
-async def test_two_runs_do_not_share_a_thread():
+async def test_two_runs_do_not_share_a_thread(checkpointers):
     """thread 가 섞이면 한 run 의 재개가 다른 run 의 state 를 집는다."""
-    checkpointer = build_checkpointer("postgres", url=URL)
+    checkpointer = checkpointers()
     submitter = RunSubmitter(runtime=EchoRuntime(), checkpointer=checkpointer)
     await submitter.submit(make_mission(), {"query": "a"}, run_id="pg-a")
     await submitter.submit(make_mission(), {"query": "b"}, run_id="pg-b")
@@ -89,9 +108,9 @@ async def test_two_runs_do_not_share_a_thread():
 
 
 @requires_postgres
-async def test_closing_releases_the_connection():
+async def test_closing_releases_the_connection(checkpointers):
     """상주 프로세스는 프로세스 종료에 기댈 수 없다 — 물고 있으면 샌다."""
-    checkpointer = build_checkpointer("postgres", url=URL)
+    checkpointer = checkpointers()
     await checkpointer.aget_tuple({"configurable": {"thread_id": "pg-close"}})
     assert checkpointer.conn is not None
 
@@ -101,15 +120,15 @@ async def test_closing_releases_the_connection():
 
 
 @requires_postgres
-async def test_closing_an_unused_checkpointer_is_harmless():
+async def test_closing_an_unused_checkpointer_is_harmless(checkpointers):
     """한 번도 쓰이지 않았으면 열린 것이 없다 — 정리가 실패하면 안 된다."""
-    await close_checkpointer(build_checkpointer("postgres", url=URL))
+    await close_checkpointer(checkpointers())
 
 
 @requires_postgres
-async def test_reuse_after_close_reopens():
+async def test_reuse_after_close_reopens(checkpointers):
     """닫은 뒤 다시 쓰면 살아나야 한다 — 아니면 정리가 곧 파괴가 된다."""
-    checkpointer = build_checkpointer("postgres", url=URL)
+    checkpointer = checkpointers()
     await checkpointer.aget_tuple({"configurable": {"thread_id": "pg-reopen"}})
     await close_checkpointer(checkpointer)
 
@@ -121,3 +140,33 @@ async def test_reuse_after_close_reopens():
 async def test_closing_an_in_memory_checkpointer_is_a_noop():
     """호출자는 어느 백엔드인지 알 필요가 없어야 한다."""
     await close_checkpointer(build_checkpointer("memory"))
+
+
+@requires_postgres
+async def test_a_failed_setup_does_not_leak_the_connection(monkeypatch, checkpointers):
+    """setup 이 실패하면 이미 연 커넥션은 주인을 잃는다.
+
+    재시도마다 하나씩 쌓여, 스키마가 안 만들어지는 것보다 **먼저 커넥션
+    상한에 부딪힌다** — 그때는 원인이 setup 이라는 것이 드러나지 않는다.
+    """
+    from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+
+    checkpointer = checkpointers()
+    opened: list[object] = []
+    real_setup = AsyncPostgresSaver.setup
+
+    async def failing(self) -> None:
+        opened.append(self.conn)
+        raise RuntimeError("schema creation failed")
+
+    monkeypatch.setattr(AsyncPostgresSaver, "setup", failing)
+
+    with pytest.raises(RuntimeError):
+        await checkpointer.aget_tuple({"configurable": {"thread_id": "pg-setup-fail"}})
+
+    assert opened, "커넥션을 열기 전에 실패했다면 이 테스트는 아무 것도 증명하지 않는다"
+    assert opened[0].closed
+
+    # 실패가 영구 고장으로 남으면 안 된다 — 원인이 해소되면 다시 준비된다
+    monkeypatch.setattr(AsyncPostgresSaver, "setup", real_setup)
+    assert await checkpointer.aget_tuple({"configurable": {"thread_id": "pg-setup-fail"}}) is None

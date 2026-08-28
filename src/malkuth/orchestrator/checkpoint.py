@@ -206,8 +206,16 @@ def _deferred_postgres_saver(url: str) -> Any:
                 connection = await AsyncConnection.connect(
                     self._url, autocommit=True, row_factory=dict_row
                 )
-                AsyncPostgresSaver.__init__(self, conn=connection)
-                await AsyncPostgresSaver.setup(self)
+                try:
+                    AsyncPostgresSaver.__init__(self, conn=connection)
+                    await AsyncPostgresSaver.setup(self)
+                except BaseException:
+                    # setup 이 실패하면 이 커넥션은 주인을 잃는다 — 재시도마다
+                    # 하나씩 쌓여, 스키마가 안 만들어지는 것보다 먼저 커넥션
+                    # 상한에 부딪힌다
+                    await connection.close()
+                    self.conn = None  # type: ignore[assignment]
+                    raise
                 self._prepared = True
 
         async def aget_tuple(self, config: Any) -> Any:

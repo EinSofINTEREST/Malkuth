@@ -25,6 +25,7 @@ from malkuth.runtime.nodes import ControlNodeRuntime
 from tests.e2e.test_stack import (
     AGENT_TOKEN,
     COMPOSE_FILE,
+    compose_up,
     docker,
     requires_docker,
     wait_healthy,
@@ -45,7 +46,7 @@ def topology(name: str) -> GraphTopology:
 @pytest.fixture(scope="module")
 def graph_stack() -> Iterator[dict[str, int]]:
     """세 에이전트가 뜬 스택 — finalizer 가 반드시 정리한다."""
-    docker("compose", "-f", str(COMPOSE_FILE), "up", "-d", "--build")
+    compose_up()
     try:
         for port in AGENT_PORTS.values():
             assert wait_healthy(f"http://127.0.0.1:{port}"), f"agent on {port} never became healthy"

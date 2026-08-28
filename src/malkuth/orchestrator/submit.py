@@ -336,6 +336,9 @@ class RunSubmitter:
 
         resumed = await self.start_service(
             topology,
+            # 이 프로세스가 시작하지 않은 run 은 핸들에 state 가 없다 (기록만
+            # 복원된다) — 그때는 checkpoint 가 정본이고, 그래프가 거기서
+            # 이어받는다. mission resume 과 같은 규칙이다
             previous.state,
             run_id=f"{run_id}:resumed",
             max_iterations=max_iterations,

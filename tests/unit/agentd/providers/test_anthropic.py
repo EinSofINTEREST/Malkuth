@@ -11,7 +11,12 @@ import httpx
 import pytest
 
 from malkuth.agentd.providers.anthropic import DEFAULT_MAX_TOKENS, AnthropicModel
-from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
+from malkuth.core.errors import (
+    RATE_LIMIT_RETRY,
+    ErrorCategory,
+    ErrorCode,
+    MalkuthError,
+)
 from malkuth.core.manifest import ModelConfig
 from malkuth.core.skill import SkillSpec
 
@@ -221,6 +226,33 @@ async def test_rate_limit_is_retryable_llm_001():
 
     assert exc_info.value.code == ErrorCode.LLM_001
     assert exc_info.value.retryable
+
+
+async def test_rate_limit_carries_its_own_category():
+    """MODEL 로 뭉개면 RATE_LIMIT_RETRY 가 겨냥한 유일한 상황에 닿지 못한다.
+
+    05 Layer Rules 는 모델 호출 boundary 가 MODEL/RATE_LIMIT/TIMEOUT 셋을
+    낸다고 규정한다.
+    """
+    provider = model(api_error(anthropic.RateLimitError))
+
+    with pytest.raises(MalkuthError) as exc_info:
+        await provider.run("prompt", [])
+
+    assert exc_info.value.category is ErrorCategory.RATE_LIMIT
+    # 정책이 실제로 이 에러를 집는지 — 카테고리 단언만으로는 놓치는 계약
+    assert RATE_LIMIT_RETRY.should_retry(exc_info.value)
+
+
+async def test_other_model_failures_keep_the_model_category():
+    """rate limit 분리가 나머지를 끌고 가면 안 된다."""
+    provider = model(api_error(anthropic.InternalServerError))
+
+    with pytest.raises(MalkuthError) as exc_info:
+        await provider.run("prompt", [])
+
+    assert exc_info.value.category is ErrorCategory.MODEL
+    assert not RATE_LIMIT_RETRY.should_retry(exc_info.value)
 
 
 async def test_context_overflow_is_llm_002_and_not_retryable():

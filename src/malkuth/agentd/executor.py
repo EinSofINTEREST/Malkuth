@@ -14,7 +14,7 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol
 
-from malkuth.agentd.telemetry import STATUS_COMPLETED, STATUS_FAILED
+from malkuth.agentd.telemetry import STATUS_COMPLETED, STATUS_FAILED, STATUS_RATE_LIMITED
 from malkuth.core.agent import (
     DEFAULT_MAX_TURNS,
     DEFAULT_TOOL_TIMEOUT_S,
@@ -42,6 +42,17 @@ if TYPE_CHECKING:
 
     TaskRecall = Callable[[TaskRequest], Awaitable[str]]
     """태스크 진입 시 1회 회상해 프롬프트에 붙일 텍스트를 만드는 콜러블."""
+
+
+def _model_status(err: BaseException) -> str:
+    """실패를 05 의 status 어휘로 분류한다.
+
+    rate limit 을 failed 로 뭉개면 ModelRateLimited 알림이 영원히 침묵한다 —
+    05 status 표가 명시적으로 경고하는 상황이다.
+    """
+    if isinstance(err, MalkuthError) and err.category is ErrorCategory.RATE_LIMIT:
+        return STATUS_RATE_LIMITED
+    return STATUS_FAILED
 
 
 @dataclass(frozen=True)
@@ -341,8 +352,8 @@ class Executor:
             response = await self._model.run(prompt, self._tool_schemas)
         except asyncio.CancelledError:
             raise
-        except Exception:
-            self._telemetry.model_called(status=STATUS_FAILED)
+        except Exception as err:
+            self._telemetry.model_called(status=_model_status(err))
             raise
 
         self._telemetry.model_called(status=STATUS_COMPLETED, usage=response.usage)

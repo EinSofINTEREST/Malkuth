@@ -16,6 +16,10 @@ if TYPE_CHECKING:
 
 STATUS_COMPLETED: Final = "completed"
 STATUS_FAILED: Final = "failed"
+STATUS_RATE_LIMITED: Final = "rate_limited"
+"""05 는 rate limit 을 failed 와 분리하라고 규정한다 — 재시도 전략이 다르고,
+ModelRateLimited 알림이 **이 값으로 필터**하기 때문이다. 뭉개면 알림이 영원히
+침묵한다."""
 
 SOURCE_MCP: Final = "mcp"
 SOURCE_SKILLSET: Final = "skillset"

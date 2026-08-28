@@ -75,11 +75,25 @@ def launcher(client: FakeDockerClient, waits: Recorder, **kwargs) -> AgentLaunch
     )
 
 
-async def until(predicate: Callable[[], bool], rounds: int = 600) -> None:
-    """조건이 설 때까지 event loop 을 양보한다 — 상한을 두어 무한 대기는 막는다."""
+async def until(predicate: Callable[[], bool], *, timeout_s: float = 5.0) -> None:
+    """조건이 설 때까지 기다린다 — **서지 않으면 여기서 실패한다**.
+
+    회차(event loop turn)를 세는 방식은 CI 부하에서 조용히 포기하고, 그 뒤
+    단언이 엉뚱한 자리에서 터진다 — #215 의 CI 실패가 정확히 그랬다
+    (`replicas_of("echo")[0]` 이 재시작 도중의 빈 목록을 집었다).
+    마감을 두고, 못 서면 그 사실을 말한다.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_s
+    while not predicate():
+        if loop.time() >= deadline:
+            raise AssertionError(f"condition did not hold within {timeout_s}s")
+        await asyncio.sleep(0.001)
+
+
+async def spin(rounds: int) -> None:
+    """event loop 을 정해진 횟수만큼 양보한다 — *일어나지 않음*을 확인할 때 쓴다."""
     for _ in range(rounds):
-        if predicate():
-            return
         await asyncio.sleep(0)
 
 
@@ -118,7 +132,7 @@ async def test_the_health_loop_triggers_a_restart():
     agents = launcher(client, Recorder())
     await start_sick(agents)
 
-    await until(lambda: len(client.created) > 1, rounds=4000)
+    await until(lambda: len(client.created) > 1)
 
     assert len(client.created) > 1
     await agents.stop_all()
@@ -174,18 +188,17 @@ async def test_the_restart_window_survives_the_restart():
     새로 만들면 `RestartPolicy` 의 창(window)이 매번 리셋되어
     `should_give_up()` 이 영원히 참이 되지 않는다 — 무한히 되살아난다.
 
-    재기동 뒤의 health 확인을 기다리지 않고 **이어받았는지 자체**를 본다:
-    재기동된 레플리카는 실제 Control API 를 두드리므로 회차가 실시간에
-    묶인다 (#217).
+    감시 루프가 걸어 주기를 기다리지 않고 재시작을 **직접** 돌린다 —
+    교체 도중에는 `replicas_of` 가 잠시 비므로, 그 틈을 폴링으로 넘겨다보면
+    빈 목록을 집는다. 루프가 실제로 트리거하는지는
+    `test_the_health_loop_triggers_a_restart` 가 따로 본다.
     """
     waits = Recorder()
     agents = launcher(FakeDockerClient(), waits)
     launched, _ = await start_sick(agents)
     before = launched.lifecycle
 
-    await until(
-        lambda: bool(agents.replicas_of("echo")) and agents.replicas_of("echo")[0] is not launched
-    )
+    await restart_now(agents, launched)
 
     revived = agents.replicas_of("echo")[0]
     assert revived.lifecycle is before, "재시작이 lifecycle 을 새로 만들면 상한이 리셋된다"
@@ -252,7 +265,7 @@ async def test_restart_is_not_scheduled_twice():
     await start_sick(agents)
 
     await until(lambda: bool(waits.waits))
-    await until(lambda: False, rounds=200)
+    await spin(200)
 
     assert waits.waits == [RestartPolicy().initial_delay_s]
 
@@ -262,6 +275,6 @@ async def test_restart_is_off_without_supervision():
     agents = AgentLauncher(engine=DockerEngine(client=FakeDockerClient()))
 
     await agents.start(manifest())
-    await until(lambda: False, rounds=30)
+    await spin(30)
 
     assert not agents._restarts

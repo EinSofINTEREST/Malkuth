@@ -25,7 +25,7 @@ from malkuth.runtime.spec import build_container_spec
 from malkuth.runtime.tokens import TokenIssuer, authenticated_env
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Awaitable, Callable, Mapping
 
     from malkuth.core.manifest import AgentManifest
     from malkuth.observability.metrics import Metrics
@@ -50,6 +50,8 @@ class LaunchedAgent:
     # 포트 회수는 **어느 레플리카였는지** 알아야 한다 — 기동 시점의 값을
     # 들고 있지 않으면 정지가 엉뚱한 레플리카의 포트를 놓아준다
     replica: int = 0
+    restart_args: dict[str, Any] = field(default_factory=dict, repr=False)
+    """재기동에 필요한 인자 — 컨테이너를 새로 만들려면 원래 선언이 있어야 한다."""
 
     async def aclose(self) -> None:
         """클라이언트 연결을 정리한다."""
@@ -103,6 +105,9 @@ class AgentLauncher:
     launched: dict[tuple[str, int], LaunchedAgent] = field(default_factory=dict)
     _cursors: dict[str, int] = field(default_factory=dict, init=False)
     _monitors: dict[tuple[str, int], asyncio.Task[None]] = field(default_factory=dict, init=False)
+    _restarts: dict[tuple[str, int], asyncio.Task[None]] = field(default_factory=dict, init=False)
+    restart_sleep: Callable[[float], Awaitable[None]] | None = None
+    """backoff 대기 — 06 은 테스트가 실제로 자는 것을 금지한다."""
     """기동된 레플리카 — 키는 **(에이전트, replica)** 다.
 
     이름만으로 잡으면 두 번째 레플리카가 첫 핸들을 덮어 컨테이너를 미아로
@@ -117,6 +122,7 @@ class AgentLauncher:
         replica: int = 0,
         a2a_port: int | None = None,
         memory: MemoryEndpoint | None = None,
+        lifecycle: AgentLifecycle | None = None,
     ) -> LaunchedAgent:
         """Start one agent with its token injected and wired.
 
@@ -130,6 +136,9 @@ class AgentLauncher:
                 **DB 자격증명은 컨테이너에 넣지 않는다** (09 Access Enforcement 1).
             a2a_port: A2A port to use. 생략하면 할당기가 범위에서 고른다 —
                 03 은 포트를 runtime 이 준다고 규정한다.
+            lifecycle: 이어붙일 상태. **재시작은 반드시 넘겨야 한다** — 새로
+                만들면 `RestartPolicy` 의 창(window)이 리셋되어 crash-loop
+                상한(02 Rule 6)이 영원히 걸리지 않는다.
 
         Returns:
             The launched agent — its client already carries the token.
@@ -161,8 +170,10 @@ class AgentLauncher:
 
         # 02 Lifecycle — 이미지는 배포 파이프라인이 굽는다 (Rule 1). runtime 이
         # 보는 것은 Built 이후다
-        lifecycle = AgentLifecycle(agent=agent)
-        lifecycle.transition(AgentState.BUILT)
+        if lifecycle is None:
+            lifecycle = AgentLifecycle(agent=agent)
+            lifecycle.transition(AgentState.BUILT)
+        # 재시작은 Unhealthy/Failed 에서 다시 올라온다 — 두 전이 모두 허용된다
         lifecycle.transition(AgentState.STARTING)
 
         handle = await self.engine.start(spec)
@@ -176,7 +187,12 @@ class AgentLauncher:
         )
 
         launched = LaunchedAgent(
-            agent=agent, handle=handle, client=client, replica=replica, lifecycle=lifecycle
+            agent=agent,
+            handle=handle,
+            client=client,
+            replica=replica,
+            lifecycle=lifecycle,
+            restart_args={"manifest": manifest, "secrets": secrets, "memory": memory},
         )
         self.launched[agent, replica] = launched
         self._watch(launched)
@@ -237,6 +253,90 @@ class AgentLauncher:
                 exc_info=err,
             )
 
+    def _schedule_restart(self, launched: LaunchedAgent) -> None:
+        """Kick off this replica's restart, once.
+
+        재시작을 **한 번만** 건다: 감시 루프는 계속 돌아 Unhealthy 를 반복해서
+        보고하므로, 진행 중인 재시작이 있으면 겹쳐 걸지 않는다.
+        """
+        key = (launched.agent, launched.replica)
+        running = self._restarts.get(key)
+        if running is not None and not running.done():
+            return
+        self._restarts[key] = asyncio.create_task(self._restart(launched))
+
+    async def _restart(self, launched: LaunchedAgent) -> None:
+        """Replace an unhealthy replica's container after a backoff.
+
+        02 Lifecycle Rules 6 — Unhealthy 는 exponential backoff 로 재시작하고,
+        상한을 넘으면 Failed 로 간다.
+
+        **재시작은 runtime 계층에서만** 한다 (05 Retry Layering): 노드 재시도나
+        Control API 재시도와 곱해지면 한 번의 장애가 여러 겹으로 늘어난다.
+        """
+        agent = launched.agent
+        try:
+            delay = launched.lifecycle.plan_restart()
+        except MalkuthError as err:
+            # RT_008 — 상한 초과. lifecycle 이 이미 Failed 로 옮겼다
+            log.error("agent restart limit exceeded", agent=agent, exc_info=err)
+            self._record_restart(agent, reason="gave_up")
+            await self._unwatch(launched)
+            return
+
+        sleeper = self.restart_sleep or asyncio.sleep
+        await sleeper(delay)
+
+        try:
+            await self._replace(launched)
+        except asyncio.CancelledError:
+            raise
+        except Exception as err:
+            # 재시작이 실패해도 runtime 은 살아 있어야 한다 — 다음 health
+            # 확인이 다시 걸어 준다
+            log.error("agent restart failed", agent=agent, exc_info=err)
+            self._record_restart(agent, reason="failed")
+            return
+
+        log.info("agent restarted", agent=agent, delay_ms=round(delay * 1000))
+        self._record_restart(agent, reason="unhealthy")
+
+    async def _replace(self, launched: LaunchedAgent) -> None:
+        """정지한 자리에 같은 선언으로 컨테이너를 다시 세운다."""
+        agent, replica = launched.agent, launched.replica
+        await self._unwatch(launched)
+        await launched.aclose()
+        await self.engine.stop(launched.handle)
+        del self.launched[agent, replica]
+        if self.ports is not None:
+            # 포트를 쥔 채로 다시 잡으면 범위가 마른다. 같은 레플리카는 같은
+            # 포트를 다시 받으므로 peer 의 광고 주소도 유지된다
+            self.ports.release(agent, replica=replica)
+
+        args = dict(launched.restart_args)
+        # **같은 lifecycle 을 이어붙인다**: 새로 만들면 재시작 횟수가 리셋되어
+        # crash-loop 상한이 영원히 걸리지 않는다
+        await self.start(
+            args.pop("manifest"), replica=replica, lifecycle=launched.lifecycle, **args
+        )
+
+    def _record_restart(self, agent: str, *, reason: str) -> None:
+        """05 의 `ContainerRestartLoop` 알림이 이 카운터를 본다."""
+        if self.metrics is None:
+            return
+        self.metrics.counter("malkuth_container_restarts_total").labels(
+            agent=agent, reason=reason
+        ).inc()
+
+    async def _cancel_restart(self, launched: LaunchedAgent) -> None:
+        """이 레플리카의 재시작을 끊는다 — 정지한 자리에 다시 세우지 않도록."""
+        task = self._restarts.pop((launched.agent, launched.replica), None)
+        if task is None or task.done():
+            return
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
     async def _unwatch(self, launched: LaunchedAgent) -> None:
         """이 레플리카의 health 루프를 멈춘다 — 정지한 컨테이너를 계속 두드리지 않는다."""
         task = self._monitors.pop((launched.agent, launched.replica), None)
@@ -255,6 +355,9 @@ class AgentLauncher:
         """
         if state is AgentState.STARTING:
             launched.lifecycle.transition(AgentState.READY)
+            return
+        if state is AgentState.UNHEALTHY:
+            self._schedule_restart(launched)
 
     def replicas_of(self, agent: str) -> list[LaunchedAgent]:
         """이 에이전트의 기동된 레플리카 — replica 순서로."""
@@ -265,14 +368,18 @@ class AgentLauncher:
 
         레플리카 간 round-robin 으로 클라이언트를 고릅니다 (01 Scalability).
 
-        **health 를 보지 않는다**: `ReplicaRouter` 가 그 역할이지만
-        `AgentLifecycle` 이 프로덕션에서 돌지 않아 모든 레플리카가
-        `DECLARED` 에 머문다 — 그대로 쓰면 항상 `RT_009` 다 (#213).
+        **준비된 레플리카만 고른다**: 재시작 중이거나 Unhealthy 인 쪽으로
+        보내면 그 태스크가 전부 실패한다. lifecycle 이 실제로 도는 배선에서만
+        상태가 갱신되므로(#213), 감시를 켜지 않았으면 기동된 전부를 후보로
+        본다 — 아니면 감시 없는 조립이 통째로 라우팅 불가가 된다.
 
         Raises:
             MalkuthError: RUNTIME/``RT_009`` if the agent has no launched replica.
         """
         replicas = self.replicas_of(agent)
+        if self.health_interval_s is not None:
+            ready = [item for item in replicas if item.lifecycle.accepts_tasks]
+            replicas = ready or []
         if not replicas:
             raise MalkuthError(
                 category=ErrorCategory.RUNTIME,
@@ -303,6 +410,9 @@ class AgentLauncher:
             else self.replicas_of(agent)
         )
         for launched in targets:
+            # 진행 중인 재시작을 먼저 끊는다 — 놔두면 방금 정지한 자리에
+            # 컨테이너를 다시 세워 미아를 만든다
+            await self._cancel_restart(launched)
             await self._unwatch(launched)
             # 02 Lifecycle 5 — 정지 전에 새 태스크 수락을 멈춘다.
             # STARTING 에서 바로 멈추는 경우도 있어 Draining 을 강요하지 않는다
@@ -310,8 +420,10 @@ class AgentLauncher:
                 launched.lifecycle.transition(AgentState.DRAINING)
             await launched.aclose()
             await self.engine.stop(launched.handle)
-            launched.lifecycle.transition(AgentState.STOPPED)
-            del self.launched[agent, launched.replica]
+            if launched.lifecycle.state is not AgentState.STOPPED:
+                launched.lifecycle.transition(AgentState.STOPPED)
+            # 재시작이 먼저 지웠을 수 있다 — 없으면 지울 것도 없다
+            self.launched.pop((agent, launched.replica), None)
             if self.ports is not None:
                 self.ports.release(agent, replica=launched.replica)
 

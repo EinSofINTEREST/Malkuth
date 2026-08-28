@@ -298,3 +298,10 @@ def test_startup_health_success_leaves_state_for_the_caller():
     agent.record_health(healthy=True)
 
     assert agent.state is AgentState.STARTING
+
+
+def test_failed_agent_can_be_cleaned_up():
+    """멈출 수 없으면 그 컨테이너가 샌다 — 재배포만이 유일한 출구일 수 없다."""
+    agent = AgentLifecycle(agent="a", state=AgentState.FAILED)
+
+    assert agent.transition(AgentState.STOPPED) is AgentState.STOPPED

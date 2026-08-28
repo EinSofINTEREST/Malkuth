@@ -39,10 +39,24 @@ def test_a_list_key_comes_back_as_a_list(key: str):
     assert isinstance(answered(asking(key))[key], list)
 
 
-@pytest.mark.parametrize("key", ["plan", "report", "notified", "compacted"])
-def test_a_scalar_key_stays_scalar(key: str):
-    """리스트 처리가 나머지를 끌고 가면 반대 방향으로 틀린다."""
+@pytest.mark.parametrize("key", ["plan", "report"])
+def test_a_text_key_stays_text(key: str):
+    """타입별 처리가 나머지를 끌고 가면 반대 방향으로 틀린다."""
     assert isinstance(answered(asking(key))[key], str)
+
+
+@pytest.mark.parametrize("key", ["notified", "compacted"])
+def test_an_int_key_comes_back_as_an_int(key: str):
+    """state schema 가 정수로 선언한 키 — 문자열이면 `GRAPH_003` 로 거부된다."""
+    value = answered(asking(key))[key]
+
+    assert isinstance(value, int)
+    assert not isinstance(value, bool)
+
+
+def test_a_bool_key_comes_back_as_a_bool():
+    """조건 분기가 이 값을 읽는다 — 문자열이면 어떤 값이든 참이라 분기가 죽는다."""
+    assert answered(asking("needs_research"))["needs_research"] is True
 
 
 def test_every_asked_key_is_answered():

@@ -258,6 +258,10 @@ class RunSubmitter:
             ),
             sleep=sleep,
             metrics=self.metrics,
+            # 매니저와 **같은** 저장소를 봐야 한다: 러너가 iteration 진행을
+            # 남기지 않으면 저장소의 회차는 영원히 0 이고, 프로세스 밖에서
+            # 남긴 drain 요청도 전달되지 않는다 (#197)
+            store=self.manager.store,
         )
         task = asyncio.create_task(
             runner.run(

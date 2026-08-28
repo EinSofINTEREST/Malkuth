@@ -13,6 +13,7 @@ import asyncio
 import time
 import uuid
 from collections.abc import Hashable
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Protocol, TypedDict
 
 from langgraph.graph import END as LG_END
@@ -20,7 +21,7 @@ from langgraph.graph import START as LG_START
 from langgraph.graph import StateGraph
 
 from malkuth.core.agent import TaskConfig, TaskRequest, TaskResult, TaskStatus, TraceContext
-from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
+from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError, RetryPolicy
 from malkuth.orchestrator.state import extract_input, merge_output, resolve_state_schema
 from malkuth.orchestrator.telemetry import OrchestratorTelemetry
 from malkuth.orchestrator.topology import (
@@ -30,9 +31,10 @@ from malkuth.orchestrator.topology import (
     NodeSpec,
     resolve_import_ref,
 )
+from malkuth.resilience import retrying
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Awaitable, Callable
 
     from langgraph.checkpoint.base import BaseCheckpointSaver
     from pydantic import BaseModel
@@ -40,6 +42,24 @@ if TYPE_CHECKING:
     from malkuth.observability.metrics import Metrics
 
 _ITERATION_KEY = "_iterations"
+
+
+NODE_RETRY = RetryPolicy(
+    max_attempts=1,
+    initial_delay_s=1.0,
+    max_delay_s=30.0,
+    retryable_categories=(
+        ErrorCategory.GRAPH,
+        ErrorCategory.NETWORK,
+        ErrorCategory.TIMEOUT,
+    ),
+)
+"""노드 재시도의 기준 정책 — 횟수는 토폴로지의 ``retry`` 가 정한다.
+
+카테고리는 **노드 실행이 실제로 내는 것**이다: 노드 timeout 은 GRAPH/TO_003,
+런타임 도달 실패는 NETWORK 다. 계약 위반(GRAPH_003)은 retryable=False 라
+정책이 집지 않는다.
+"""
 
 
 class _ReservedChannels(TypedDict, total=False):
@@ -121,11 +141,14 @@ class GraphBuilder:
         state_schema: type[BaseModel] | None = None,
         node_timeout_s: float = 300.0,
         metrics: Metrics | None = None,
+        retry_sleep: Callable[[float], Awaitable[None]] | None = None,
     ) -> None:
         self._topology = topology
         self._runtime = runtime
         self._schema = state_schema or resolve_state_schema(topology.spec.state.schema_ref)
         self._node_timeout_s = node_timeout_s
+        # 06 은 시간 의존 로직이 테스트에서 실제로 자는 것을 금지한다
+        self._retry_sleep = retry_sleep
         self._telemetry = (
             None
             if metrics is None
@@ -225,20 +248,25 @@ class GraphBuilder:
         """노드 실행 래퍼 — 입력 추출 → 호출 → 출력 투영."""
 
         async def run(state: dict[str, Any]) -> dict[str, Any]:
+            # 태스크는 **재시도 밖에서** 만든다 — 회차마다 새 task_id 를 발급하면
+            # agentd 의 멱등 캐시가 걸리지 않아 부수효과가 겹친다 (02 Rule 3)
             task = self._make_task(node, state)
             timeout = node.timeout_s or self._node_timeout_s
 
-            try:
-                result = await asyncio.wait_for(self._runtime.invoke(node, task), timeout=timeout)
-            except TimeoutError as err:
-                raise _graph_error(
-                    ErrorCode.TO_003,
-                    f"node timed out: {node.id}",
-                    retryable=True,
-                    graph=self._topology.name,
-                    node_id=node.id,
-                    task_id=task.task_id,
-                ) from err
+            async def attempt() -> TaskResult:
+                try:
+                    return await asyncio.wait_for(self._runtime.invoke(node, task), timeout=timeout)
+                except TimeoutError as err:
+                    raise _graph_error(
+                        ErrorCode.TO_003,
+                        f"node timed out: {node.id}",
+                        retryable=True,
+                        graph=self._topology.name,
+                        node_id=node.id,
+                        task_id=task.task_id,
+                    ) from err
+
+            result = await self._attempt_node(node, attempt, task_id=task.task_id)
 
             if result.status is not TaskStatus.COMPLETED:
                 # 실패한 노드의 출력은 state 에 병합하지 않는다 — state 오염 방지
@@ -278,6 +306,35 @@ class GraphBuilder:
         counts[node_id] = counts.get(node_id, 0) + 1
         return {**update, _ITERATION_KEY: counts}
 
+    async def _attempt_node(
+        self,
+        node: NodeSpec,
+        attempt: Callable[[], Awaitable[TaskResult]],
+        *,
+        task_id: str,
+    ) -> TaskResult:
+        """Run one node, retrying only when the topology asked for it.
+
+        토폴로지가 요청한 만큼만 재시도합니다 (05 Retry Layering).
+
+        **기본값 `retry: 0` 은 그대로 둔다**: agentd 가 이미 모델 호출을
+        재시도하므로(#177), 노드 재시도가 그 위에 곱해진다 — 05 는 이것을
+        "중복 주의" 로 명시한다. 기본을 켜면 모든 그래프가 그 곱을 떠안는다.
+        """
+        if node.retry <= 0:
+            return await attempt()
+
+        # 첫 시도 + retry 회 = 총 시도 횟수
+        policy = replace(NODE_RETRY, max_attempts=node.retry + 1)
+        return await retrying(
+            policy,
+            attempt,
+            sleep=self._retry_sleep,
+            graph=self._topology.name,
+            node_id=node.id,
+            task_id=task_id,
+        )
+
     def _make_task(self, node: NodeSpec, state: dict[str, Any]) -> TaskRequest:
         """state 로부터 노드 태스크를 구성한다."""
         run_id = str(state.get("_run_id") or "run-unknown")
@@ -300,6 +357,7 @@ def build_graph(
     state_schema: type[BaseModel] | None = None,
     node_timeout_s: float = 300.0,
     metrics: Metrics | None = None,
+    retry_sleep: Callable[[float], Awaitable[None]] | None = None,
 ) -> Any:
     """Build a runnable graph from a topology.
 
@@ -312,6 +370,8 @@ def build_graph(
         state_schema: Optional pre-resolved state schema.
         node_timeout_s: Default per-node timeout.
         metrics: Optional metric registry for node latency.
+        retry_sleep: Injected wait for node retries — 06 은 시간 의존 로직이
+            테스트에서 실제로 자는 것을 금지합니다.
 
     Returns:
         The compiled graph.
@@ -321,6 +381,7 @@ def build_graph(
         runtime,
         state_schema=state_schema,
         node_timeout_s=node_timeout_s,
+        retry_sleep=retry_sleep,
         metrics=metrics,
     )
     return builder.build(checkpointer=checkpointer)

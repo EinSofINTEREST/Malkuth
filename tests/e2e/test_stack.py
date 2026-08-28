@@ -100,10 +100,30 @@ def wait_healthy(url: str, *, timeout: float = READY_TIMEOUT_S) -> bool:
     return False
 
 
+def compose_up() -> None:
+    """스택을 세운다 — **base 이미지를 먼저 굽는다.**
+
+    compose 는 `agent-base` 를 굽지 않는다: 모든 에이전트 이미지가 그것을
+    `FROM` 으로 삼는데, 다시 굽지 않으면 컨테이너가 **옛 프레임워크 코드**를
+    실행한다. 그러면 E2E 가 지금 소스가 아니라 마지막으로 구운 이미지를
+    검증하게 되고, 배선을 지워도 통과한다.
+    """
+    docker(
+        "build",
+        "-t",
+        "malkuth/agent-base:0.1.0",
+        "-f",
+        str(COMPOSE_FILE.parent / "agent-base.Dockerfile"),
+        str(REPO_ROOT),
+        timeout=900,
+    )
+    docker("compose", "-f", str(COMPOSE_FILE), "up", "-d", "--build")
+
+
 @pytest.fixture(scope="module")
 def stack() -> Iterator[None]:
     """전체 스택 — finalizer 가 컨테이너와 볼륨을 반드시 정리한다."""
-    docker("compose", "-f", str(COMPOSE_FILE), "up", "-d", "--build")
+    compose_up()
     try:
         yield
     finally:

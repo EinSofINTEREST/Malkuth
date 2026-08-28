@@ -15,17 +15,17 @@ spec:
       file: templates/writer.j2
       output_keys: [report]
       variables:
-        findings: {type: string, required: true}
+        findings: {type: array, required: true}
     notifier:
       file: templates/notifier.j2
       output_keys: [notified]
       variables:
-        new_items: {type: string, required: true}
+        new_items: {type: array, required: true}
     compactor:
       file: templates/compactor.j2
       output_keys: [compacted]
       variables:
-        pending_spaces: {type: string, required: true}
+        pending_spaces: {type: array, required: true}
     default:
       file: templates/default.j2
       variables:

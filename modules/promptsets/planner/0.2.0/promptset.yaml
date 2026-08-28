@@ -23,12 +23,12 @@ spec:
       file: templates/classifier.j2
       output_keys: [seen_ids]
       variables:
-        new_items: {type: string, required: true}
+        new_items: {type: array, required: true}
     scanner:
       file: templates/scanner.j2
       output_keys: [pending_spaces]
       variables:
-        spaces: {type: string, required: true}
+        spaces: {type: array, required: true}
     default:
       file: templates/default.j2
       variables:

@@ -419,6 +419,8 @@ class Executor:
             task_id=task.task_id,
             run_id=task.run_id,
             artifacts=self._artifacts,
+            # 위임이 깊이를 이어받아야 순환이 상한에 걸린다 (03 Rule 5)
+            trace=task.trace,
         )
         coros = [self._run_tool(call, task, ctx) for call in calls]
 
@@ -570,6 +572,8 @@ class Executor:
             task_id=task.task_id,
             run_id=task.run_id,
             artifacts=self._artifacts,
+            # 위임이 깊이를 이어받아야 순환이 상한에 걸린다 (03 Rule 5)
+            trace=task.trace,
         )
 
         try:

@@ -62,6 +62,12 @@ class SkillContext:
     logger: Any | None = None
     secrets: SecretsProvider | None = None
     artifacts: ArtifactStore | None = None
+    trace: Any | None = None
+    """이 태스크의 추적 컨텍스트 — peer 위임이 깊이를 이어받는 데 쓴다.
+
+    03 Rule 5 의 깊이 상한은 위임 체인이 부모의 trace 를 물려받아야 성립한다.
+    tool 이 그것 없이 위임하면 순환이 상한에 걸리지 않는다.
+    """
 
 
 class SkillSpec(BaseModel):

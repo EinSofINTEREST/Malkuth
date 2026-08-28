@@ -18,6 +18,7 @@ import structlog
 import uvicorn
 import yaml
 
+from malkuth.agentd.a2a_server import build_peer_client
 from malkuth.agentd.server import AgentRuntime, create_app
 from malkuth.agentd.telemetry import ExecutorTelemetry
 from malkuth.agentd.tools import AgentToolRegistry
@@ -30,6 +31,7 @@ from malkuth.memory.http import MEMORY_TOKEN_ENV, MEMORY_URL_ENV
 from malkuth.memory.tool import MEMORY_SEARCH_TOOL
 from malkuth.observability.metrics import DEFAULT_METRICS_PORT, Metrics
 from malkuth.protocols.a2a.card import build_card
+from malkuth.protocols.a2a.tool import ASK_PEER_TOOL
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -273,6 +275,9 @@ async def build_executor(manifest: AgentManifest, *, metrics: Metrics | None = N
         agent=manifest.name,
         skillsets=result.skillsets,
         memory=_memory_access(),
+        # 03 은 "실행 중 peer 에게 위임한다" 를 규정하는데, 이 조립이 없어
+        # 에이전트는 **받을 수는 있고 걸 수는 없었다** (#193)
+        peers=build_peer_client(manifest),
     )
 
     return Executor(
@@ -386,6 +391,8 @@ def _executable_schemas(result: Any, tools: AgentToolRegistry) -> list[SkillSpec
     runnable: list[SkillSpec] = []
     for name, spec in result.tools.items():
         if name == MEMORY_SEARCH_TOOL and tools.memory is None:
+            continue
+        if name == ASK_PEER_TOOL and tools.peers is None:
             continue
         if is_mcp_tool(name) and tools.mcp is None:
             # 세션이 없으면 부를 수 없다 — 실행할 수 없는 tool 을 광고하면

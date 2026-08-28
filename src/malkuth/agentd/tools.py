@@ -4,7 +4,7 @@
 
 - **skillset tool** — 로드된 함수를 직접 호출
 - **MCP tool** — 소유 세션으로 위임 (``mcp__{server}__{tool}``)
-- **framework tool** — ``memory_search`` 처럼 프레임워크가 제공
+- **framework tool** — ``memory_search`` / ``ask_peer`` 처럼 프레임워크가 제공
 
 실패는 출처에 맞는 코드로 변환한다 (05 Layer Rules): 재시도·알림 전략이
 출처에 따라 다르기 때문이다.
@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
 from malkuth.core.tools import is_mcp_tool
 from malkuth.memory.tool import MEMORY_SEARCH_TOOL, run_memory_search
+from malkuth.protocols.a2a.tool import ASK_PEER_TOOL, run_ask_peer
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -25,6 +26,7 @@ if TYPE_CHECKING:
     from malkuth.core.agent import MemoryAccess
     from malkuth.core.skill import SkillContext
     from malkuth.modules.skillset import LoadedSkillset
+    from malkuth.protocols.a2a.client import A2AClient
     from malkuth.protocols.mcp.client import McpClient
 
 
@@ -51,6 +53,8 @@ class AgentToolRegistry:
     skillsets: Sequence[LoadedSkillset] = ()
     mcp: McpClient | None = None
     memory: MemoryAccess | None = None
+    peers: A2AClient | None = None
+    """peer 위임 창구 — 미주입 시 `ask_peer` 는 등록되지 않은 tool 이다."""
     _skills: dict[str, Any] = field(default_factory=dict, init=False)
 
     def __post_init__(self) -> None:
@@ -85,6 +89,11 @@ class AgentToolRegistry:
             if self.memory is None:
                 raise unknown_tool(name, self.agent)
             return await run_memory_search(self.memory, dict(arguments))
+
+        if name == ASK_PEER_TOOL:
+            if self.peers is None:
+                raise unknown_tool(name, self.agent)
+            return await run_ask_peer(self.peers, ctx, dict(arguments))
 
         if is_mcp_tool(name):
             if self.mcp is None:

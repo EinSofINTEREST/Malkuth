@@ -75,6 +75,59 @@ def _content_for(prompt: str, digest: str) -> str:
     return json.dumps({key: f"fake-{key}:{digest}" for key in keys})
 
 
+def _embedding_dimensions() -> int:
+    """대역 벡터 차원 — memoryset 선언과 맞춰야 한다 (#159 가 불일치를 거부한다).
+
+    0 이하를 그대로 두면 벡터를 만들 때 modulo 0 으로 죽는다 — 요청마다
+    터지느니 기동 시점에 거부한다.
+    """
+    declared = os.environ.get("FAKE_EMBEDDING_DIMENSIONS", "64")
+    try:
+        value = int(declared)
+    except ValueError as err:
+        raise ValueError(f"FAKE_EMBEDDING_DIMENSIONS must be an integer: {declared!r}") from err
+    if value <= 0:
+        raise ValueError(f"FAKE_EMBEDDING_DIMENSIONS must be positive: {value}")
+    return value
+
+
+EMBEDDING_DIMENSIONS = _embedding_dimensions()
+
+
+def embed(payload: dict[str, Any]) -> dict[str, Any]:
+    """Answer an OpenAI-compatible embeddings request.
+
+    입력마다 결정적 벡터를 돌려줍니다 — 같은 텍스트는 늘 같은 벡터라
+    검색 결과가 재현됩니다.
+
+    의미 유사도를 흉내내지는 않지만, **HTTP 경로·직렬화·차원 검증**이 실제로
+    실행되는 것이 이 대역의 목적입니다.
+    """
+    texts = payload.get("input") or []
+    if isinstance(texts, str):
+        texts = [texts]
+    return {
+        "object": "list",
+        "model": payload.get("model", "fake-embedding"),
+        "data": [
+            {"object": "embedding", "index": index, "embedding": _vector(str(text))}
+            for index, text in enumerate(texts)
+        ],
+        "usage": {"prompt_tokens": sum(len(str(t)) // 4 for t in texts), "total_tokens": 0},
+    }
+
+
+def _vector(text: str) -> list[float]:
+    """토큰 해시를 차원에 누적한 뒤 정규화한다 — 같은 토큰이면 가까워진다."""
+    vector = [0.0] * EMBEDDING_DIMENSIONS
+    for token in text.lower().split():
+        digest = hashlib.blake2b(token.encode("utf-8"), digest_size=8).digest()
+        index = int.from_bytes(digest[:4], "big") % EMBEDDING_DIMENSIONS
+        vector[index] += 1.0 if digest[4] % 2 == 0 else -1.0
+    norm = sum(value * value for value in vector) ** 0.5
+    return [value / norm for value in vector] if norm else vector
+
+
 class Handler(BaseHTTPRequestHandler):
     """Minimal request handler — one endpoint, no auth."""
 
@@ -88,7 +141,13 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error(400, "invalid json")
             return
 
-        body = json.dumps(respond_to(prompt_of(payload))).encode()
+        # 경로로 갈라야 한다 — 모델과 embedding 은 응답 모양이 다르다
+        answer = (
+            embed(payload)
+            if self.path.rstrip("/").endswith("/embeddings")
+            else respond_to(prompt_of(payload))
+        )
+        body = json.dumps(answer).encode()
         self.send_response(200)
         self.send_header("content-type", "application/json")
         self.send_header("content-length", str(len(body)))

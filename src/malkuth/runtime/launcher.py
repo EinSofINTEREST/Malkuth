@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 
-from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
+from malkuth.core.errors import NETWORK_RETRY, ErrorCategory, ErrorCode, MalkuthError
 from malkuth.memory.http import MEMORY_TOKEN_ENV, MEMORY_URL_ENV
 from malkuth.runtime.control import ControlClient
 from malkuth.runtime.ports import A2APortAllocator
@@ -144,6 +144,8 @@ class AgentLauncher:
         client = ControlClient(
             f"http://127.0.0.1:{handle.control_port}",
             agent=agent,
+            # 05 Retry Layering — runtime 이 재시도 주체다 (읽기만)
+            retry=NETWORK_RETRY,
             # 컨테이너에 주입한 것과 같은 토큰 — 발급자가 하나이므로 일치한다
             token=self.issuer.issue(agent),
         )

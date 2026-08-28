@@ -12,7 +12,7 @@ import asyncio
 import json
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Final, Protocol
 
 from malkuth.agentd.telemetry import STATUS_COMPLETED, STATUS_FAILED, STATUS_RATE_LIMITED
 from malkuth.core.agent import (
@@ -22,7 +22,13 @@ from malkuth.core.agent import (
     TaskRequest,
     TaskResult,
 )
-from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
+from malkuth.core.errors import (
+    NETWORK_RETRY,
+    RATE_LIMIT_RETRY,
+    ErrorCategory,
+    ErrorCode,
+    MalkuthError,
+)
 from malkuth.core.events import (
     DoneEvent,
     ErrorEvent,
@@ -33,15 +39,27 @@ from malkuth.core.events import (
 )
 from malkuth.core.skill import SkillContext
 from malkuth.core.tools import is_mcp_tool
+from malkuth.resilience import retrying_any
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 
     from malkuth.agentd.telemetry import ExecutorTelemetry
+    from malkuth.core.errors import RetryPolicy
     from malkuth.core.skill import ArtifactStore
 
     TaskRecall = Callable[[TaskRequest], Awaitable[str]]
     """태스크 진입 시 1회 회상해 프롬프트에 붙일 텍스트를 만드는 콜러블."""
+
+
+MODEL_RETRY_POLICIES: Final = (RATE_LIMIT_RETRY, NETWORK_RETRY)
+"""모델 호출이 내는 두 실패에 각각의 backoff — rate limit 을 1초 간격으로
+두드리면 상황이 악화된다. 순서가 곧 우선순위다.
+
+**기본값이 아니다**: 재시도는 실제로 기다리므로, 조립하는 쪽(`build_executor`)
+이 명시적으로 켠다. 기본으로 켜면 fake model 로 실패를 스크립트하는 모든
+테스트가 초 단위로 기다리게 된다 (06 Async 2).
+"""
 
 
 def _model_status(err: BaseException) -> str:
@@ -162,6 +180,8 @@ class Executor:
         recall: TaskRecall | None = None,
         artifacts: ArtifactStore | None = None,
         output_keys: Callable[[TaskRequest], Sequence[str]] | None = None,
+        retry_policies: Sequence[RetryPolicy] = (),
+        retry_sleep: Callable[[float], Awaitable[None]] | None = None,
     ) -> None:
         self._agent = agent
         # 미주입 시 skill 은 ctx.artifacts is None 을 받는다 — 지금까지 **항상**
@@ -178,6 +198,11 @@ class Executor:
         self._tool_schemas = list(tool_schemas)
         self._config = config or ExecutorConfig()
         self._on_cleanup = on_cleanup
+        # 05 Retry Layering — 모델 호출의 재시도 주체는 agentd 다.
+        # 비어 있으면 재시도하지 않는다 — 조립하는 쪽이 켠다
+        self._retry_policies = tuple(retry_policies)
+        # 06 은 시간 의존 로직이 테스트에서 실제로 자는 것을 금지한다
+        self._retry_sleep = retry_sleep
         # 멱등성: 완료된 태스크는 같은 결과를 돌려준다 (재시도/재개 시나리오)
         self._completed: dict[str, TaskResult] = {}
 
@@ -343,8 +368,13 @@ class Executor:
             details={"max_turns": max_turns},
         )
 
-    async def _model_turn(self, prompt: str) -> ModelResponse:
-        """모델 한 턴 — 실패도 메트릭에 남겨야 하므로 여기서 감싼다."""
+    async def _call_model(self, prompt: str) -> ModelResponse:
+        """모델 한 번 — 실패도 메트릭에 남겨야 하므로 여기서 감싼다.
+
+        **재시도 안쪽**이라 시도마다 계수된다: 05 의 rate limit 알림은
+        발생 빈도를 보므로, 재시도로 성공한 호출의 rate limit 이 지워지면
+        provider 압박이 지표에서 사라진다.
+        """
         if self._telemetry is None:
             return await self._model.run(prompt, self._tool_schemas)
 
@@ -358,6 +388,23 @@ class Executor:
 
         self._telemetry.model_called(status=STATUS_COMPLETED, usage=response.usage)
         return response
+
+    async def _model_turn(self, prompt: str) -> ModelResponse:
+        """모델 한 턴 — 정책이 허용하는 실패는 재시도한다.
+
+        **재시도 주체는 agentd 다** (05 Retry Layering). provider SDK 재시도는
+        어댑터가 꺼 두었으므로 backoff 가 곱해지지 않는다.
+
+        rate limit 은 다른 정책을 쓴다 — 10초에서 시작해 5회. 네트워크 실패의
+        1초 backoff 로 rate limit 을 두드리면 상황을 악화시킨다.
+        """
+
+        async def attempt() -> ModelResponse:
+            return await self._call_model(prompt)
+
+        return await retrying_any(
+            self._retry_policies, attempt, sleep=self._retry_sleep, agent=self._agent
+        )
 
     async def _run_tools(
         self, calls: Sequence[ToolCall], task: TaskRequest, turn: int

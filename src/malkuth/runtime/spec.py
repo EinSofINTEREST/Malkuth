@@ -21,6 +21,12 @@ DEFAULT_CONTROL_PORT: Final = 8080
 DEFAULT_PID_LIMIT: Final = 256
 DEFAULT_BASE_IMAGE: Final = "malkuth/agent-base:0.1.0"
 
+A2A_PORT_ENV: Final = "MALKUTH_A2A_PORT"
+"""할당된 A2A 포트를 컨테이너에 알리는 키 — agentd 가 이것으로 서버를 띄운다."""
+
+A2A_HOST_ENV: Final = "MALKUTH_A2A_ADVERTISED_HOST"
+"""카드에 실을 도달 주소 — peer 가 이 이름으로 접속한다."""
+
 # 컨테이너가 쓸 수 있어야 하는 임시 경로 — read-only rootfs 위의 tmpfs.
 #
 # **작업대이지 출력함이 아니다**: tmpfs 라 재시작 시 소멸하고, 다음 노드는
@@ -153,8 +159,16 @@ def build_container_spec(
     runtime = manifest.spec.runtime
 
     ports = [PortBinding("control", DEFAULT_CONTROL_PORT)]
+    resolved_env = dict(env or {})
     if manifest.spec.a2a.enabled and a2a_port is not None:
         ports.append(PortBinding("a2a", a2a_port))
+        # 포트를 **열기만** 하면 컨테이너 안에서 아무도 듣지 않는다 — 번호를
+        # 알려줘야 agentd 가 그 자리에 서버를 띄운다 (#166 / 03 Rule 2)
+        resolved_env[A2A_PORT_ENV] = str(a2a_port)
+        # 광고 주소는 **컨테이너가 실제로 응답하는 이름**이어야 한다.
+        # 컨테이너 이름은 malkuth-{agent}-{replica} 라 manifest.name 으로는
+        # 해석되지 않는다 — 별칭을 달아 두 이름 모두 닿게 한다
+        resolved_env[A2A_HOST_ENV] = container_name(manifest.name, replica)
 
     volumes = tuple(
         {
@@ -168,7 +182,7 @@ def build_container_spec(
     return ContainerSpec(
         name=container_name(manifest.name, replica),
         image=runtime.image or base_image,
-        env=dict(env or {}),
+        env=resolved_env,
         network=network,
         ports=tuple(ports),
         cpu_cores=runtime.resources.cpu_cores,

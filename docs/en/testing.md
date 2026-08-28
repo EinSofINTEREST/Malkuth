@@ -70,15 +70,17 @@ What the suite does **not** prove, so nobody mistakes green for complete:
 - **No real embedding API.** Memory tests use `HashEmbedder`, which is deterministic
   but does not model semantic similarity. Recall *ranking quality* is therefore not
   measured; only the merge, threshold, and budget mechanics are.
-- **SDK bindings are covered, but only in-process.** The `mcp` and `a2a-sdk`
-  bindings are exercised directly: MCP against a reference server process, A2A
-  against the SDK's own server routes over ASGI. Both cross the real SDK, but
-  neither crosses a container boundary — see the Docker note below.
+- **MCP is covered only in-process.** The `mcp` binding is exercised against a
+  reference server process, crossing the real SDK but not a container boundary
+  — see the Docker note below. (A2A now crosses one; see below.)
 - **Docker-dependent tests skip without a daemon.** Integration and E2E tests report
   as skipped on machines without Docker. A green local run is not evidence that the
   container paths work — check the CI job.
-- **A2A is not covered end to end.** The allowlist path is proven in unit tests
-  against the SDK's own routes, not across live containers.
+- **A2A now crosses containers; transitive delegation does not.** Declared
+  calls, undeclared directions, forged tokens, and the depth limit (`A2A_005`)
+  are all checked across live containers in `tests/e2e/test_a2a.py`. The depth
+  limit is verified by *injecting* a depth, not by an agent actually delegating
+  onward — an agent calling a peer mid-task is still unproven end to end.
 - **Auto-recall is not covered end to end.** The embedding provider binding
   exists and is exercised against a fake endpoint, but the E2E stack does not
   yet serve one — so memory accumulation feeding a later task's prompt is

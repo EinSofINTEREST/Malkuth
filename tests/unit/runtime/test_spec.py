@@ -10,6 +10,8 @@ import pytest
 
 from malkuth.core.errors import MalkuthError
 from malkuth.runtime.spec import (
+    A2A_HOST_ENV,
+    A2A_PORT_ENV,
     DEFAULT_CONTROL_PORT,
     DEFAULT_NETWORK,
     DEFAULT_PID_LIMIT,
@@ -70,6 +72,54 @@ def test_writable_paths_are_mounted_writable_by_the_container_user(path):
 
     assert rendered["tmpfs"][path] == TMPFS_OPTIONS
     assert "1777" in rendered["tmpfs"][path]
+
+
+def test_the_assigned_a2a_port_reaches_the_container():
+    """포트를 **열기만** 하면 컨테이너 안에서 아무도 듣지 않는다.
+
+    agentd 는 이 값으로 서버를 띄운다 — 없으면 #166 이 만든 A2A 서버가
+    실제 배포에서 영원히 안 뜬다.
+    """
+    spec = build_container_spec(agent_manifest(a2a={"enabled": True}), a2a_port=9137)
+
+    assert spec.env[A2A_PORT_ENV] == "9137"
+    assert any(port.name == "a2a" for port in spec.ports)
+
+
+def test_the_advertised_host_matches_the_container_name():
+    """peer 는 이 이름으로 접속한다 — 해석되지 않으면 카드가 무의미하다.
+
+    컨테이너 이름은 ``malkuth-{agent}-{replica}`` 라 ``manifest.name`` 을
+    광고하면 Docker DNS 가 풀지 못한다.
+    """
+    spec = build_container_spec(agent_manifest(a2a={"enabled": True}), a2a_port=9137)
+
+    assert spec.env[A2A_HOST_ENV] == spec.name
+
+
+def test_the_advertised_host_follows_the_replica():
+    """레플리카마다 컨테이너가 다르다 — 0번만 맞으면 나머지가 닿지 않는다."""
+    spec = build_container_spec(agent_manifest(a2a={"enabled": True}), a2a_port=9137, replica=2)
+
+    assert spec.env[A2A_HOST_ENV] == spec.name
+    assert spec.name.endswith("-2")
+
+
+def test_no_a2a_port_is_injected_when_not_declared():
+    """선언하지 않았는데 포트를 알려주면 열지도 않은 자리에 서버가 뜬다."""
+    spec = build_container_spec(agent_manifest(), a2a_port=9137)
+
+    assert A2A_PORT_ENV not in spec.env
+
+
+def test_declared_secrets_survive_the_a2a_injection():
+    """주입을 덧쓰다 기존 env 를 날리면 secrets 가 조용히 사라진다."""
+    spec = build_container_spec(
+        agent_manifest(a2a={"enabled": True}), env={"ANTHROPIC_API_KEY": "k"}, a2a_port=9137
+    )
+
+    assert spec.env["ANTHROPIC_API_KEY"] == "k"
+    assert spec.env[A2A_PORT_ENV] == "9137"
 
 
 def test_pid_limit_is_applied():

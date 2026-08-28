@@ -187,3 +187,19 @@ def test_every_agent_in_the_stack_is_non_root(graph_stack):
     for service in ("agent-planner", "agent-researcher", "agent-writer"):
         uid = docker("compose", "-f", str(COMPOSE_FILE), "exec", "-T", service, "id", "-u")
         assert uid == "1000", f"{service} runs as uid {uid}"
+
+
+@requires_docker
+async def test_the_refinement_graph_completes_over_the_live_stack(node_runtime):
+    """모듈 조립만으로 만든 그래프가 실제 컨테이너를 거쳐 완주한다 (#210).
+
+    04 는 순환에 `max_iterations` 를 요구하는데 어느 레퍼런스에도 순환이
+    없었다 — 이 그래프가 그 규칙의 사례다.
+    """
+    result = await submitter(node_runtime).submit(
+        topology("draft-review"), {"query": "왜 하늘은 파란가"}, run_id="e2e-draft"
+    )
+
+    assert result.ok, result.error.message if result.error else "run failed"
+    assert result.state["approved"] is True
+    assert result.state["draft"]

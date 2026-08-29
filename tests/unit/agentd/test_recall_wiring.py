@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 
 from malkuth.agentd.bootstrap import build_tool_registry
-from malkuth.agentd.executor import Executor
+from malkuth.agentd.executor import Executor, ExecutorServices
 from malkuth.core.errors import ErrorCode, MalkuthError
 from malkuth.core.skill import SkillSpec
 from malkuth.memory.tool import MEMORY_SEARCH_SPEC, MEMORY_SEARCH_TOOL, run_memory_search
@@ -38,7 +38,7 @@ def make_executor(responses, *, recall=None, tools=None):
         model=FakeModel(responses),
         tools=tools or FakeTools(),
         render=lambda task: f"prompt:{task.template_name}",
-        recall=recall,
+        services=ExecutorServices(recall=recall),
     )
 
 

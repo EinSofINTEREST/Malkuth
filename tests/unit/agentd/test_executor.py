@@ -9,7 +9,7 @@ import asyncio
 
 import pytest
 
-from malkuth.agentd.executor import Executor, ExecutorConfig
+from malkuth.agentd.executor import Executor, ExecutorConfig, ExecutorServices
 from malkuth.core.agent import TaskConfig, TaskStatus
 from malkuth.core.errors import ErrorCategory, MalkuthError
 from malkuth.core.events import DoneEvent, ErrorEvent, ToolCallEvent, ToolResultEvent
@@ -29,7 +29,7 @@ def make_executor(
         tools=registry,
         render=lambda task: f"prompt:{task.template_name}",
         config=ExecutorConfig(**config) if config else None,
-        on_cleanup=on_cleanup,
+        services=ExecutorServices(on_cleanup=on_cleanup),
     )
     return executor, model, registry
 

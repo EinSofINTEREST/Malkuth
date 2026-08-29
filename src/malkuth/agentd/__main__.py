@@ -261,7 +261,12 @@ async def build_executor(manifest: AgentManifest, *, metrics: Metrics | None = N
         )
 
     from malkuth.agentd.bootstrap import Bootstrap
-    from malkuth.agentd.executor import MODEL_RETRY_POLICIES, Executor
+    from malkuth.agentd.executor import (
+        MODEL_RETRY_POLICIES,
+        Executor,
+        ExecutorConfig,
+        ExecutorServices,
+    )
     from malkuth.agentd.providers.anthropic import AnthropicModel
     from malkuth.modules.promptset import PromptsetLoader
     from malkuth.modules.registry import ModuleRegistry
@@ -289,15 +294,17 @@ async def build_executor(manifest: AgentManifest, *, metrics: Metrics | None = N
         tools=registry_tools,
         render=lambda task: _render(result, task),
         tool_schemas=_executable_schemas(result, registry_tools),
-        telemetry=_telemetry_for(manifest, metrics),
-        artifacts=_artifact_store(manifest),
-        # 09 Context Assembly — 태스크 진입 시 1회 회상해 프롬프트에 붙인다.
-        # 이것이 없으면 memoryset 의 recall 선언이 아무 일도 하지 않는다
-        recall=_task_recall(manifest, registry, registry_tools.memory),
-        output_keys=lambda task: _template_output_keys(result, task),
         # 05 Retry Layering — 모델 호출의 재시도 주체는 agentd 다.
         # 여기서 켜지 않으면 정책은 정의만 되고 아무 일도 하지 않는다
-        retry_policies=MODEL_RETRY_POLICIES,
+        config=ExecutorConfig(retry_policies=MODEL_RETRY_POLICIES),
+        services=ExecutorServices(
+            telemetry=_telemetry_for(manifest, metrics),
+            artifacts=_artifact_store(manifest),
+            # 09 Context Assembly — 태스크 진입 시 1회 회상해 프롬프트에 붙인다.
+            # 이것이 없으면 memoryset 의 recall 선언이 아무 일도 하지 않는다
+            recall=_task_recall(manifest, registry, registry_tools.memory),
+            output_keys=lambda task: _template_output_keys(result, task),
+        ),
     )
 
 

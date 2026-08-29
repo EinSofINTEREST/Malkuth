@@ -322,7 +322,7 @@ async def test_a_graph_run_stamps_its_name_on_the_task():
 
 async def test_the_agent_metric_carries_the_real_graph_name():
     """빈 문자열이면 대시보드의 그래프별 분해가 무의미해진다 (#113 완료 조건)."""
-    from malkuth.agentd.executor import Executor
+    from malkuth.agentd.executor import Executor, ExecutorServices
     from malkuth.agentd.telemetry import ExecutorTelemetry
     from tests.fixtures.fake_model import FakeModel, FakeTools, text
 
@@ -337,7 +337,9 @@ async def test_the_agent_metric_carries_the_real_graph_name():
                 model=FakeModel([text("done")]),
                 tools=FakeTools(),
                 render=lambda _t: "prompt",
-                telemetry=ExecutorTelemetry(metrics, agent="researcher", group="research"),
+                services=ExecutorServices(
+                    telemetry=ExecutorTelemetry(metrics, agent="researcher", group="research")
+                ),
             )
             return await executor.execute(task)
 

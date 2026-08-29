@@ -9,7 +9,7 @@ from __future__ import annotations
 import pytest
 from prometheus_client import CollectorRegistry
 
-from malkuth.agentd.executor import Executor, ExecutorConfig
+from malkuth.agentd.executor import Executor, ExecutorConfig, ExecutorServices
 from malkuth.agentd.telemetry import ExecutorTelemetry, tool_source
 from malkuth.core.agent import TaskStatus, TraceContext
 from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
@@ -64,7 +64,7 @@ def make_executor(
         tools=registry,
         render=lambda task: f"prompt:{task.template_name}",
         config=ExecutorConfig(**config) if config else None,
-        telemetry=telemetry,
+        services=ExecutorServices(telemetry=telemetry),
     )
     return executor, registry
 

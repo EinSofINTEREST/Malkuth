@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from malkuth.agentd.executor import Executor
+from malkuth.agentd.executor import Executor, ExecutorServices
 from malkuth.artifacts import FilesystemArtifactStore
 from tests.fixtures.builders import make_task
 from tests.fixtures.fake_model import FakeModel, FakeTools, calls, text
@@ -36,7 +36,7 @@ def executor_with(store, tools):
         model=FakeModel([calls(TOOL), text("done")]),
         tools=tools,
         render=lambda _task: "prompt",
-        artifacts=store,
+        services=ExecutorServices(artifacts=store),
     )
 
 
@@ -134,6 +134,6 @@ async def test_the_assembled_executor_carries_the_store(tmp_path, monkeypatch, e
 
     from malkuth.artifacts.scope import ArtifactScope, ScopedArtifacts
 
-    store = built._artifacts
+    store = built._services.artifacts
     assert isinstance(store, ScopedArtifacts)
     assert store.stores[ArtifactScope.LOCAL].scope == echo_manifest.name

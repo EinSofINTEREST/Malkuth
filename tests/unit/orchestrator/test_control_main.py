@@ -170,9 +170,16 @@ def test_a_file_path_is_accepted(tmp_path):
 
 
 @pytest.mark.parametrize("value", ["", ":memory:"])
-def test_a_private_store_would_not_be_shared(value):
-    """왜 거절하는지를 근거로 남긴다 — 두 연결이 서로를 보지 못한다."""
+def test_a_private_store_would_not_be_shared(value, tmp_path, monkeypatch):
+    """왜 거절하는지를 근거로 남긴다 — 두 연결이 서로를 보지 못한다.
+
+    **tmp_path 안에서 연결한다**: 빈 값은 임시 파일을 만들고, 경로로 해석되는 값은
+    실제 파일을 남긴다. 저장소 루트에서 돌리면 그것이 커밋에 실린다 — 실제로
+    한 번 실렸다.
+    """
     import sqlite3
+
+    monkeypatch.chdir(tmp_path)
 
     first = sqlite3.connect(value)
     first.execute("create table probe(x)")
@@ -181,3 +188,17 @@ def test_a_private_store_would_not_be_shared(value):
 
     with pytest.raises(sqlite3.OperationalError):
         second.execute("select * from probe")
+
+
+def test_a_whitespace_padded_memory_marker_is_still_rejected(tmp_path):
+    """` :memory: ` 는 sqlite 에겐 **그 이름의 파일**이지만, 사람에겐 오타다.
+
+    문자 그대로 해석되므로 공유는 되지만, 저장소 경로로 그런 이름을 의도했을 가능성은
+    없다. 오타를 그대로 받아 이상한 파일을 만드는 대신 거절한다.
+    """
+    write_config(tmp_path, {"run_store": " :memory: "})
+
+    with pytest.raises(MalkuthError) as excinfo:
+        run_manager_for(args_for(tmp_path))
+
+    assert excinfo.value.code == ErrorCode.CFG_001

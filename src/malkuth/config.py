@@ -147,6 +147,10 @@ class OrchestratorConfig(BaseModel):
 
         값을 하나씩 막는 대신 **공유되는가**를 본다: sqlite 에서 파일 경로가
         아닌 것(``:memory:`` 및 ``file::memory:`` 계열)은 연결마다 별개의 DB 다.
+
+        공백을 벗겨 비교하는 것은 별개 이유다 — `` :memory: `` 는 sqlite 에겐
+        그 이름의 **파일**이라 공유는 되지만, 저장소 경로로 그런 이름을 의도했을
+        가능성은 없다. 오타를 그대로 받아 이상한 파일을 만드는 대신 거절한다.
         """
         if self.run_store is None:
             return self

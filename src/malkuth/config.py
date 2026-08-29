@@ -24,6 +24,8 @@ ENV_PREFIX = "MALKUTH_"
 NESTED_SEPARATOR = "__"
 DEFAULT_CONFIG_DIR = "configs"
 DEFAULT_ENVIRONMENT = "dev"
+MEMORY_DB = ":memory:"
+"""sqlite 의 in-memory 지시자 — 연결마다 별개라 프로세스 간에 공유되지 않는다."""
 ENVIRONMENT_ENV = "MALKUTH_ENV"
 
 
@@ -121,10 +123,45 @@ class OrchestratorConfig(BaseModel):
     """외부 checkpointer 의 접속 URL. 자격증명을 파일에 굽지 않도록
     ``MALKUTH_ORCHESTRATOR__CHECKPOINTER_URL`` 로 덮어쓰는 것이 기본 경로다 —
     이 필드가 없어 `checkpointer: postgres` 선언이 도달 불가능했다 (#220)."""
+    run_store: str | None = Field(default=None, min_length=1)
+    """Run 기록 저장소 **파일 경로** (sqlite). **프로세스 밖에서 run 을 보고 조작하는
+    경로**가 여기에 달려 있다 — 미설정이면 run 이 기록되지 않아 control plane 이
+    빈 목록을 돌려주고, drain 요청도 전달되지 않는다 (#221).
+
+    파일이 아닌 값을 거절한다: sqlite 의 ``""`` 와 ``":memory:"`` 는 오류가 아니라
+    **연결마다 다른 private DB** 를 연다. 그러면 CLI 와 control plane 이 서로 다른
+    저장소를 보게 되어, 이 설정이 있는데도 run 이 보이지 않는 상태가 조용히 재현된다 —
+    미설정보다 나쁘다. 설정했다고 믿기 때문이다."""
+    control_host: str = "127.0.0.1"
+    """Control Plane bind 주소. 기본은 loopback — 이 표면은 인증이 없으므로
+    외부에 열려면 그 앞을 막는 것이 배포하는 쪽의 책임이다."""
+    control_port: int = Field(default=8700, gt=0, le=65535)
     max_concurrent_runs: int = Field(default=10, gt=0)
     max_service_runs: int = Field(default=5, gt=0)
     node_timeout_s: float = Field(default=300.0, gt=0)
     service_defaults: ServiceDefaults = Field(default_factory=ServiceDefaults)
+
+    @model_validator(mode="after")
+    def _run_store_is_a_file(self) -> OrchestratorConfig:
+        """프로세스 간에 공유되지 않는 저장소를 거절한다.
+
+        값을 하나씩 막는 대신 **공유되는가**를 본다: sqlite 에서 파일 경로가
+        아닌 것(``:memory:`` 및 ``file::memory:`` 계열)은 연결마다 별개의 DB 다.
+
+        공백을 벗겨 비교하는 것은 별개 이유다 — `` :memory: `` 는 sqlite 에겐
+        그 이름의 **파일**이라 공유는 되지만, 저장소 경로로 그런 이름을 의도했을
+        가능성은 없다. 오타를 그대로 받아 이상한 파일을 만드는 대신 거절한다.
+        """
+        if self.run_store is None:
+            return self
+        target = self.run_store.strip()
+        shared = target and target != MEMORY_DB and not target.startswith(f"file:{MEMORY_DB}")
+        if not shared:
+            raise ValueError(
+                "orchestrator.run_store must be a file path — "
+                "an in-memory database is private to each connection"
+            )
+        return self
 
 
 class A2AConfig(BaseModel):

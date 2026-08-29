@@ -259,13 +259,37 @@ def checkpointer_for(args: argparse.Namespace) -> Any:
     """
     from malkuth.orchestrator.checkpoint import build_checkpointer
 
-    orchestrator = load_config(
-        resolve_environment(getattr(args, "environment", None)),
-        config_dir=getattr(args, "config_dir", DEFAULT_CONFIG_DIR),
-    ).orchestrator
+    orchestrator = orchestrator_config(args)
     return build_checkpointer(
         args.checkpointer or orchestrator.checkpointer,
         url=orchestrator.checkpointer_url,
+    )
+
+
+def orchestrator_config(args: argparse.Namespace) -> Any:
+    """Resolve the orchestrator settings this invocation should use."""
+    return load_config(
+        resolve_environment(getattr(args, "environment", None)),
+        config_dir=getattr(args, "config_dir", DEFAULT_CONFIG_DIR),
+    ).orchestrator
+
+
+def run_manager_for(args: argparse.Namespace) -> Any:
+    """Build the run manager, recording to the configured store when there is one.
+
+    기록을 남기지 않으면 **프로세스 밖에서 run 을 볼 수 없습니다** — control plane
+    이 떠 있어도 빈 목록을 돌려주고, `run-drain` 요청도 구동 프로세스에 전달되지
+    않습니다 (#221). 저장소는 설정이 정합니다.
+    """
+    from malkuth.orchestrator.run import RunManager
+    from malkuth.orchestrator.runstore import SqliteRunStore
+
+    orchestrator = orchestrator_config(args)
+    store = None if orchestrator.run_store is None else SqliteRunStore(path=orchestrator.run_store)
+    return RunManager(
+        max_concurrent_runs=orchestrator.max_concurrent_runs,
+        max_service_runs=orchestrator.max_service_runs,
+        store=store,
     )
 
 
@@ -309,6 +333,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     checkpointer = checkpointer_for(args)
     submitter = RunSubmitter(
         runtime=ControlNodeRuntime(clients=_control_clients(args)),
+        manager=run_manager_for(args),
         checkpointer=checkpointer,
         metrics=Metrics(),
     )

@@ -128,15 +128,20 @@ MALKUTH_ORCHESTRATOR__CHECKPOINTER_URL=postgresql://user:pass@host:5432/malkuth 
 영속 백엔드에서는 같은 `--run-id` 로 다시 실행하면 마지막 checkpoint 에서 이어집니다 —
 다른 프로세스에서도 됩니다. 기본값 `memory` 는 프로세스와 함께 사라지므로 재개할 수 없습니다.
 
-알아야 할 한계가 하나 남아 있습니다. `run-list` / `run-drain` / `run-resume` 는 아직
-제공되지 않는 control plane 프로세스를 필요로 합니다
-([#221](https://github.com/EinSofINTEREST/Malkuth/issues/221)).
+`run-list` / `run-drain` / `run-resume` 는 `--control-url` 로 control plane 에 붙고,
+**기록된 run 만** 봅니다 — `orchestrator.run_store` 를 설정해 run 과 control plane 이 같은
+저장소를 보게 하세요. `run-drain` 은 요청만 남기고 즉시 반환하며, 실제 정지는 run 을 구동하는
+프로세스가 다음 iteration 경계에서 수행합니다. `run-resume` 은 이 control plane 에서는
+**항상 거절됩니다** — 저장소를 읽을 뿐 run 을 구동하지 않아 이어갈 state 가 없습니다.
+재개된 적 없는 결과를 보고하는 대신 그 사실을 말합니다 (`501`, `GRAPH_001`).
+현재 재개는 같은 `--run-id` 로 다시 실행하는 방식입니다.
 
 ### 상주 프로세스
 
 ```bash
-python -m malkuth.agentd     # 컨테이너 내부 에이전트 데몬 — Control API 8080
-python -m malkuth.memory     # Memory Service — HTTP 표면 + 비동기 인덱싱 루프
+python -m malkuth.agentd        # 컨테이너 내부 에이전트 데몬 — Control API 8080
+python -m malkuth.memory        # Memory Service — HTTP 표면 + 비동기 인덱싱 루프
+python -m malkuth.orchestrator  # Control Plane — run-list / run-drain / run-resume 서빙
 ```
 
 `agentd` 는 runtime layer 가 모든 에이전트 컨테이너 안에서 띄우는 프로세스입니다.
@@ -148,7 +153,12 @@ Memory Service 는 `MALKUTH_REPO_ROOT`, `MALKUTH_MEMORY_PORT`,
 `MALKUTH_MEMORY_TOKENS_PATH` 를 읽습니다. 별도 프로세스로 떠 있어야 합니다 — append 는
 즉시 커밋되지만 인덱싱은 비동기라, 이 루프가 없으면 저장된 것이 검색되지 않습니다.
 
-둘 다 `MALKUTH_LOG_LEVEL`, `MALKUTH_LOG_FORMAT`, `MALKUTH_METRICS_PORT` 를 따릅니다.
+Control Plane 은 설정에서 `orchestrator.run_store`, `control_host`, `control_port` 를 읽고,
+저장소가 없으면 **기동을 거부**합니다 — 빈 목록을 돌려주면 "run 이 없다" 로 읽히기 때문입니다.
+run 을 구동하지는 않으므로 `run-resume` 요청은 거절합니다.
+
+셋 다 `MALKUTH_ENV`, `MALKUTH_CONFIG_DIR`, `MALKUTH_LOG_LEVEL`, `MALKUTH_LOG_FORMAT`,
+`MALKUTH_METRICS_PORT` 를 따릅니다.
 
 ### 설정
 

@@ -121,10 +121,14 @@ class OrchestratorConfig(BaseModel):
     """외부 checkpointer 의 접속 URL. 자격증명을 파일에 굽지 않도록
     ``MALKUTH_ORCHESTRATOR__CHECKPOINTER_URL`` 로 덮어쓰는 것이 기본 경로다 —
     이 필드가 없어 `checkpointer: postgres` 선언이 도달 불가능했다 (#220)."""
-    run_store: str | None = None
+    run_store: str | None = Field(default=None, min_length=1)
     """Run 기록 저장소 경로 (sqlite). **프로세스 밖에서 run 을 보고 조작하는
     경로**가 여기에 달려 있다 — 미설정이면 run 이 기록되지 않아 control plane 이
-    빈 목록을 돌려주고, drain 요청도 전달되지 않는다 (#221)."""
+    빈 목록을 돌려주고, drain 요청도 전달되지 않는다 (#221).
+
+    빈 문자열을 거절하는 이유: ``sqlite3.connect("")`` 는 오류가 아니라 **프로세스마다
+    다른 임시 private DB** 를 연다. 그러면 CLI 와 control plane 이 서로 다른 저장소를
+    보게 되어, 이 설정이 있는데도 run 이 보이지 않는 상태가 조용히 재현된다."""
     control_host: str = "127.0.0.1"
     """Control Plane bind 주소. 기본은 loopback — 이 표면은 인증이 없으므로
     외부에 열려면 그 앞을 막는 것이 배포하는 쪽의 책임이다."""

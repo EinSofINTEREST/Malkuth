@@ -145,9 +145,10 @@ with the process, so runs on it cannot be resumed.
 `run-list` / `run-drain` / `run-resume` talk to a control plane over `--control-url`, and
 they only see runs that were recorded — set `orchestrator.run_store` so the run and the
 control plane share one store. `run-drain` leaves a request and returns immediately; the
-process driving the run stops at its next iteration boundary. `run-resume` works only
-against the process that drives the run, and otherwise refuses rather than reporting a
-resume that never happened.
+process driving the run stops at its next iteration boundary. `run-resume` always refuses
+against this control plane: it reads the store but does not drive runs, so it has no
+state to continue from. It says so (`501`, `GRAPH_001`) rather than reporting a resume
+that never happened — resuming is currently done by re-running with the same `--run-id`.
 
 ### Long-running processes
 

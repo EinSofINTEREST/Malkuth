@@ -131,8 +131,10 @@ MALKUTH_ORCHESTRATOR__CHECKPOINTER_URL=postgresql://user:pass@host:5432/malkuth 
 `run-list` / `run-drain` / `run-resume` 는 `--control-url` 로 control plane 에 붙고,
 **기록된 run 만** 봅니다 — `orchestrator.run_store` 를 설정해 run 과 control plane 이 같은
 저장소를 보게 하세요. `run-drain` 은 요청만 남기고 즉시 반환하며, 실제 정지는 run 을 구동하는
-프로세스가 다음 iteration 경계에서 수행합니다. `run-resume` 은 그 run 을 구동하는
-프로세스에서만 동작하고, 그 밖에서는 재개된 적 없는 결과를 보고하는 대신 거절합니다.
+프로세스가 다음 iteration 경계에서 수행합니다. `run-resume` 은 이 control plane 에서는
+**항상 거절됩니다** — 저장소를 읽을 뿐 run 을 구동하지 않아 이어갈 state 가 없습니다.
+재개된 적 없는 결과를 보고하는 대신 그 사실을 말합니다 (`501`, `GRAPH_001`).
+현재 재개는 같은 `--run-id` 로 다시 실행하는 방식입니다.
 
 ### 상주 프로세스
 

@@ -144,3 +144,31 @@ def test_a_submitted_run_is_actually_recorded(tmp_path):
     recorded = SqliteRunStore(path=str(store_path)).get("recorded-run")
     assert recorded is not None, "제출한 run 이 저장소에 남지 않았다"
     assert recorded.graph == "research-pipeline"
+
+
+def test_an_empty_run_store_is_rejected(tmp_path):
+    """빈 문자열은 미설정보다 나쁘다 — 설정한 줄 알았는데 아무도 같은 것을 보지 않는다.
+
+    ``sqlite3.connect("")`` 는 오류가 아니라 **프로세스마다 다른 임시 private DB** 를
+    연다. 그대로 두면 CLI 와 control plane 이 서로 다른 저장소를 보게 되어, 이 설정이
+    있는데도 run 이 보이지 않는 상태가 조용히 재현된다 (#221 이 고치려던 바로 그것).
+    """
+    write_config(tmp_path, {"run_store": ""})
+
+    with pytest.raises(MalkuthError) as excinfo:
+        run_manager_for(args_for(tmp_path))
+
+    assert excinfo.value.code == ErrorCode.CFG_001
+
+
+def test_an_empty_string_would_not_be_shared(tmp_path):
+    """왜 거절하는지를 근거로 남긴다 — 빈 경로는 프로세스 간에 공유되지 않는다."""
+    import sqlite3
+
+    first = sqlite3.connect("")
+    first.execute("create table probe(x)")
+
+    second = sqlite3.connect("")
+
+    with pytest.raises(sqlite3.OperationalError):
+        second.execute("select * from probe")

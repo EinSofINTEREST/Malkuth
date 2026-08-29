@@ -262,3 +262,51 @@ async def test_keys_come_from_the_loaded_promptset(
     built = await build_executor(planner_manifest)
 
     assert tuple(built._output_keys(make_task(node_id=node_id))) == expected
+
+
+# --- 두 경로가 같은 계약을 낸다 (#233) -----------------------------------------
+
+
+async def stream_with(content: str, keys=(), *, node_id: str | None = "planner"):
+    """`execute` 와 **같은 조립**으로 stream 을 돌려 종료 이벤트를 집는다."""
+    executor = Executor(
+        agent="planner",
+        model=FakeModel([text(content)]),
+        tools=FakeTools(),
+        render=lambda _task: "prompt",
+        output_keys=(lambda _task: keys) if keys else None,
+    )
+    events = [event async for event in executor.stream(make_task(node_id=node_id))]
+    return events[-1]
+
+
+async def test_the_stream_path_honours_declared_keys():
+    """#233 — `_shape_output` 이 execute 경로에서만 불려 계약이 갈렸다.
+
+    같은 에이전트가 같은 태스크를 받는데 `/invoke` 로 부르면 계약된 키로,
+    `/stream` 으로 부르면 `{"content": ...}` 로 나왔다.
+    """
+    payload = json.dumps({"plan": "step 1", "needs_research": True})
+
+    done = await stream_with(payload, ("plan", "needs_research"))
+
+    assert done.output == {"plan": "step 1", "needs_research": True}
+
+
+async def test_both_paths_agree_on_the_output():
+    """엔드포인트가 달라도 output 은 같아야 한다 — 소비자가 갈라지지 않게."""
+    payload = json.dumps({"plan": "step 1", "needs_research": False})
+    keys = ("plan", "needs_research")
+
+    invoked = await run_with(payload, keys)
+    streamed = await stream_with(payload, keys)
+
+    assert invoked.output == streamed.output
+
+
+async def test_both_paths_agree_without_declared_keys():
+    """미선언 경로도 갈리지 않는다 — 기존 동작이 두 경로에서 같아야 한다."""
+    invoked = await run_with("prose answer")
+    streamed = await stream_with("prose answer")
+
+    assert invoked.output == streamed.output == {"content": "prose answer"}

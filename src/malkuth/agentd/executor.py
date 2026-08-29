@@ -336,37 +336,16 @@ class Executor:
         return f"{prompt}\n\n{context}"
 
     async def _run(self, task: TaskRequest) -> TaskResult:
-        """모델과 tool 을 오가며 루프를 돈다."""
-        prompt = await self._initial_prompt(task)
-        usage = ModelUsage()
-        # 태스크가 기본값을 그대로 쓰면 executor 설정을 따른다 —
-        # `or` 로 고르면 TaskConfig 의 기본값(20)이 항상 이겨 설정이 무시된다
-        max_turns = min(task.config.max_turns, self._config.max_turns)
+        """공용 루프를 끝까지 돌려 결과만 취한다.
 
-        try:
-            for turn in range(max_turns):
-                response = await self._model_turn(prompt)
-                usage = usage.merge(response.usage)
-
-                if response.is_final:
-                    return TaskResult.completed(
-                        task, output=self._shape_output(response.content, task), usage=usage
-                    )
-
-                results = await self._run_tools(response.tool_calls, task, turn)
-                prompt = self._extend(prompt, response, results)
-        except asyncio.CancelledError:
-            self._cleanup()
-            raise
-
-        raise MalkuthError(
-            category=ErrorCategory.MODEL,
-            code=ErrorCode.LLM_005,
-            message="max turns exceeded",
-            agent=self._agent,
-            task_id=task.task_id,
-            details={"max_turns": max_turns},
-        )
+        중간 이벤트는 버린다 — `execute` 의 소비자는 진행 과정이 아니라 결과를
+        원한다. 실패는 루프가 예외로 올리고 `execute` 가 `TaskResult` 로 접는다
+        (02 Rule 4).
+        """
+        async for event in self._events(task):
+            if isinstance(event, DoneEvent):
+                return TaskResult.completed(task, output=event.output, usage=event.usage)
+        raise AssertionError("event loop ended without a terminal event")  # pragma: no cover
 
     async def _call_model(self, prompt: str) -> ModelResponse:
         """모델 한 번 — 실패도 메트릭에 남겨야 하므로 여기서 감싼다.
@@ -405,39 +384,6 @@ class Executor:
         return await retrying_any(
             self._retry_policies, attempt, sleep=self._retry_sleep, agent=self._agent
         )
-
-    async def _run_tools(
-        self, calls: Sequence[ToolCall], task: TaskRequest, turn: int
-    ) -> list[tuple[ToolCall, Any]]:
-        """독립 tool 호출을 병렬 실행한다.
-
-        하나가 실패해도 형제 호출을 중도 취소하지 않는다 — 취소된 호출은
-        결과도 메트릭도 남기지 못해, 다중 tool 턴의 집계가 조용히 비게 된다.
-        """
-        ctx = SkillContext(
-            agent=self._agent,
-            task_id=task.task_id,
-            run_id=task.run_id,
-            artifacts=self._artifacts,
-            # 위임이 깊이를 이어받아야 순환이 상한에 걸린다 (03 Rule 5)
-            trace=task.trace,
-        )
-        coros = [self._run_tool(call, task, ctx) for call in calls]
-
-        try:
-            outcomes = await asyncio.gather(*coros, return_exceptions=True)
-        except asyncio.CancelledError:
-            self._cleanup()
-            raise
-
-        for outcome in outcomes:
-            if isinstance(outcome, asyncio.CancelledError):
-                self._cleanup()
-                raise outcome
-            if isinstance(outcome, BaseException):
-                raise outcome
-
-        return list(zip(calls, outcomes, strict=True))
 
     def _tool_timeout(self, name: str, task: TaskRequest) -> float:
         """tool 실행 상한 — per-tool 선언이 있으면 그것, 없으면 더 엄격한 쪽."""
@@ -552,29 +498,43 @@ class Executor:
         )
 
     async def _stream(self, task: TaskRequest) -> AsyncIterator[TaskEvent]:
-        """이벤트를 발행하며 루프를 돈다 (상한은 stream 이 적용)."""
+        """공용 루프의 이벤트를 그대로 흘리고, 실패만 이벤트로 접는다.
+
+        루프는 실패를 **예외로** 올린다 — 그것이 `execute` 와 공유하는 계약이다.
+        스트리밍 소비자에게는 예외가 아니라 종료 이벤트여야 하므로 여기서 바꾼다:
+        같은 실패가 한쪽에서는 `TaskResult`, 다른 쪽에서는 예외로 새어나가면
+        소비자가 두 경로를 다르게 다뤄야 한다.
+        """
         try:
-            prompt = await self._initial_prompt(task)
+            async for event in self._events(task):
+                yield event
         except asyncio.CancelledError:
-            self._cleanup()
             raise
+        except MalkuthError as err:
+            yield ErrorEvent(task_id=task.task_id, error=err.payload())
         except Exception as err:
-            # 같은 실패가 execute 에서는 TaskResult 인데 stream 에서만 예외로
-            # 새어나가면 소비자가 두 경로를 다르게 다뤄야 한다
             yield ErrorEvent(task_id=task.task_id, error=self._recall_failure(err).payload())
-            return
+
+    async def _events(self, task: TaskRequest) -> AsyncIterator[TaskEvent]:
+        """The one tool loop — model turns, tool calls, and the terminal event.
+
+        **이 루프는 한 곳에만 존재한다** (#233). 이전에는 `_run` 과 `_stream` 이
+        각자 구현해, `_shape_output` 이 execute 경로에서만 불리는 발산이 생겼다 —
+        같은 태스크가 엔드포인트에 따라 다른 output 계약을 냈다.
+
+        실패는 예외로 올린다. 소비자가 그것을 `TaskResult` 로 접거나
+        (`_run`) 종료 이벤트로 바꾼다 (`_stream`).
+
+        Yields:
+            Token, tool call/result, and a terminal done event.
+
+        Raises:
+            MalkuthError: When a turn fails or the turn ceiling is reached.
+        """
+        prompt = await self._initial_prompt(task)
         usage = ModelUsage()
-        # 태스크가 기본값을 그대로 쓰면 executor 설정을 따른다 —
-        # `or` 로 고르면 TaskConfig 의 기본값(20)이 항상 이겨 설정이 무시된다
-        max_turns = min(task.config.max_turns, self._config.max_turns)
-        ctx = SkillContext(
-            agent=self._agent,
-            task_id=task.task_id,
-            run_id=task.run_id,
-            artifacts=self._artifacts,
-            # 위임이 깊이를 이어받아야 순환이 상한에 걸린다 (03 Rule 5)
-            trace=task.trace,
-        )
+        max_turns = self._max_turns(task)
+        ctx = self._skill_context(task)
 
         try:
             for turn in range(max_turns):
@@ -587,7 +547,7 @@ class Executor:
                 if response.is_final:
                     yield DoneEvent(
                         task_id=task.task_id,
-                        output={"content": response.content},
+                        output=self._shape_output(response.content, task),
                         usage=usage,
                     )
                     return
@@ -600,64 +560,112 @@ class Executor:
                         turn=turn,
                     )
 
-                # execute 와 동일하게 병렬 실행한다 — 순차로 돌면 스트리밍 경로만
-                # tool 개수만큼 느려지고 두 경로의 타이밍이 갈린다
-                started = time.monotonic()
-                outcomes = await asyncio.gather(
-                    *(self._run_tool(call, task, ctx) for call in response.tool_calls),
-                    return_exceptions=True,
-                )
-                elapsed_ms = int((time.monotonic() - started) * 1000)
-
                 results = []
                 failure: MalkuthError | None = None
-                for call, outcome in zip(response.tool_calls, outcomes, strict=True):
-                    if isinstance(outcome, BaseException):
-                        if isinstance(outcome, asyncio.CancelledError):
-                            raise outcome
-                        error = (
-                            outcome
-                            if isinstance(outcome, MalkuthError)
-                            else _tool_error(call.name, task, self._agent, outcome)
-                        )
-                        failure = failure or error
-                        yield ToolResultEvent(
-                            task_id=task.task_id,
-                            tool=call.name,
-                            turn=turn,
-                            duration_ms=elapsed_ms,
-                            error=error.payload(),
-                        )
-                        continue
-                    yield ToolResultEvent(
-                        task_id=task.task_id,
-                        tool=call.name,
-                        result=outcome,
-                        turn=turn,
-                        duration_ms=elapsed_ms,
-                    )
-                    results.append((call, outcome))
+                for event, outcome in await self._invoke_tools(
+                    response.tool_calls, task, ctx, turn
+                ):
+                    yield event
+                    if isinstance(outcome, MalkuthError):
+                        failure = failure or outcome
+                    else:
+                        results.append(outcome)
 
                 if failure is not None:
-                    yield ErrorEvent(task_id=task.task_id, error=failure.payload())
-                    return
+                    raise failure
 
                 prompt = self._extend(prompt, response, results)
         except asyncio.CancelledError:
             self._cleanup()
             raise
 
-        yield ErrorEvent(
+        raise self._turn_ceiling(task, max_turns)
+
+    def _max_turns(self, task: TaskRequest) -> int:
+        """이번 태스크의 turn 상한.
+
+        태스크가 기본값을 그대로 쓰면 executor 설정을 따른다 — `or` 로 고르면
+        `TaskConfig` 의 기본값(20)이 항상 이겨 설정이 무시된다.
+        """
+        return min(task.config.max_turns, self._config.max_turns)
+
+    def _skill_context(self, task: TaskRequest) -> SkillContext:
+        """skill 이 받는 실행 컨텍스트."""
+        return SkillContext(
+            agent=self._agent,
             task_id=task.task_id,
-            error=MalkuthError(
-                category=ErrorCategory.MODEL,
-                code=ErrorCode.LLM_005,
-                message="max turns exceeded",
-                agent=self._agent,
-                task_id=task.task_id,
-                details={"max_turns": max_turns},
-            ).payload(),
+            run_id=task.run_id,
+            artifacts=self._artifacts,
+            # 위임이 깊이를 이어받아야 순환이 상한에 걸린다 (03 Rule 5)
+            trace=task.trace,
         )
+
+    def _turn_ceiling(self, task: TaskRequest, max_turns: int) -> MalkuthError:
+        """turn 상한 초과 — 무한 루프를 막는 마지막 방어선 (02 Loop Rules 1)."""
+        return MalkuthError(
+            category=ErrorCategory.MODEL,
+            code=ErrorCode.LLM_005,
+            message="max turns exceeded",
+            agent=self._agent,
+            task_id=task.task_id,
+            details={"max_turns": max_turns},
+        )
+
+    async def _invoke_tools(
+        self, calls: Sequence[ToolCall], task: TaskRequest, ctx: SkillContext, turn: int
+    ) -> list[tuple[ToolResultEvent, Any]]:
+        """독립 tool 호출을 병렬 실행하고, 각 결과를 이벤트와 짝지어 돌려준다.
+
+        하나가 실패해도 형제 호출을 중도 취소하지 않는다 — 취소된 호출은 결과도
+        메트릭도 남기지 못해, 다중 tool 턴의 집계가 조용히 비게 된다.
+
+        Returns:
+            ``(이벤트, 결과)`` 쌍. 실패한 호출의 결과 자리에는 `MalkuthError` 가 온다.
+        """
+        started = time.monotonic()
+        outcomes = await asyncio.gather(
+            *(self._run_tool(call, task, ctx) for call in calls),
+            return_exceptions=True,
+        )
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+
+        paired: list[tuple[ToolResultEvent, Any]] = []
+        for call, outcome in zip(calls, outcomes, strict=True):
+            if isinstance(outcome, asyncio.CancelledError):
+                self._cleanup()
+                raise outcome
+            if isinstance(outcome, BaseException):
+                error = (
+                    outcome
+                    if isinstance(outcome, MalkuthError)
+                    else _tool_error(call.name, task, self._agent, outcome)
+                )
+                paired.append(
+                    (
+                        ToolResultEvent(
+                            task_id=task.task_id,
+                            tool=call.name,
+                            turn=turn,
+                            duration_ms=elapsed_ms,
+                            error=error.payload(),
+                        ),
+                        error,
+                    )
+                )
+                continue
+            paired.append(
+                (
+                    ToolResultEvent(
+                        task_id=task.task_id,
+                        tool=call.name,
+                        result=outcome,
+                        turn=turn,
+                        duration_ms=elapsed_ms,
+                    ),
+                    (call, outcome),
+                )
+            )
+        return paired
 
 
 __all__ = [

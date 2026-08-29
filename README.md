@@ -142,15 +142,19 @@ With a durable backend, re-running the same `--run-id` resumes that run from its
 checkpoint — including from a different process. The default `memory` backend disappears
 with the process, so runs on it cannot be resumed.
 
-One limit is worth knowing: `run-list` / `run-drain` / `run-resume` need a control plane
-process that is not shipped yet
-([#221](https://github.com/EinSofINTEREST/Malkuth/issues/221)).
+`run-list` / `run-drain` / `run-resume` talk to a control plane over `--control-url`, and
+they only see runs that were recorded — set `orchestrator.run_store` so the run and the
+control plane share one store. `run-drain` leaves a request and returns immediately; the
+process driving the run stops at its next iteration boundary. `run-resume` works only
+against the process that drives the run, and otherwise refuses rather than reporting a
+resume that never happened.
 
 ### Long-running processes
 
 ```bash
-python -m malkuth.agentd     # in-container agent daemon — Control API on 8080
-python -m malkuth.memory     # Memory Service — HTTP surface plus the async indexing loop
+python -m malkuth.agentd        # in-container agent daemon — Control API on 8080
+python -m malkuth.memory        # Memory Service — HTTP surface plus the async indexing loop
+python -m malkuth.orchestrator  # Control Plane — serves run-list / run-drain / run-resume
 ```
 
 `agentd` is what the runtime layer starts inside every agent container; it reads
@@ -161,7 +165,12 @@ The Memory Service reads `MALKUTH_REPO_ROOT`, `MALKUTH_MEMORY_PORT`, and
 `MALKUTH_MEMORY_TOKENS_PATH`. It must run as its own process: appends commit immediately
 but indexing is asynchronous, so without the loop nothing becomes searchable.
 
-Both honour `MALKUTH_LOG_LEVEL`, `MALKUTH_LOG_FORMAT`, and `MALKUTH_METRICS_PORT`.
+The Control Plane reads `orchestrator.run_store`, `control_host`, and `control_port` from
+configuration and refuses to start without a store — serving an empty list would read as
+"there are no runs". It does not drive runs, so it answers `run-resume` with a refusal.
+
+All three honour `MALKUTH_ENV`, `MALKUTH_CONFIG_DIR`, `MALKUTH_LOG_LEVEL`,
+`MALKUTH_LOG_FORMAT`, and `MALKUTH_METRICS_PORT`.
 
 ### Configuration
 

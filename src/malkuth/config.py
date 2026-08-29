@@ -121,6 +121,14 @@ class OrchestratorConfig(BaseModel):
     """외부 checkpointer 의 접속 URL. 자격증명을 파일에 굽지 않도록
     ``MALKUTH_ORCHESTRATOR__CHECKPOINTER_URL`` 로 덮어쓰는 것이 기본 경로다 —
     이 필드가 없어 `checkpointer: postgres` 선언이 도달 불가능했다 (#220)."""
+    run_store: str | None = None
+    """Run 기록 저장소 경로 (sqlite). **프로세스 밖에서 run 을 보고 조작하는
+    경로**가 여기에 달려 있다 — 미설정이면 run 이 기록되지 않아 control plane 이
+    빈 목록을 돌려주고, drain 요청도 전달되지 않는다 (#221)."""
+    control_host: str = "127.0.0.1"
+    """Control Plane bind 주소. 기본은 loopback — 이 표면은 인증이 없으므로
+    외부에 열려면 그 앞을 막는 것이 배포하는 쪽의 책임이다."""
+    control_port: int = Field(default=8700, gt=0, le=65535)
     max_concurrent_runs: int = Field(default=10, gt=0)
     max_service_runs: int = Field(default=5, gt=0)
     node_timeout_s: float = Field(default=300.0, gt=0)

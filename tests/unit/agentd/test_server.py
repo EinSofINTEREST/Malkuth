@@ -184,6 +184,11 @@ def test_uncaught_exception_becomes_a_structured_error():
 
 
 def test_structured_error_keeps_its_payload():
+    """#234 — 에이전트가 완주하지 못한 것은 **호출자가 고칠 수 없다**.
+
+    400 으로 답하면 "요청이 잘못됐다" 는 뜻이라 호출자가 입력을 의심하고,
+    05 의 사고 대응에서도 서버 결함이 4xx 버킷에 숨는다.
+    """
     error = MalkuthError(
         category=ErrorCategory.MODEL,
         code=ErrorCode.LLM_005,
@@ -193,7 +198,7 @@ def test_structured_error_keeps_its_payload():
 
     response = client.post("/v1/invoke", json=task_payload(), headers=AUTH)
 
-    assert response.status_code == 400
+    assert response.status_code == 500
     assert response.json()["code"] == "LLM_005"
 
 
@@ -239,11 +244,12 @@ def test_card_returns_the_agent_card():
 
 
 def test_cancel_unknown_task_is_not_found():
+    """#234 — 이름 그대로 404 다. 400 은 "요청 형식이 틀렸다" 는 뜻이다."""
     client, _ = make_client()
 
     response = client.post("/v1/cancel/missing", headers=AUTH)
 
-    assert response.status_code == 400
+    assert response.status_code == 404
     assert response.json()["code"] == "NF_001"
 
 

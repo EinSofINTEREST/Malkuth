@@ -18,6 +18,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 
 from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
+from malkuth.http_errors import status_for
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -86,13 +87,14 @@ def create_app(
 
     @app.exception_handler(MalkuthError)
     async def _on_error(_request: Request, err: MalkuthError) -> JSONResponse:
-        """구조화 에러를 상태 코드로 — 미지의 run 은 404."""
-        code = (
-            status.HTTP_404_NOT_FOUND
-            if err.code is ErrorCode.NF_001
-            else status.HTTP_400_BAD_REQUEST
+        """구조화 에러를 상태 코드로 — 매핑은 공용 규칙을 따른다 (#234).
+
+        여기서 자체 매핑을 갖고 있던 동안 저장소 실패(`STOR_003`)가 400 으로
+        나갔다 — 서버 장애를 클라이언트 잘못으로 보고한 셈이다.
+        """
+        return JSONResponse(
+            status_code=status_for(err), content={"error": err.payload().model_dump()}
         )
-        return JSONResponse(status_code=code, content={"error": err.payload().model_dump()})
 
     @app.get("/v1/runs")
     async def list_runs(mode: str | None = None) -> list[dict[str, Any]]:

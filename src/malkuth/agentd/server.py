@@ -19,6 +19,7 @@ from pydantic import BaseModel, ConfigDict
 
 from malkuth.core.agent import HealthState, HealthStatus, TaskRequest, TaskResult
 from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError, MalkuthErrorPayload
+from malkuth.http_errors import status_for
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
@@ -147,11 +148,8 @@ def create_app(runtime: AgentRuntime, *, token: str | None = None) -> FastAPI:
 
     @app.exception_handler(MalkuthError)
     async def _structured(_request: Request, err: MalkuthError) -> JSONResponse:
-        """구조화 에러는 payload 그대로 돌려준다."""
-        http_status = (
-            status.HTTP_503_SERVICE_UNAVAILABLE if err.retryable else status.HTTP_400_BAD_REQUEST
-        )
-        return _error_response(err, http_status)
+        """구조화 에러는 payload 그대로 돌려준다 — 매핑은 공용 규칙을 따른다 (#234)."""
+        return _error_response(err, status_for(err))
 
     @app.exception_handler(Exception)
     async def _uncaught(_request: Request, err: Exception) -> JSONResponse:

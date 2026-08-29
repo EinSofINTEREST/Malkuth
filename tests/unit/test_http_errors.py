@@ -1,0 +1,86 @@
+"""One rule for turning structured errors into HTTP status codes.
+
+세 FastAPI 앱이 각자 매핑을 재발명해 서로 다르게 답하고 있었다 (#234) —
+control plane 은 저장소 실패를 400 으로 내려 **서버 장애를 클라이언트 잘못으로**
+보고했다. 05 의 사고 대응은 4xx/5xx 로 버킷을 가르므로 그 분류가 어긋나면
+알림이 엉뚱한 곳으로 간다.
+"""
+
+from __future__ import annotations
+
+from http import HTTPStatus
+
+import pytest
+
+from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
+from malkuth.http_errors import status_for
+
+
+def error(category: ErrorCategory, code: str, *, retryable: bool = False) -> MalkuthError:
+    return MalkuthError(category=category, code=code, message="x", retryable=retryable)
+
+
+@pytest.mark.parametrize(
+    ("category", "code"),
+    [
+        (ErrorCategory.STORAGE, ErrorCode.STOR_003),
+        (ErrorCategory.RUNTIME, ErrorCode.RT_002),
+        (ErrorCategory.GRAPH, ErrorCode.GRAPH_002),
+        (ErrorCategory.MODEL, ErrorCode.LLM_005),
+        (ErrorCategory.INTERNAL, ErrorCode.INTERNAL_001),
+    ],
+)
+def test_server_side_failures_are_5xx(category, code):
+    """서버가 고쳐야 하는 실패를 4xx 로 내리면 그 결함이 4xx 버킷에 숨는다."""
+    assert status_for(error(category, code)) >= HTTPStatus.INTERNAL_SERVER_ERROR
+
+
+@pytest.mark.parametrize(
+    ("category", "code", "expected"),
+    [
+        (ErrorCategory.VALIDATION, ErrorCode.VAL_001, HTTPStatus.BAD_REQUEST),
+        (ErrorCategory.NOT_FOUND, ErrorCode.NF_001, HTTPStatus.NOT_FOUND),
+        (ErrorCategory.FORBIDDEN, ErrorCode.A2A_004, HTTPStatus.FORBIDDEN),
+        (ErrorCategory.CONFIG, ErrorCode.CFG_001, HTTPStatus.BAD_REQUEST),
+    ],
+)
+def test_caller_fixable_failures_are_4xx(category, code, expected):
+    """호출자가 고칠 수 있는 것만 4xx 다."""
+    assert status_for(error(category, code)) == expected
+
+
+def test_a_missing_resource_is_404_regardless_of_category():
+    """`NF_001` 은 어느 앱에서든 404 다 — control plane 에서만 그랬다."""
+    assert status_for(error(ErrorCategory.STORAGE, ErrorCode.NF_001)) == HTTPStatus.NOT_FOUND
+
+
+def test_retryable_wins_over_the_category():
+    """다시 걸어보라는 신호가 카테고리보다 강하다."""
+    retryable = error(ErrorCategory.NETWORK, ErrorCode.NET_002, retryable=True)
+
+    assert status_for(retryable) == HTTPStatus.SERVICE_UNAVAILABLE
+
+
+def test_an_unclassified_error_is_treated_as_server_side():
+    """모르는 것을 400 으로 내리면 서버 결함이 조용히 4xx 로 샌다."""
+    unknown = error(ErrorCategory.RATE_LIMIT, "SOMETHING_NEW")
+
+    assert status_for(unknown) >= HTTPStatus.INTERNAL_SERVER_ERROR
+
+
+def test_an_override_wins_over_every_shared_rule():
+    """앱마다 다른 것이 의도된 경우 — 없애지 않고 한 곳에서 보이게 한다."""
+    denied = error(ErrorCategory.MEMORY, ErrorCode.MEM_001)
+    overrides = {ErrorCode.MEM_001: HTTPStatus.UNAUTHORIZED}
+
+    assert status_for(denied, overrides=overrides) == HTTPStatus.UNAUTHORIZED
+    assert status_for(denied) != HTTPStatus.UNAUTHORIZED, (
+        "override 없이도 401 이면 override 가 무의미하다"
+    )
+
+
+def test_an_override_beats_a_shared_code_mapping():
+    """override 는 공용 코드 매핑보다도 우선한다 — 좁은 것이 이긴다."""
+    missing = error(ErrorCategory.NOT_FOUND, ErrorCode.NF_001)
+
+    assert status_for(missing, overrides={ErrorCode.NF_001: HTTPStatus.GONE}) == HTTPStatus.GONE

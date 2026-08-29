@@ -146,14 +146,15 @@ def test_a_submitted_run_is_actually_recorded(tmp_path):
     assert recorded.graph == "research-pipeline"
 
 
-def test_an_empty_run_store_is_rejected(tmp_path):
-    """빈 문자열은 미설정보다 나쁘다 — 설정한 줄 알았는데 아무도 같은 것을 보지 않는다.
+@pytest.mark.parametrize("value", ["", ":memory:", " :memory: ", "file::memory:?cache=shared"])
+def test_a_private_run_store_is_rejected(tmp_path, value):
+    """공유되지 않는 저장소는 미설정보다 나쁘다 — 설정한 줄 알았는데 아무도 같은 것을 안 본다.
 
-    ``sqlite3.connect("")`` 는 오류가 아니라 **프로세스마다 다른 임시 private DB** 를
+    sqlite 의 ``""`` 와 ``":memory:"`` 는 오류가 아니라 **연결마다 다른 private DB** 를
     연다. 그대로 두면 CLI 와 control plane 이 서로 다른 저장소를 보게 되어, 이 설정이
-    있는데도 run 이 보이지 않는 상태가 조용히 재현된다 (#221 이 고치려던 바로 그것).
+    있는데도 run 이 보이지 않는 상태가 조용히 재현된다 — #221 이 고치려던 바로 그것이다.
     """
-    write_config(tmp_path, {"run_store": ""})
+    write_config(tmp_path, {"run_store": value})
 
     with pytest.raises(MalkuthError) as excinfo:
         run_manager_for(args_for(tmp_path))
@@ -161,14 +162,22 @@ def test_an_empty_run_store_is_rejected(tmp_path):
     assert excinfo.value.code == ErrorCode.CFG_001
 
 
-def test_an_empty_string_would_not_be_shared(tmp_path):
-    """왜 거절하는지를 근거로 남긴다 — 빈 경로는 프로세스 간에 공유되지 않는다."""
+def test_a_file_path_is_accepted(tmp_path):
+    """거절이 너무 넓으면 정상 설정까지 막는다 — 파일 경로는 통과해야 한다."""
+    write_config(tmp_path, {"run_store": str(tmp_path / "runs.db")})
+
+    assert run_manager_for(args_for(tmp_path)).store is not None
+
+
+@pytest.mark.parametrize("value", ["", ":memory:"])
+def test_a_private_store_would_not_be_shared(value):
+    """왜 거절하는지를 근거로 남긴다 — 두 연결이 서로를 보지 못한다."""
     import sqlite3
 
-    first = sqlite3.connect("")
+    first = sqlite3.connect(value)
     first.execute("create table probe(x)")
 
-    second = sqlite3.connect("")
+    second = sqlite3.connect(value)
 
     with pytest.raises(sqlite3.OperationalError):
         second.execute("select * from probe")

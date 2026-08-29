@@ -131,13 +131,42 @@ class ToolRegistry(Protocol):
 
 @dataclass
 class ExecutorConfig:
-    """Execution limits for the loop.
+    """How the loop behaves — limits and retry policy.
 
-    루프 실행 상한. 태스크별 값이 있으면 그쪽이 우선한다.
+    루프의 행동 규칙. 태스크별 값이 있으면 그쪽이 우선한다.
+
+    재시도가 여기 있는 이유: 05 Retry Layering 은 모델 호출의 재시도 주체를
+    agentd 로 규정한다. 즉 재시도는 이 루프의 **행동**이지 협력자가 아니다.
+    `retry_sleep` 은 그 행동을 테스트에서 실제로 자지 않고 검증하기 위한
+    이음매라 정책과 함께 움직인다 (06 Async 2).
     """
 
     max_turns: int = DEFAULT_MAX_TURNS
     tool_timeout_s: float = DEFAULT_TOOL_TIMEOUT_S
+    retry_policies: tuple[RetryPolicy, ...] = ()
+    """비어 있으면 재시도하지 않는다 — 조립하는 쪽이 켠다."""
+    retry_sleep: Callable[[float], Awaitable[None]] | None = None
+
+
+@dataclass(frozen=True)
+class ExecutorServices:
+    """Optional collaborators — 미주입은 곧 "그 기능 없음" 이다.
+
+    다섯 모두 같은 성질을 갖는다: 없으면 해당 기능이 조용히 꺼지고, 루프는
+    그대로 돈다. 예컨대 `artifacts` 가 없으면 skill 이 `ctx.artifacts is None`
+    을 받고, `telemetry` 가 없으면 집계가 무동작이다.
+
+    기능이 붙을 때마다 생성자가 자라 13개까지 갔다 (#235). 함께 움직이는
+    것들이라 한 묶음이다 — 조립하는 쪽은 켤 것만 고른다.
+    """
+
+    telemetry: ExecutorTelemetry | None = None
+    recall: TaskRecall | None = None
+    artifacts: ArtifactStore | None = None
+    output_keys: Callable[[TaskRequest], Sequence[str]] | None = None
+    """태스크마다 다르다 — 같은 에이전트가 노드마다 다른 템플릿을 쓰고,
+    계약은 그 템플릿에 붙어 있다 (#150)."""
+    on_cleanup: Callable[[], None] | None = None
 
 
 def _tool_error(name: str, task: TaskRequest, agent: str, err: BaseException) -> MalkuthError:
@@ -175,34 +204,15 @@ class Executor:
         render: Callable[[TaskRequest], str],
         tool_schemas: Sequence[Any] = (),
         config: ExecutorConfig | None = None,
-        on_cleanup: Callable[[], None] | None = None,
-        telemetry: ExecutorTelemetry | None = None,
-        recall: TaskRecall | None = None,
-        artifacts: ArtifactStore | None = None,
-        output_keys: Callable[[TaskRequest], Sequence[str]] | None = None,
-        retry_policies: Sequence[RetryPolicy] = (),
-        retry_sleep: Callable[[float], Awaitable[None]] | None = None,
+        services: ExecutorServices | None = None,
     ) -> None:
         self._agent = agent
-        # 미주입 시 skill 은 ctx.artifacts is None 을 받는다 — 지금까지 **항상**
-        # 그랬고, 그래서 02 Output Discipline 의 참조 전달 경로가 죽어 있었다
-        self._artifacts = artifacts
-        # 키는 **태스크마다** 다르다: 같은 에이전트가 노드마다 다른 템플릿을
-        # 쓰고, 계약은 그 템플릿에 붙어 있다 (#150)
-        self._output_keys = output_keys
-        self._recall = recall
-        self._telemetry = telemetry
         self._model = model
         self._tools = tools
         self._render = render
         self._tool_schemas = list(tool_schemas)
         self._config = config or ExecutorConfig()
-        self._on_cleanup = on_cleanup
-        # 05 Retry Layering — 모델 호출의 재시도 주체는 agentd 다.
-        # 비어 있으면 재시도하지 않는다 — 조립하는 쪽이 켠다
-        self._retry_policies = tuple(retry_policies)
-        # 06 은 시간 의존 로직이 테스트에서 실제로 자는 것을 금지한다
-        self._retry_sleep = retry_sleep
+        self._services = services or ExecutorServices()
         # 멱등성: 완료된 태스크는 같은 결과를 돌려준다 (재시도/재개 시나리오)
         self._completed: dict[str, TaskResult] = {}
 
@@ -268,9 +278,9 @@ class Executor:
 
     def _record_task(self, result: TaskResult, *, task: TaskRequest, duration_s: float) -> None:
         """태스크 종료를 메트릭에 남긴다 — telemetry 미주입 시 무동작."""
-        if self._telemetry is None:
+        if self._services.telemetry is None:
             return
-        self._telemetry.task_finished(
+        self._services.telemetry.task_finished(
             status=result.status.value, duration_s=duration_s, graph=task.trace.graph
         )
 
@@ -288,7 +298,7 @@ class Executor:
                 declared key is missing — 조용히 빈 출력으로 떨어지면 그래프가
                 다음 노드에서야 GRAPH_003 으로 실패해 원인이 멀어집니다.
         """
-        keys = tuple(self._output_keys(task)) if self._output_keys else ()
+        keys = tuple(self._services.output_keys(task)) if self._services.output_keys else ()
         if not keys:
             return {"content": content}
 
@@ -327,10 +337,10 @@ class Executor:
         호출합니다.
         """
         prompt = self._render(task)
-        if self._recall is None:
+        if self._services.recall is None:
             return prompt
 
-        context = await self._recall(task)
+        context = await self._services.recall(task)
         if not context:
             return prompt
         return f"{prompt}\n\n{context}"
@@ -354,7 +364,7 @@ class Executor:
         발생 빈도를 보므로, 재시도로 성공한 호출의 rate limit 이 지워지면
         provider 압박이 지표에서 사라진다.
         """
-        if self._telemetry is None:
+        if self._services.telemetry is None:
             return await self._model.run(prompt, self._tool_schemas)
 
         try:
@@ -362,10 +372,10 @@ class Executor:
         except asyncio.CancelledError:
             raise
         except Exception as err:
-            self._telemetry.model_called(status=_model_status(err))
+            self._services.telemetry.model_called(status=_model_status(err))
             raise
 
-        self._telemetry.model_called(status=STATUS_COMPLETED, usage=response.usage)
+        self._services.telemetry.model_called(status=STATUS_COMPLETED, usage=response.usage)
         return response
 
     async def _model_turn(self, prompt: str) -> ModelResponse:
@@ -382,7 +392,7 @@ class Executor:
             return await self._call_model(prompt)
 
         return await retrying_any(
-            self._retry_policies, attempt, sleep=self._retry_sleep, agent=self._agent
+            self._config.retry_policies, attempt, sleep=self._config.retry_sleep, agent=self._agent
         )
 
     def _tool_timeout(self, name: str, task: TaskRequest) -> float:
@@ -421,8 +431,8 @@ class Executor:
 
     def _record_tool(self, tool: str, *, status: str) -> None:
         """tool 호출을 메트릭에 남긴다 — telemetry 미주입 시 무동작."""
-        if self._telemetry is not None:
-            self._telemetry.tool_called(tool=tool, status=status)
+        if self._services.telemetry is not None:
+            self._services.telemetry.tool_called(tool=tool, status=status)
 
     def _extend(
         self, prompt: str, response: ModelResponse, results: Sequence[tuple[ToolCall, Any]]
@@ -436,8 +446,8 @@ class Executor:
 
     def _cleanup(self) -> None:
         """취소 시 진행 중 자원을 정리한다."""
-        if self._on_cleanup is not None:
-            self._on_cleanup()
+        if self._services.on_cleanup is not None:
+            self._services.on_cleanup()
 
     async def stream(self, task: TaskRequest) -> AsyncIterator[TaskEvent]:
         """Run a task, emitting events as it progresses.
@@ -595,7 +605,7 @@ class Executor:
             agent=self._agent,
             task_id=task.task_id,
             run_id=task.run_id,
-            artifacts=self._artifacts,
+            artifacts=self._services.artifacts,
             # 위임이 깊이를 이어받아야 순환이 상한에 걸린다 (03 Rule 5)
             trace=task.trace,
         )
@@ -671,6 +681,7 @@ class Executor:
 __all__ = [
     "Executor",
     "ExecutorConfig",
+    "ExecutorServices",
     "Model",
     "ModelResponse",
     "ToolCall",

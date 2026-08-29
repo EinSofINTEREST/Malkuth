@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from malkuth.agentd.executor import MODEL_RETRY_POLICIES, Executor
+from malkuth.agentd.executor import MODEL_RETRY_POLICIES, Executor, ExecutorConfig
 from malkuth.core.agent import TaskStatus
 from malkuth.core.errors import (
     NETWORK_RETRY,
@@ -48,18 +48,16 @@ def waits() -> list[float]:
     return []
 
 
-def executor(responses, waits: list[float], **kwargs) -> Executor:
+def executor(responses, waits: list[float], *, policies=MODEL_RETRY_POLICIES) -> Executor:
     async def sleep(delay: float) -> None:
         waits.append(delay)
 
-    kwargs.setdefault("retry_policies", MODEL_RETRY_POLICIES)
     return Executor(
         agent="researcher",
         model=FakeModel(responses),
         tools=FakeTools(),
         render=lambda _task: "prompt",
-        retry_sleep=sleep,
-        **kwargs,
+        config=ExecutorConfig(retry_policies=policies, retry_sleep=sleep),
     )
 
 
@@ -109,7 +107,7 @@ async def test_exhausted_retries_fail_the_task(waits):
 
 async def test_retry_is_off_unless_the_assembly_turns_it_on(waits):
     """기본으로 켜면 실패를 스크립트하는 모든 테스트가 초 단위로 기다린다."""
-    result = await executor([unreachable()], waits, retry_policies=()).execute(make_task())
+    result = await executor([unreachable()], waits, policies=()).execute(make_task())
 
     assert result.status is TaskStatus.FAILED
     assert waits == []
@@ -128,4 +126,4 @@ async def test_the_production_assembly_turns_retry_on(monkeypatch):
 
     built = await build_executor(load_manifest(REPO_ROOT / "agents/researcher/manifest.yaml"))
 
-    assert built._retry_policies == MODEL_RETRY_POLICIES
+    assert built._config.retry_policies == MODEL_RETRY_POLICIES

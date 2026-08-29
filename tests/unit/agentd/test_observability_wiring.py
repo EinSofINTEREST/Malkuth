@@ -30,7 +30,7 @@ async def test_executor_receives_the_registry():
 
     executor = await build_executor(load_manifest(RESEARCHER), metrics=metrics)
 
-    assert executor._telemetry is not None
+    assert executor._services.telemetry is not None
 
 
 async def test_labels_come_from_the_manifest():
@@ -39,7 +39,7 @@ async def test_labels_come_from_the_manifest():
 
     executor = await build_executor(load_manifest(RESEARCHER), metrics=metrics)
 
-    telemetry = executor._telemetry
+    telemetry = executor._services.telemetry
     assert telemetry._agent == "researcher"
     assert telemetry._group == "research"
     assert telemetry._provider == "anthropic"
@@ -49,7 +49,7 @@ async def test_labels_come_from_the_manifest():
 async def test_executor_works_without_metrics():
     executor = await build_executor(load_manifest(RESEARCHER))
 
-    assert executor._telemetry is None
+    assert executor._services.telemetry is None
 
 
 def test_the_exposed_registry_is_the_one_we_fill(monkeypatch):
@@ -81,7 +81,7 @@ async def test_recorded_metrics_reach_the_exposed_registry():
     metrics = Metrics(registry=registry)
 
     executor = await build_executor(load_manifest(RESEARCHER), metrics=metrics)
-    executor._telemetry.task_finished(status="completed", duration_s=0.01)
+    executor._services.telemetry.task_finished(status="completed", duration_s=0.01)
 
     scraped = generate_latest(registry).decode("utf-8")
     assert 'malkuth_agent_tasks_total{agent="researcher"' in scraped
@@ -135,3 +135,41 @@ async def test_memory_search_is_advertised_once_access_exists(monkeypatch):
     executor = await build_executor(AgentManifest.model_validate(doc))
 
     assert MEMORY_SEARCH_TOOL in {spec.name for spec in executor._tool_schemas}
+
+
+# --- 선택적 협력자 묶음이 실제로 채워지는가 (#235) -------------------------------
+
+
+async def test_the_assembly_fills_every_declared_collaborator(monkeypatch, tmp_path):
+    """묶음으로 옮기면서 하나가 빠져도 조용히 그 기능만 꺼진다.
+
+    `ExecutorServices` 는 미주입이 곧 "그 기능 없음" 이라 **빠뜨려도 예외가
+    나지 않는다** — 그래서 조립부가 실제로 채우는지 여기서 붙잡는다.
+
+    `recall` 과 `artifacts` 는 주소/경로가 주입됐을 때만 만들어지므로
+    (09 Access Enforcement 1 — 자격증명이 아니라 주소가 들어온다) 그 조건을
+    갖춰 놓고 본다. 그러지 않으면 "설계상 None" 과 "배선 누락" 이 구분되지 않는다.
+    """
+    monkeypatch.setenv("MALKUTH_ROOT", ".")
+    monkeypatch.setenv("MALKUTH_EXECUTOR", "")
+    monkeypatch.setenv("MALKUTH_ARTIFACT_ROOT", str(tmp_path))
+    monkeypatch.setenv("MALKUTH_MEMORY_URL", "http://memory.test")
+    monkeypatch.setenv("MALKUTH_MEMORY_TOKEN", "opaque-token")
+
+    executor = await build_executor(load_manifest(RESEARCHER), metrics=Metrics())
+
+    services = executor._services
+    assert services.telemetry is not None, "telemetry 미배선 — 집계가 조용히 멈춘다"
+    assert services.artifacts is not None, "artifacts 미배선 — 산출물 참조 전달이 죽는다"
+    assert services.recall is not None, "recall 미배선 — memoryset 의 회상 선언이 무동작이다"
+    assert callable(services.output_keys), "output_keys 미배선 — output 계약이 사라진다"
+
+
+async def test_the_assembly_turns_on_model_retry(monkeypatch):
+    """재시도는 정책이므로 config 로 옮겼다 — 조립부가 켜는지 함께 본다."""
+    monkeypatch.setenv("MALKUTH_ROOT", ".")
+    monkeypatch.setenv("MALKUTH_EXECUTOR", "")
+
+    executor = await build_executor(load_manifest(RESEARCHER))
+
+    assert executor._config.retry_policies, "재시도 정책이 정의만 되고 켜지지 않았다"

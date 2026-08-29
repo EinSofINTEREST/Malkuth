@@ -11,7 +11,7 @@ import json
 
 import pytest
 
-from malkuth.agentd.executor import Executor
+from malkuth.agentd.executor import Executor, ExecutorServices
 from malkuth.core.agent import TaskStatus
 from malkuth.core.errors import ErrorCode
 from tests.fixtures.builders import make_task
@@ -25,7 +25,7 @@ async def run_with(content: str, keys=(), *, node_id: str | None = "planner"):
         model=FakeModel([text(content)]),
         tools=FakeTools(),
         render=lambda _task: "prompt",
-        output_keys=(lambda _task: keys) if keys else None,
+        services=ExecutorServices(output_keys=(lambda _task: keys) if keys else None),
     )
     return await executor.execute(make_task(node_id=node_id))
 
@@ -161,7 +161,9 @@ async def test_the_same_agent_yields_different_keys_per_node():
             model=FakeModel([text(content)]),
             tools=FakeTools(),
             render=lambda _task: "prompt",
-            output_keys=lambda task: per_node.get(task.template_name, ()),
+            services=ExecutorServices(
+                output_keys=lambda task: per_node.get(task.template_name, ())
+            ),
         )
         return await executor.execute(make_task(node_id=node_id))
 
@@ -181,7 +183,7 @@ async def test_a_direct_request_follows_the_default_template():
         model=FakeModel([text("prose")]),
         tools=FakeTools(),
         render=lambda _task: "prompt",
-        output_keys=lambda task: seen.append(task.template_name) or (),
+        services=ExecutorServices(output_keys=lambda task: seen.append(task.template_name) or ()),
     )
 
     await executor.execute(make_task(node_id=None))
@@ -218,7 +220,7 @@ async def test_the_assembled_executor_carries_the_declared_keys(
     built = await build_executor(manifest_declaring_output)
 
     # 조립부가 콜러블을 넘겨야 태스크마다 템플릿 선언을 볼 수 있다
-    assert callable(built._output_keys)
+    assert callable(built._services.output_keys)
 
 
 # --- 실제 promptset 을 로드해 키를 고른다 -------------------------------------------
@@ -261,7 +263,7 @@ async def test_keys_come_from_the_loaded_promptset(
 
     built = await build_executor(planner_manifest)
 
-    assert tuple(built._output_keys(make_task(node_id=node_id))) == expected
+    assert tuple(built._services.output_keys(make_task(node_id=node_id))) == expected
 
 
 # --- 두 경로가 같은 계약을 낸다 (#233) -----------------------------------------
@@ -274,7 +276,7 @@ async def stream_with(content: str, keys=(), *, node_id: str | None = "planner")
         model=FakeModel([text(content)]),
         tools=FakeTools(),
         render=lambda _task: "prompt",
-        output_keys=(lambda _task: keys) if keys else None,
+        services=ExecutorServices(output_keys=(lambda _task: keys) if keys else None),
     )
     events = [event async for event in executor.stream(make_task(node_id=node_id))]
     return events[-1]

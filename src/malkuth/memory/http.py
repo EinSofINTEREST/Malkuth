@@ -20,6 +20,7 @@ from pydantic import BaseModel, ConfigDict
 
 from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
 from malkuth.core.manifest import MemoryMode
+from malkuth.http_errors import status_for
 from malkuth.memory.entry import MemoryEntry
 from malkuth.modules.memoryset import ChunkSpec, MemoryKind
 
@@ -31,6 +32,10 @@ if TYPE_CHECKING:
 MEMORY_TOKEN_ENV = "MALKUTH_MEMORY_TOKEN"  # noqa: S105 — env 키 이름이지 값이 아니다
 MEMORY_URL_ENV = "MALKUTH_MEMORY_URL"
 """agentd 가 서비스에 닿기 위해 받는 값 — secrets 와 같은 주입 경로다."""
+
+ACCESS_DENIED: dict[str, int] = {ErrorCode.MEM_001: status.HTTP_401_UNAUTHORIZED}
+"""이 서비스만의 매핑 — 토큰이 안 통한 것과 서버 장애를 클라이언트가 갈라야 한다."""
+
 
 DEFAULT_SCAN_LIMIT = 500
 
@@ -152,17 +157,13 @@ def create_app(
 
     @app.exception_handler(MalkuthError)
     async def _structured(_request: Request, err: MalkuthError) -> JSONResponse:
-        """구조화 에러를 상태코드로 옮긴다.
+        """구조화 에러를 상태코드로 옮긴다 — 매핑은 공용 규칙을 따른다 (#234).
 
-        접근 거부(``MEM_001``)는 **401** 이다 — 클라이언트가 거부와 장애를
-        구분해야 재시도 판단이 갈린다.
+        접근 거부(``MEM_001``)만 **401** 로 덮는다: 이 서비스는 불투명 토큰으로
+        접근을 가르므로, 클라이언트가 "토큰이 안 통했다" 와 "서버가 아프다" 를
+        구분해야 재시도 판단이 갈린다 (09 Access Enforcement).
         """
-        if err.code == ErrorCode.MEM_001:
-            http_status = status.HTTP_401_UNAUTHORIZED
-        elif err.retryable:
-            http_status = status.HTTP_503_SERVICE_UNAVAILABLE
-        else:
-            http_status = status.HTTP_400_BAD_REQUEST
+        http_status = status_for(err, overrides=ACCESS_DENIED)
         return JSONResponse(status_code=http_status, content=err.payload().model_dump(mode="json"))
 
     def granted(request: Request) -> AccessToken:

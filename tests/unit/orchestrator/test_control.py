@@ -9,6 +9,7 @@ from __future__ import annotations
 import httpx
 import pytest
 
+from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
 from malkuth.orchestrator.control import create_app
 from malkuth.orchestrator.runstore import InMemoryRunStore, RunRecord, SqliteRunStore
 
@@ -235,3 +236,47 @@ async def test_an_api_drain_actually_stops_the_loop(tmp_path):
     finally:
         driver.close()
         serving.close()
+
+
+# --- 에러 → 상태코드 (#234) ---------------------------------------------------
+
+
+class BrokenStore:
+    """모든 조회가 저장소 오류로 실패하는 대역."""
+
+    def list(self, *, mode: str | None = None):  # noqa: A003, ARG002
+        raise self._boom()
+
+    def get(self, run_id: str):  # noqa: ARG002
+        raise self._boom()
+
+    def request_drain(self, run_id: str) -> bool:  # noqa: ARG002
+        raise self._boom()
+
+    @staticmethod
+    def _boom() -> MalkuthError:
+        return MalkuthError(
+            category=ErrorCategory.STORAGE,
+            code=ErrorCode.STOR_003,
+            message="run store could not be opened",
+        )
+
+
+async def test_a_storage_failure_is_reported_as_server_side():
+    """#234 — 저장소가 깨졌는데 400 을 내리면 운영자가 요청을 의심한다.
+
+    05 의 사고 대응은 4xx/5xx 로 버킷을 가른다. 서버 결함이 4xx 로 새면
+    알림이 울리지 않는다.
+    """
+    async with client_for(create_app(BrokenStore())) as api:
+        response = await api.get("/v1/runs")
+
+    assert response.status_code >= 500
+
+
+async def test_an_unknown_run_is_still_not_found(api):
+    """공용 매핑으로 옮기면서 기존 404 가 유지되어야 한다."""
+    response = await api.post("/v1/runs/nope/drain")
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == ErrorCode.NF_001

@@ -38,6 +38,7 @@ from malkuth.orchestrator.runstore import SqliteRunStore
 if TYPE_CHECKING:
     from malkuth.authoring import InUse
     from malkuth.catalog import Catalog
+    from malkuth.orchestrator.runs import RunService
     from malkuth.runtime.deployments import DeploymentManager
 
 log = structlog.get_logger(__name__)
@@ -112,6 +113,7 @@ def main() -> None:
     if deployments is not None:
         # manager 는 검증에 author 를 쓴다 — 서로를 가리키므로 여기서 잇는다
         deployments.author = author
+    runs = None if deployments is None else _run_service(config, catalog, deployments, store=store)
     log.info(
         "control plane starting",
         port=orchestrator.control_port,
@@ -125,6 +127,7 @@ def main() -> None:
             token=orchestrator.control_token,
             author=author,
             deployments=deployments,
+            runs=runs,
         ),
         host=orchestrator.control_host,
         port=orchestrator.control_port,
@@ -168,6 +171,34 @@ def _deployment_manager(
         memory_url=os.environ.get(MEMORY_URL_ENV),
         memory_tokens=memory_tokens,
     )
+
+
+def _run_service(
+    config: Any, catalog: Catalog, deployments: DeploymentManager, *, store: SqliteRunStore
+) -> RunService:
+    """이 프로세스가 run 을 구동한다 — 노드 호출은 배포된 컨테이너로 라우팅된다 (#244)."""
+    from malkuth.observability.metrics import Metrics
+    from malkuth.orchestrator.checkpoint import build_checkpointer
+    from malkuth.orchestrator.run import RunManager
+    from malkuth.orchestrator.runs import RoutedClients, RunService
+    from malkuth.orchestrator.submit import RunSubmitter
+    from malkuth.runtime.nodes import ControlNodeRuntime
+
+    orchestrator = config.orchestrator
+    submitter = RunSubmitter(
+        runtime=ControlNodeRuntime(clients=RoutedClients(deployments.launcher)),
+        manager=RunManager(
+            max_concurrent_runs=orchestrator.max_concurrent_runs,
+            max_service_runs=orchestrator.max_service_runs,
+            store=store,
+        ),
+        checkpointer=build_checkpointer(
+            orchestrator.checkpointer, url=orchestrator.checkpointer_url
+        ),
+        node_timeout_s=orchestrator.node_timeout_s,
+        metrics=Metrics(),
+    )
+    return RunService(catalog=catalog, deployments=deployments, submitter=submitter, store=store)
 
 
 def is_loopback(host: str) -> bool:

@@ -244,9 +244,18 @@ def cmd_run(args: argparse.Namespace) -> int:
     from malkuth.orchestrator.submit import RunSubmitter
     from malkuth.runtime.nodes import ControlNodeRuntime
 
+    payload = json.loads(args.input) if args.input else {}
+    if getattr(args, "deployment", None):
+        return _run_on_deployment(args, payload)
+    if args.graph is None:
+        emit(
+            {"status": "rejected", "error": "graph path or --deployment is required"},
+            as_json=args.json,
+        )
+        return EXIT_FAILED
+
     root = Path(args.root)
     topology = GraphTopology.model_validate(load_yaml(Path(args.graph)))
-    payload = json.loads(args.input) if args.input else {}
 
     report = validate_root(root, [topology])
     if not report.ok:
@@ -363,6 +372,47 @@ def _run_service(
         as_json=args.json,
     )
     return EXIT_OK if handle.error is None else EXIT_FAILED
+
+
+def _finished_statuses() -> frozenset[str]:
+    """서버 계약에서 끌어온다 — 여기 따로 적으면 `RunStatus` 와 어긋난 채 남는다."""
+    from malkuth.orchestrator.run import RunStatus
+
+    live = (RunStatus.RUNNING, RunStatus.DRAINING)
+    return frozenset(str(s) for s in RunStatus if s not in live)
+
+
+def _run_on_deployment(args: argparse.Namespace, payload: dict[str, Any]) -> int:
+    """배포에 run 을 낸다 — 에이전트 주소를 적지 않는다 (#244).
+
+    control plane 이 즉시 run_id 를 돌려주고, ``--no-wait`` 가 아니면 끝날 때까지
+    ``GET /v1/runs/{id}`` 로 본다. service run 은 끝이 없으므로 기다리지 않는다.
+    """
+    import time
+
+    try:
+        client = _control_client(args)
+        submitted = client.submit_run(
+            args.deployment, payload, mode=getattr(args, "mode", None), run_id=args.run_id
+        )
+        run_id = submitted["run_id"]
+        if getattr(args, "no_wait", False) or submitted.get("mode") == "service":
+            emit(submitted, as_json=args.json)
+            return EXIT_OK
+        deadline = time.monotonic() + args.wait_timeout_s
+        finished = _finished_statuses()
+        current = submitted
+        while current.get("status") not in finished:
+            if time.monotonic() >= deadline:
+                emit({**current, "error": "timed out waiting for the run"}, as_json=args.json)
+                return EXIT_FAILED
+            time.sleep(args.poll_s)
+            current = client.get_run(run_id)
+    except MalkuthError as err:
+        return _report_control_failure(err, as_json=args.json)
+
+    emit(current, as_json=args.json)
+    return EXIT_OK if current.get("status") == "completed" else EXIT_FAILED
 
 
 def _control_clients(args: argparse.Namespace) -> dict[str, Any]:
@@ -516,7 +566,27 @@ def build_parser() -> argparse.ArgumentParser:
     config.set_defaults(handler=cmd_config)
 
     run = subcommands.add_parser("run", help="submit a mission run")
-    run.add_argument("graph", help="path to the graph topology yaml")
+    run.add_argument("graph", nargs="?", default=None, help="path to the graph topology yaml")
+    run.add_argument(
+        "--deployment",
+        default=None,
+        help="submit to a deployment through the control plane instead of driving the run here",
+    )
+    run.add_argument("--no-wait", action="store_true", dest="no_wait")
+    run.add_argument(
+        "--control-url",
+        default=None,
+        dest="control_url",
+        help=f"control plane address for --deployment (default: {DEFAULT_CONTROL_URL})",
+    )
+    run.add_argument(
+        "--control-token",
+        default=None,
+        dest="control_token",
+        help=f"control plane token (defaults to ${CONTROL_TOKEN_ENV})",
+    )
+    run.add_argument("--wait-timeout", type=float, default=600.0, dest="wait_timeout_s")
+    run.add_argument("--poll", type=float, default=1.0, dest="poll_s")
     run.add_argument("--input", default=None, help="initial state as json")
     run.add_argument("--run-id", default=None, dest="run_id")
     run.add_argument(

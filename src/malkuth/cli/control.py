@@ -86,7 +86,14 @@ class ControlClient:
         # 값을 속성에 그대로 두지 않는다 — repr/로그로 새는 경로를 하나 줄인다
         self._headers = {"authorization": f"Bearer {token}"} if token else {}
 
-    def _request(self, method: str, path: str, *, run_scoped: bool = True) -> Any:
+    def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        run_scoped: bool = True,
+        body: dict[str, Any] | None = None,
+    ) -> Any:
         """요청 한 건 — 연결 실패와 서비스 실패를 나눠 옮긴다.
 
         Args:
@@ -97,7 +104,15 @@ class ControlClient:
         """
         url = f"{self._base}{path}"
         try:
-            response = httpx.request(method, url, timeout=self._timeout_s, headers=self._headers)
+            # 본문이 없는 요청에 `json=None` 을 넘기면 httpx 가 리터럴 null 을 싣는다
+            if body is None:
+                response = httpx.request(
+                    method, url, timeout=self._timeout_s, headers=self._headers
+                )
+            else:
+                response = httpx.request(
+                    method, url, timeout=self._timeout_s, headers=self._headers, json=body
+                )
         except httpx.HTTPError as err:
             raise unreachable(self._base, err) from err
 
@@ -110,6 +125,28 @@ class ControlClient:
         query = f"?mode={mode}" if mode else ""
         listed: list[dict[str, Any]] = self._request("GET", f"/v1/runs{query}", run_scoped=False)
         return listed
+
+    def submit_run(
+        self,
+        deployment_id: str,
+        initial_state: dict[str, Any],
+        *,
+        mode: str | None = None,
+        run_id: str | None = None,
+    ) -> dict[str, Any]:
+        """배포에 run 을 낸다 — 주소는 control plane 이 안다 (#244). 즉시 돌아온다."""
+        result: dict[str, Any] = self._request(
+            "POST",
+            "/v1/runs",
+            run_scoped=False,
+            body={
+                "deployment_id": deployment_id,
+                "input": initial_state,
+                "mode": mode,
+                "run_id": run_id,
+            },
+        )
+        return result
 
     def get_run(self, run_id: str) -> dict[str, Any]:
         """run 하나의 상태."""

@@ -16,7 +16,7 @@ import pytest
 import yaml
 
 from malkuth.cli.main import build_parser, cmd_run, run_manager_for
-from malkuth.core.errors import ErrorCode, MalkuthError
+from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
 from malkuth.orchestrator import __main__ as entrypoint
 from malkuth.orchestrator.control import create_app
 from malkuth.orchestrator.runstore import SqliteRunStore
@@ -233,3 +233,65 @@ def test_the_served_author_pins_running_declarations(monkeypatch, tmp_path):
     author = captured["author"]
     assert author.in_use is not None, "in_use 미배선 — 배포/실행 중 선언이 보호되지 않는다"
     assert author.in_use("graph", "research-pipeline") is False  # run 이 없으면 사용 중이 아니다
+
+
+async def test_the_served_app_drives_runs_when_deployments_are_configured(tmp_path, monkeypatch):
+    """#244 — 배포 표면이 열리면 이 프로세스가 구동 프로세스다: resume 이 501 이 아니다.
+
+    라우트 목록이 아니라 **응답**을 본다 — 미지의 run 은 404 (구동자가 그래프를 찾다
+    실패) 이지 501 (구동자 없음) 이 아니어야 한다.
+    """
+    import httpx
+
+    from malkuth.orchestrator.runstore import RunRecord
+    from malkuth.runtime.docker.engine import DockerEngine
+    from malkuth.runtime.launcher import AgentLauncher
+    from tests.fixtures.fake_docker import FakeDockerClient
+
+    store_path = tmp_path / "runs.db"
+    write_config(
+        tmp_path,
+        {
+            "run_store": str(store_path),
+            "deployment_store": str(tmp_path / "deployments.db"),
+            "control_port": 18999,
+        },
+    )
+    monkeypatch.setenv("MALKUTH_ENV", "local")
+    monkeypatch.setenv("MALKUTH_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr(entrypoint, "_setup_observability", lambda: None)
+
+    class NoDockerDeployments:
+        """Docker 데몬 없이 조립만 본다 — launcher 는 대역 위에 둔다."""
+
+        launcher = AgentLauncher(engine=DockerEngine(client=FakeDockerClient()))
+        author = None
+
+        def in_use(self, kind: str, name: str) -> bool:
+            return False
+
+        def get(self, deployment_id: str):
+            raise MalkuthError(
+                category=ErrorCategory.NOT_FOUND, code=ErrorCode.NF_001, message="unknown"
+            )
+
+        async def reattach(self):
+            return []
+
+    monkeypatch.setattr(entrypoint, "_deployment_manager", lambda *a, **k: NoDockerDeployments())
+    served: dict = {}
+    monkeypatch.setattr(
+        entrypoint.uvicorn, "run", lambda app, **_kwargs: served.__setitem__("app", app)
+    )
+    entrypoint.main()
+
+    SqliteRunStore(path=str(store_path)).upsert(
+        RunRecord(run_id="halted", graph="no-such-graph", mode="service", status="halted")
+    )
+    transport = httpx.ASGITransport(app=served["app"])
+    async with httpx.AsyncClient(transport=transport, base_url="http://cp") as api:
+        resumed = await api.post("/v1/runs/halted/resume")
+        submitted = await api.post("/v1/runs", json={"deployment_id": "dep-nope", "input": {}})
+
+    assert resumed.status_code == 404, resumed.text
+    assert submitted.status_code == 404, submitted.text

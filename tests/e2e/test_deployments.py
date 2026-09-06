@@ -225,6 +225,23 @@ def test_deploy_reattach_and_teardown(plane):
     )
     assert "/app/manifest.yaml:false" in mounts and "/app/modules/promptsets:false" in mounts
 
+    # --- run 제출 (#244): 주소를 모르고도 배포에 run 을 내고, GET 으로 완주를 본다
+    status, submitted = api(
+        "POST", "/v1/runs", {"deployment_id": record["deployment_id"], "input": {"query": "e2e"}}
+    )
+    assert status == 202, submitted
+    assert submitted["status"] == "running"
+
+    def finished() -> dict | None:
+        _, current = api("GET", f"/v1/runs/{submitted['run_id']}")
+        return current if current["status"] != "running" else None
+
+    done = until(finished, what="run to finish")
+    assert done["status"] == "completed", done
+    assert done["state"].get("report"), done
+    status, refused = api("POST", "/v1/runs", {"deployment_id": "dep-nope", "input": {}})
+    assert status == 404, refused
+
     # --- 수정 보호: 배포 중인 에이전트는 덮어쓰지 못한다 (#242 in_use ↔ #243)
     manifest = yaml.safe_load((REPO_ROOT / "agents" / "planner" / "manifest.yaml").read_text())
     manifest["metadata"]["version"] = "99.0.0"

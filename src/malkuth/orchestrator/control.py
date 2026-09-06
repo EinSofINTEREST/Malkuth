@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Annotated, Any
 from fastapi import APIRouter, Body, Depends, FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
 from malkuth.core.manifest import AgentManifest
@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from malkuth.authoring import Author
     from malkuth.catalog import Catalog, Listing
     from malkuth.deploy import ValidationReport
+    from malkuth.orchestrator.runs import RunService
     from malkuth.orchestrator.runstore import RunRecord, RunStore
     from malkuth.runtime.deployments import DeploymentManager, DeploymentRecord
 
@@ -83,6 +84,7 @@ def create_app(
     token: str | None = None,
     author: Author | None = None,
     deployments: DeploymentManager | None = None,
+    runs: RunService | None = None,
 ) -> FastAPI:
     """Build the Control Plane app.
 
@@ -97,6 +99,8 @@ def create_app(
             열지 않는다 — 빈 목록을 돌려주면 "선언이 없다" 로 읽힌다.
         deployments: Turns graphs into running containers (#243). 없으면 배포
             라우트를 열지 않는다. 기동 시 살아 있는 컨테이너에 다시 붙는다.
+        runs: Submits and resumes runs against deployments (#244). 있으면
+            ``resume`` 콜백보다 우선한다 — 이 프로세스가 구동 프로세스다.
         author: Validates and writes graphs and manifests (#242). 없으면 쓰기
             라우트를 열지 않는다 — 읽기 전용 배포가 있을 수 있다.
         token: Bearer token every request must present (#241). None 이면 검사하지
@@ -113,7 +117,11 @@ def create_app(
         # 서버의 이벤트 루프 안에서 해야 health 감시 태스크가 살아남는다
         if deployments is not None:
             await deployments.reattach()
-        yield
+        try:
+            yield
+        finally:
+            if runs is not None:
+                await runs.close()
 
     app = FastAPI(title="Malkuth Control Plane", lifespan=lifespan)
     # 읽기도 보호한다 — 카탈로그에는 env_allowlist 같은 운영 정보가 있다
@@ -169,7 +177,13 @@ def create_app(
         record = store.get(run_id)
         if record is None:
             raise unknown_run(run_id)
-        return view_of(record).model_dump()
+        view = view_of(record).model_dump()
+        result = runs.result_of(run_id) if runs is not None else None
+        if result is not None:
+            # 완주한 mission 의 최종 state — 이 프로세스가 구동한 것만 안다
+            view["state"] = result.state
+            view["error"] = result.error.payload().model_dump() if result.error else None
+        return view
 
     @api.post("/v1/runs/{run_id}/drain")
     async def drain_run(run_id: str) -> dict[str, Any]:
@@ -195,6 +209,9 @@ def create_app(
         """
         if store.get(run_id) is None:
             raise unknown_run(run_id)
+        if runs is not None:
+            resumed = await runs.resume(run_id)
+            return {**view_of(resumed).model_dump(), "status": "resumed"}
         if resume is None:
             # 조용히 성공하면 운영자가 재개됐다고 믿고 손을 뗀다
             return JSONResponse(  # type: ignore[return-value]
@@ -217,6 +234,8 @@ def create_app(
         _mount_authoring(api, author)
     if deployments is not None:
         _mount_deployments(api, deployments)
+    if runs is not None:
+        _mount_runs(api, runs)
 
     app.include_router(api)
     return app
@@ -444,6 +463,25 @@ def _mount_deployments(api: APIRouter, deployments: DeploymentManager) -> None:
     @api.delete("/v1/deployments/{deployment_id}")
     async def delete_deployment(deployment_id: str) -> dict[str, Any]:
         return _deployment_view(await deployments.teardown(deployment_id))
+
+
+class RunSubmission(BaseModel):
+    deployment_id: str
+    input: dict[str, Any] = Field(default_factory=dict)
+    mode: str | None = None
+    run_id: str | None = None
+
+
+def _mount_runs(api: APIRouter, runs: RunService) -> None:
+    """run 제출 — 주소는 배포가 안다 (#244). 제출은 즉시 돌아온다."""
+
+    @api.post("/v1/runs", status_code=status.HTTP_202_ACCEPTED)
+    async def submit_run(body: Annotated[Any, Body()]) -> dict[str, Any]:
+        request = _parsed(body, RunSubmission)
+        record = await runs.submit(
+            request.deployment_id, request.input, mode=request.mode, run_id=request.run_id
+        )
+        return view_of(record).model_dump()
 
 
 __all__ = ["RunView", "create_app", "unknown_run", "view_of"]

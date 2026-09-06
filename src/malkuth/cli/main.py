@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from malkuth.catalog import MODULE_TYPES, Catalog, load_yaml
-from malkuth.cli.control import DEFAULT_CONTROL_URL
+from malkuth.cli.control import CONTROL_TOKEN_ENV, DEFAULT_CONTROL_URL
 from malkuth.cli.integrity import (
     dangling_module_refs,
     ghost_containers,
@@ -425,7 +425,9 @@ def _control_client(args: argparse.Namespace) -> Any:
     """이 명령이 말할 Control Plane — 주소는 플래그 또는 기본값."""
     from malkuth.cli.control import ControlClient
 
-    return ControlClient(getattr(args, "control_url", None) or DEFAULT_CONTROL_URL)
+    # 빈 문자열은 미설정과 같게 — --agent-token 과 같은 규칙
+    token = getattr(args, "control_token", None) or os.environ.get(CONTROL_TOKEN_ENV) or None
+    return ControlClient(getattr(args, "control_url", None) or DEFAULT_CONTROL_URL, token=token)
 
 
 def _report_control_failure(err: MalkuthError, *, as_json: bool) -> int:
@@ -593,6 +595,12 @@ def build_parser() -> argparse.ArgumentParser:
             default=None,
             dest="control_url",
             help=f"control plane address (default: {DEFAULT_CONTROL_URL})",
+        )
+        command.add_argument(
+            "--control-token",
+            default=None,
+            dest="control_token",
+            help=f"control plane token (defaults to ${CONTROL_TOKEN_ENV})",
         )
         command.set_defaults(handler=handler)
 

@@ -14,6 +14,7 @@ Control Plane 을 프로세스로 실행한다 — ``python -m malkuth.orchestra
 
 from __future__ import annotations
 
+import ipaddress
 import os
 from pathlib import Path
 
@@ -74,6 +75,15 @@ def main() -> None:
         # 구분되지 않으므로 기동을 거부한다
         raise config_missing_store()
 
+    if orchestrator.control_token is None:
+        if not is_loopback(orchestrator.control_host):
+            # 파일을 쓰고 컨테이너를 띄우는 표면을 무인증으로 밖에 열지 않는다
+            raise config_missing_token(orchestrator.control_host)
+        log.warning(
+            "control plane has no token — allowed only because it binds to loopback",
+            host=orchestrator.control_host,
+        )
+
     store = SqliteRunStore(path=orchestrator.run_store)
     # 설정의 registry.roots 는 상대 경로다 — 작업 디렉토리가 아니라 레포 루트 기준
     root = Path(os.environ.get(ROOT_ENV, ".")).resolve()
@@ -85,10 +95,32 @@ def main() -> None:
         repo_root=str(root),
     )
     uvicorn.run(
-        create_app(store, catalog=catalog),
+        create_app(store, catalog=catalog, token=orchestrator.control_token),
         host=orchestrator.control_host,
         port=orchestrator.control_port,
         log_config=None,
+    )
+
+
+def is_loopback(host: str) -> bool:
+    """bind 주소가 loopback 인가 — 이것만이 무인증을 허용하는 유일한 근거다."""
+    if host in ("localhost", "::1"):
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def config_missing_token(host: str) -> Exception:
+    """loopback 밖에 무인증으로 열면 누구나 컨테이너를 띄울 수 있다 — CFG_001 로 막는다."""
+    from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
+
+    return MalkuthError(
+        category=ErrorCategory.CONFIG,
+        code=ErrorCode.CFG_001,
+        message="control plane bound outside loopback requires orchestrator.control_token",
+        details={"setting": "orchestrator.control_token", "host": host},
     )
 
 

@@ -123,6 +123,33 @@ async def test_the_first_healthy_check_promotes_to_ready():
     await agents.stop_all()
 
 
+async def test_a_failed_first_check_does_not_promote():
+    """#243 실 배포에서 드러났다 — 첫 확인이 NET_001 로 실패했는데 Ready 가 됐다.
+
+    임계 미만의 실패는 상태를 STARTING 에 두므로, 상태만 보고 올리면 실패도
+    성공으로 읽힌다. 확인 한 번 뒤 루프를 멈춰 두고 상태를 본다.
+    """
+    agents = launcher(StepSleep(0))
+    launched, probe = await start_with(agents, [sick()])
+
+    await until(lambda: probe.calls >= 1)
+    await spin(3)
+
+    assert launched.lifecycle.state is AgentState.STARTING
+    assert not launched.lifecycle.accepts_tasks
+    await agents.stop_all()
+
+
+async def test_the_first_success_after_a_failure_promotes():
+    agents = launcher(StepSleep(1))
+    launched, probe = await start_with(agents, [sick(), healthy()])
+
+    await until(lambda: launched.lifecycle.state is AgentState.READY)
+
+    assert probe.calls == 2
+    await agents.stop_all()
+
+
 async def test_repeated_failures_mark_the_agent_unhealthy():
     """02 Rule 3 — 3회 연속 실패가 Unhealthy 다."""
     # 통과 3회 = 확인 4회 (첫 확인은 대기 전이다). 더 돌면 대역이 다시

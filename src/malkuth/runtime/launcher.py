@@ -240,7 +240,7 @@ class AgentLauncher:
             interval_s=self.health_interval_s,
             metrics=self.metrics,
             sleep=self.health_sleep,
-            on_state=lambda state: self._promote(launched, state),
+            on_state=lambda state, healthy: self._promote(launched, state, healthy=healthy),
         )
         self._monitors[launched.agent, launched.replica] = asyncio.create_task(
             self._poll(launched, monitor)
@@ -359,15 +359,18 @@ class AgentLauncher:
         with contextlib.suppress(asyncio.CancelledError):
             await task
 
-    def _promote(self, launched: LaunchedAgent, state: AgentState) -> None:
-        """첫 health 성공을 Ready 로 올린다.
+    def _promote(self, launched: LaunchedAgent, state: AgentState, *, healthy: bool) -> None:
+        """첫 health **성공**을 Ready 로 올린다.
 
         02 Rule 2 — 기동만으로 Ready 를 선언하면 `initialize()` 가 끝내
         실패한 컨테이너가 태스크를 받는다. 그 판정은 monitor 가 아니라
         **runtime 이** 한다 (lifecycle 은 성공을 Ready 로 올리지 않는다).
+        임계 미만의 실패는 상태를 STARTING 에 두므로 상태만 보면 성공과
+        구분되지 않는다 — 성공 여부를 따로 본다.
         """
         if state is AgentState.STARTING:
-            launched.lifecycle.transition(AgentState.READY)
+            if healthy:
+                launched.lifecycle.transition(AgentState.READY)
             return
         if state is AgentState.UNHEALTHY:
             self._schedule_restart(launched)

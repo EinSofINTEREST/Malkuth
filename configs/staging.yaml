@@ -35,6 +35,7 @@ registry:
     memorysets: ./modules/memorysets
     agents: ./agents
     graphs: ./graphs
+    groups: ./groups
 
 memory:
   backend: sqlite

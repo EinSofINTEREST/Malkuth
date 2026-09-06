@@ -225,11 +225,12 @@ def _mount_catalog(app: FastAPI, catalog: Catalog) -> None:
 
     @app.get("/v1/modules/{module_type}")
     async def list_modules(module_type: str) -> dict[str, Any]:
+        found = catalog.modules(module_type)
         return {
             "items": [
-                {"name": name, "versions": list(versions)}
-                for name, versions in catalog.modules(module_type).items()
-            ]
+                {"name": name, "versions": list(versions)} for name, versions in found.items.items()
+            ],
+            "problems": [asdict(problem) for problem in found.problems],
         }
 
     @app.get("/v1/modules/{module_type}/{name}/{version}")

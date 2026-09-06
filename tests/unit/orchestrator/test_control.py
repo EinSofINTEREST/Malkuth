@@ -375,3 +375,17 @@ async def test_without_a_catalog_the_routes_do_not_exist(api):
     assert (
         "error" not in response.json() or response.json()["error"].get("code") != ErrorCode.NF_001
     )
+
+
+async def test_module_listing_reports_broken_versions(store, tmp_path):
+    """게시되지 않은 것을 조용히 빼면 UI 는 그 버전이 왜 안 보이는지 모른다."""
+    from malkuth.catalog import Catalog
+
+    (tmp_path / "modules" / "promptsets" / "ghost" / "0.1.0").mkdir(parents=True)
+    for d in ("agents", "graphs", "groups"):
+        (tmp_path / d).mkdir()
+    async with client_for(create_app(store, catalog=Catalog.under(tmp_path))) as api:
+        body = (await api.get("/v1/modules/promptsets")).json()
+
+    assert body["items"] == []
+    assert body["problems"] and "ghost" in body["problems"][0]["path"]

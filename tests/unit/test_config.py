@@ -75,13 +75,11 @@ def test_registry_roots_cover_every_ref_type():
     """해석 루트가 빠진 ref 타입은 배포 검증에서 터진다."""
     roots = MalkuthConfig().registry.roots
 
-    assert set(roots.model_dump()) == {
-        "skillsets",
-        "promptsets",
-        "memorysets",
-        "agents",
-        "graphs",
-    }
+    declared = set(roots.model_dump())
+    assert {"skillsets", "promptsets", "memorysets", "agents", "graphs"} <= declared
+    # groups 는 ref 타입이 아니라 선언 루트다 — agents 루트에서 유도하면 agents 를
+    # 옮길 때 그룹 조회가 엉뚱한 곳을 본다 (#247 리뷰)
+    assert "groups" in declared
 
 
 # --- 실패 경로 ----------------------------------------------------------------

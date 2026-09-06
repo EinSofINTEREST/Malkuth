@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
 from malkuth.memory.backend import create_store
 from malkuth.memory.http import TokenRegistry, create_app
 from malkuth.memory.providers import build_index_registry
@@ -113,8 +114,23 @@ def build_deployment(
     from malkuth.catalog import Catalog
 
     catalog = Catalog.under(root)
-    manifests = catalog.agents().items
-    groups = catalog.groups().items
+    agents, groups_found = catalog.agents(), catalog.groups()
+    problems = [*agents.problems, *groups_found.problems]
+    if problems:
+        # 깨진 에이전트는 토큰을 못 받고, 깨진 그룹은 멀쩡한 에이전트의 group
+        # space 를 지운다 — 불완전한 카탈로그로 서비스를 띄우지 않는다
+        raise MalkuthError(
+            category=ErrorCategory.CONFIG,
+            code=ErrorCode.CFG_001,
+            message="memory service cannot start with unreadable declarations",
+            details={
+                "problems": [
+                    {"path": p.path, "code": p.code, "message": p.message} for p in problems
+                ]
+            },
+        )
+    manifests = agents.items
+    groups = groups_found.items
     loader = MemorysetLoader(ModuleRegistry.under(root))
 
     embedding, chunk = _embedding_source(manifests, groups, loader)

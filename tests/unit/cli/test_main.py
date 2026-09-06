@@ -29,7 +29,20 @@ def workspace(tmp_path: Path) -> Path:
     (tmp_path / "agents" / "solo").mkdir(parents=True)
     (tmp_path / "groups").mkdir()
     (tmp_path / "graphs").mkdir()
-    (tmp_path / "modules" / "promptsets" / "solo" / "0.1.0").mkdir(parents=True)
+    # 빈 디렉토리는 게시된 모듈이 아니다 — 문서까지 있어야 ref 가 해석된다 (#240 리뷰)
+    solo = tmp_path / "modules" / "promptsets" / "solo" / "0.1.0"
+    solo.mkdir(parents=True)
+    (solo / "promptset.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "apiVersion": "malkuth/v1",
+                "kind": "Promptset",
+                "metadata": {"name": "solo", "version": "0.1.0"},
+                "spec": {"engine": "jinja2", "templates": {"default": {"file": "t.j2"}}},
+            }
+        ),
+        encoding="utf-8",
+    )
 
     (tmp_path / "agents" / "solo" / "manifest.yaml").write_text(
         yaml.safe_dump(
@@ -433,3 +446,28 @@ def test_every_agent_shares_the_run_token(monkeypatch):
     )
 
     assert {c._token for c in clients.values()} == {"SHARED"}
+
+
+# --- 깨진 선언은 검증에서 빠진 것이지 통과한 것이 아니다 (#247 리뷰) ------------------
+
+
+def test_validate_fails_when_an_unreferenced_agent_is_broken(workspace):
+    """참조되지 않는 깨진 에이전트가 있어도 validate 가 통과하면 저장소는 불완전한 채 배포된다."""
+    (workspace / "agents" / "broken").mkdir()
+    (workspace / "agents" / "broken" / "manifest.yaml").write_text(
+        "kind: Agent\n", encoding="utf-8"
+    )
+
+    report = validate_root(workspace, [])
+
+    assert not report.ok
+    finding = next(f for f in report.findings if f.check == "catalog")
+    assert finding.details["path"].endswith("agents/broken/manifest.yaml")
+
+
+def test_validate_fails_when_a_module_directory_has_no_document(workspace):
+    (workspace / "modules" / "promptsets" / "ghost" / "0.1.0").mkdir(parents=True)
+
+    report = validate_root(workspace, [])
+
+    assert any(f.check == "catalog" and "ghost" in f.details["path"] for f in report.findings)

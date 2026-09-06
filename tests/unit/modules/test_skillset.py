@@ -264,6 +264,7 @@ def test_skillset_supports_intra_package_imports(tmp_path):
         memorysets=tmp_path,
         agents=tmp_path,
         graphs=tmp_path,
+        groups=tmp_path,
     )
 
     loaded = SkillsetLoader(ModuleRegistry(roots)).load("skillsets/web-search@0.1.0")

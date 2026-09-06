@@ -63,7 +63,7 @@ def load_yaml(path: Path) -> dict[str, Any]:
 
     try:
         document = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError) as err:
+    except (OSError, UnicodeError, yaml.YAMLError) as err:
         raise config_error("cannot read yaml document", path=str(path)) from err
 
     if not isinstance(document, dict):
@@ -104,19 +104,58 @@ def _parse[T: BaseModel](path: Path, model: type[T]) -> T:
         raise _invalid(path, err) from err
 
 
+def _mismatch(path: Path, *, declared: str, located: str) -> MalkuthError:
+    """선언된 이름과 파일 위치가 다르다 — 04 Registry 3 의 integrity 위반."""
+    return MalkuthError(
+        category=ErrorCategory.VALIDATION,
+        code=ErrorCode.VAL_002,
+        message="declared name does not match its location",
+        details={"path": str(path), "declared": declared, "located": located},
+    )
+
+
+def _checked[T: BaseModel](
+    path: Path, model: type[T], key: Callable[[T], str], *, located: str
+) -> T:
+    parsed = _parse(path, model)
+    if key(parsed) != located:
+        raise _mismatch(path, declared=key(parsed), located=located)
+    return parsed
+
+
 def _collect[T: BaseModel](
-    paths: Iterable[Path], model: type[T], key: Callable[[T], str]
+    paths: Iterable[Path],
+    model: type[T],
+    key: Callable[[T], str],
+    *,
+    located: Callable[[Path], str],
 ) -> Listing[T]:
+    """파싱해 이름으로 묶는다 — **위치가 곧 정체성**이다.
+
+    목록의 키는 파일 위치(디렉토리/파일명)에서 오고, 선언 안의 이름이 그것과
+    다르면 깨진 선언으로 보고한다. 그래야 목록의 키로 단건 조회가 되고,
+    같은 이름을 선언한 두 파일이 서로를 조용히 덮어쓰지 못한다.
+    """
     items: dict[str, T] = {}
     problems: list[Problem] = []
     for path in sorted(paths):
         try:
             parsed = _parse(path, model)
+            if key(parsed) != located(path):
+                raise _mismatch(path, declared=key(parsed), located=located(path))
         except MalkuthError as err:
             problems.append(Problem(path=str(path), code=err.code, message=err.message))
             continue
-        items[key(parsed)] = parsed
+        items[located(path)] = parsed
     return Listing(items=items, problems=tuple(problems))
+
+
+@dataclass(frozen=True)
+class ModuleListing:
+    """Published module versions per name, plus the ones that failed integrity."""
+
+    items: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    problems: tuple[Problem, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -154,67 +193,94 @@ class Catalog:
     # --- agents ----------------------------------------------------------------
 
     def agents(self) -> Listing[AgentManifest]:
-        return _collect(self.roots.agents.glob("*/manifest.yaml"), AgentManifest, lambda m: m.name)
+        return _collect(
+            self.roots.agents.glob("*/manifest.yaml"),
+            AgentManifest,
+            lambda m: m.name,
+            located=lambda path: path.parent.name,
+        )
 
     def agent(self, name: str) -> AgentManifest:
         path = self.roots.agents / name / "manifest.yaml"
         if not path.is_file():
             raise not_found("agent", name)
-        return _parse(path, AgentManifest)
+        return _checked(path, AgentManifest, lambda m: m.name, located=name)
 
     # --- graphs ----------------------------------------------------------------
 
     def graphs(self) -> Listing[GraphTopology]:
-        return _collect(self.roots.graphs.glob("*.yaml"), GraphTopology, lambda g: g.metadata.name)
+        return _collect(
+            self.roots.graphs.glob("*.yaml"),
+            GraphTopology,
+            lambda g: g.metadata.name,
+            located=lambda path: path.stem,
+        )
 
     def graph(self, name: str) -> GraphTopology:
         path = self.roots.graphs / f"{name}.yaml"
         if not path.is_file():
             raise not_found("graph", name)
-        return _parse(path, GraphTopology)
+        return _checked(path, GraphTopology, lambda g: g.metadata.name, located=name)
 
     # --- groups ----------------------------------------------------------------
 
     def groups(self) -> Listing[GroupManifest]:
         return _collect(
-            self._groups_root().glob("*.yaml"), GroupManifest, lambda g: g.metadata.name
+            self.roots.groups.glob("*.yaml"),
+            GroupManifest,
+            lambda g: g.metadata.name,
+            located=lambda path: path.stem,
         )
 
     def group(self, name: str) -> GroupManifest:
-        path = self._groups_root() / f"{name}.yaml"
+        path = self.roots.groups / f"{name}.yaml"
         if not path.is_file():
             raise not_found("group", name)
-        return _parse(path, GroupManifest)
-
-    def _groups_root(self) -> Path:
-        # 그룹은 registry 루트가 아니다 — 01 의 배치는 `groups/` 가 `agents/` 와 형제다
-        return self.roots.agents.parent / "groups"
+        return _checked(path, GroupManifest, lambda g: g.metadata.name, located=name)
 
     # --- modules ---------------------------------------------------------------
 
     def module_refs(self) -> frozenset[str]:
-        """게시된 모든 모듈 ref — 배포 검증의 `resolvable_refs` 입력."""
+        """게시된 모든 모듈 ref — 배포 검증의 `resolvable_refs` 입력.
+
+        **무결성을 통과한 것만** 게시한다. 디렉토리만 있고 문서가 깨진 ref 를
+        해석 가능으로 넘기면 배포 검증은 통과하고 로드에서야 실패한다.
+        """
         refs: set[str] = set()
         for module_type in MODULE_TYPES:
-            for name, versions in self.modules(module_type).items():
+            for name, versions in self.modules(module_type).items.items():
                 refs.update(f"{module_type}/{name}@{version}" for version in versions)
         return frozenset(refs)
 
-    def modules(self, module_type: str) -> dict[str, tuple[str, ...]]:
-        """타입별 모듈 이름 → 게시된 버전들.
+    def modules(self, module_type: str) -> ModuleListing:
+        """타입별 모듈 이름 → 게시된 버전들 (+ 깨진 것).
 
-        디렉토리 구조가 ``{type}/{name}/{version}/`` 이므로 경로에서 복원한다.
+        디렉토리 구조가 ``{type}/{name}/{version}/`` 이므로 경로에서 후보를 찾고,
+        각 문서를 실제로 읽어 ``kind``/``name``/``version`` 이 맞는지 본다 —
+        빈 디렉토리나 깨진 문서는 게시된 것이 아니다.
         """
         if module_type not in MODULE_TYPES:
             raise not_found("module type", module_type)
         type_root = self.roots.for_type(module_type)
         if not type_root.is_dir():
-            return {}
+            return ModuleListing()
+        registry = ModuleRegistry(self.roots)
         found: dict[str, list[str]] = {}
+        problems: list[Problem] = []
         for version_dir in sorted(type_root.glob("*/*")):
-            if version_dir.is_dir():
-                found.setdefault(version_dir.parent.name, []).append(version_dir.name)
-        return {name: tuple(versions) for name, versions in found.items()}
+            if not version_dir.is_dir():
+                continue
+            ref = f"{module_type}/{version_dir.parent.name}@{version_dir.name}"
+            try:
+                registry.load_document(ref)
+            except MalkuthError as err:
+                problems.append(Problem(path=str(version_dir), code=err.code, message=err.message))
+                continue
+            found.setdefault(version_dir.parent.name, []).append(version_dir.name)
+        return ModuleListing(
+            items={name: tuple(versions) for name, versions in found.items()},
+            problems=tuple(problems),
+        )
 
     def module(self, module_type: str, name: str, version: str) -> dict[str, Any]:
         """모듈 선언 문서 — 무결성 검사(`kind`/`name`/`version` 일치)를 거친다."""
@@ -230,4 +296,12 @@ class Catalog:
         return document
 
 
-__all__ = ["MODULE_TYPES", "Catalog", "Listing", "Problem", "load_yaml", "not_found"]
+__all__ = [
+    "MODULE_TYPES",
+    "Catalog",
+    "Listing",
+    "ModuleListing",
+    "Problem",
+    "load_yaml",
+    "not_found",
+]

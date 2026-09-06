@@ -130,7 +130,7 @@ def test_module_refs_are_recovered_from_the_directory_layout(workspace):
 def test_a_missing_module_root_yields_nothing(tmp_path):
     (tmp_path / "agents").mkdir()
     assert Catalog.under(tmp_path).module_refs() == frozenset()
-    assert Catalog.under(tmp_path).modules("skillsets") == {}
+    assert Catalog.under(tmp_path).modules("skillsets").items == {}
 
 
 def test_modules_group_versions_by_name(workspace):
@@ -144,7 +144,7 @@ def test_modules_group_versions_by_name(workspace):
         },
     )
 
-    assert Catalog.under(workspace).modules("promptsets") == {"solo": ("0.1.0", "0.2.0")}
+    assert Catalog.under(workspace).modules("promptsets").items == {"solo": ("0.1.0", "0.2.0")}
 
 
 def test_a_module_document_is_integrity_checked(workspace):
@@ -197,3 +197,109 @@ def test_the_real_repository_has_no_broken_declarations():
     for found in (catalog.agents(), catalog.graphs(), catalog.groups()):
         assert found.problems == (), [p.path for p in found.problems]
     assert catalog.agents().items and catalog.graphs().items and catalog.groups().items
+
+
+# --- 리뷰 반영 (#247) ------------------------------------------------------------
+
+
+def test_the_listing_key_is_the_location_not_the_declared_name(workspace):
+    """`agents/foo/manifest.yaml` 이 `name: bar` 를 선언하면 목록 키 `bar` 로는
+    단건 조회가 안 된다 — 위치가 정체성이므로 그런 선언은 깨진 것이다."""
+    write(workspace / "agents" / "foo" / "manifest.yaml", agent("bar"))
+
+    found = Catalog.under(workspace).agents()
+
+    assert "bar" not in found.items and "foo" not in found.items
+    problem = next(p for p in found.problems if p.path.endswith("agents/foo/manifest.yaml"))
+    assert problem.code == ErrorCode.VAL_002
+    assert "location" in problem.message
+
+
+def test_a_single_lookup_rejects_a_name_mismatch_too(workspace):
+    write(workspace / "agents" / "foo" / "manifest.yaml", agent("bar"))
+
+    with pytest.raises(MalkuthError) as excinfo:
+        Catalog.under(workspace).agent("foo")
+
+    assert excinfo.value.details == {
+        "path": str(workspace / "agents" / "foo" / "manifest.yaml"),
+        "declared": "bar",
+        "located": "foo",
+    }
+
+
+def test_two_files_cannot_silently_overwrite_each_other(workspace):
+    """같은 이름을 선언한 두 파일 — 위치 키를 쓰면 둘 다 살아남거나 둘 다 깨진다."""
+    write(workspace / "agents" / "alpha2" / "manifest.yaml", agent("alpha"))
+
+    found = Catalog.under(workspace).agents()
+
+    assert found.items["alpha"].metadata.version == "0.1.0", "원래 alpha 가 덮어써졌다"
+    assert any(p.path.endswith("alpha2/manifest.yaml") for p in found.problems)
+
+
+def test_graphs_and_groups_use_the_filename_stem_as_identity(workspace):
+    write(
+        workspace / "groups" / "research.yaml",
+        {
+            "apiVersion": "malkuth/v1",
+            "kind": "Group",
+            "metadata": {"name": "science"},
+            "spec": {},
+        },
+    )
+
+    found = Catalog.under(workspace).groups()
+
+    assert found.items == {}
+    assert found.problems[0].path.endswith("groups/research.yaml")
+
+
+def test_non_utf8_is_a_problem_not_a_crash(workspace):
+    (workspace / "agents" / "latin").mkdir()
+    (workspace / "agents" / "latin" / "manifest.yaml").write_bytes(b"name: caf\xe9\n")
+
+    found = Catalog.under(workspace).agents()
+
+    assert sorted(found.items) == ["alpha", "beta"]
+    assert any(p.code == ErrorCode.CFG_001 and "latin" in p.path for p in found.problems)
+
+
+def test_an_empty_module_directory_is_not_published(workspace):
+    """디렉토리만 있고 문서가 없는 ref 를 해석 가능으로 넘기면 배포 검증은 통과하고
+    로드에서야 실패한다 — 그 ref 는 게시된 것이 아니다."""
+    (workspace / "modules" / "promptsets" / "ghost" / "0.1.0").mkdir(parents=True)
+
+    catalog = Catalog.under(workspace)
+
+    assert "promptsets/ghost@0.1.0" not in catalog.module_refs()
+    listed = catalog.modules("promptsets")
+    assert "ghost" not in listed.items
+    assert any("ghost" in p.path and p.code == ErrorCode.MOD_001 for p in listed.problems)
+
+
+def test_a_module_whose_document_contradicts_its_path_is_not_published(workspace):
+    write(
+        workspace / "modules" / "promptsets" / "solo" / "0.9.0" / "promptset.yaml",
+        {
+            "apiVersion": "malkuth/v1",
+            "kind": "Promptset",
+            "metadata": {"name": "solo", "version": "0.1.0"},
+            "spec": {"engine": "jinja2", "templates": {"default": {"file": "t.j2"}}},
+        },
+    )
+
+    listed = Catalog.under(workspace).modules("promptsets")
+
+    assert listed.items == {"solo": ("0.1.0",)}
+    assert any("0.9.0" in p.path for p in listed.problems)
+
+
+def test_groups_have_their_own_root(tmp_path):
+    """agents 루트를 옮겨도 groups 는 따라가지 않는다 — 명시 루트다."""
+    from malkuth.modules.registry import RegistryRoots
+
+    roots = RegistryRoots.under(tmp_path)
+    moved = RegistryRoots(**{**roots.__dict__, "agents": tmp_path / "elsewhere"})
+
+    assert Catalog(roots=moved).roots.groups == tmp_path / "groups"

@@ -48,11 +48,11 @@
           <label>목표 <input name="goal" required /></label>
           <label>state schema <input name="state_schema" required /></label>
         </fieldset>
-        <fieldset id="graph-service" hidden>
+        <fieldset id="graph-service" hidden disabled>
           <legend>service idle 정책</legend>
-          <label>min_delay_s <input name="idle_min" type="number" value="30" /></label>
-          <label>max_delay_s <input name="idle_max" type="number" value="600" /></label>
-          <label>max_failure_streak <input name="failure_streak" type="number" value="5" /></label>
+          <label>min_delay_s <input name="idle_min" type="number" min="1" step="1" value="30" required /></label>
+          <label>max_delay_s <input name="idle_max" type="number" min="1" step="1" value="600" required /></label>
+          <label>max_failure_streak <input name="failure_streak" type="number" min="1" step="1" value="5" required /></label>
         </fieldset>
         <fieldset>
           <legend>노드 <button type="button" data-add="node">+ 노드</button></legend>

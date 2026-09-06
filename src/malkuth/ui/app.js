@@ -101,7 +101,14 @@ function fillSelect(selector, pairs, keep = true) {
 // --- 그래프 편집기 (#242) --------------------------------------------------------
 
 const graphForm = $("#graph-form");
-graphForm.mode.addEventListener("change", () => { $("#graph-service").hidden = graphForm.mode.value !== "service"; });
+function syncServiceFields(isService) {
+  // hidden 만으로는 부족하다 — required 필드가 mission 모드에서도 폼 제출을 막는다.
+  // disabled 는 constraint validation 과 값 읽기 양쪽에서 그 필드를 뺀다
+  const fieldset = $("#graph-service");
+  fieldset.hidden = !isService;
+  fieldset.disabled = !isService;
+}
+graphForm.mode.addEventListener("change", () => syncServiceFields(graphForm.mode.value === "service"));
 
 const rowFactories = {
   node: () => [el("input", { name: "node_id", placeholder: "planner" }), el("select", { name: "node_agent" })],
@@ -149,7 +156,7 @@ function showGraph(doc) {
   const f = graphForm;
   f.name.value = doc.metadata.name; f.version.value = doc.metadata.version; f.description.value = doc.metadata.description || "";
   f.mode.value = doc.spec.mode; f.goal.value = doc.spec.goal || ""; f.state_schema.value = doc.spec.state?.schema || "";
-  $("#graph-service").hidden = doc.spec.mode !== "service";
+  syncServiceFields(doc.spec.mode === "service");
   if (doc.spec.service) { f.idle_min.value = doc.spec.service.idle.min_delay_s; f.idle_max.value = doc.spec.service.idle.max_delay_s; f.failure_streak.value = doc.spec.service.max_failure_streak ?? 5; }
   for (const kind of Object.keys(tables)) $(`${tables[kind]} tbody`).replaceChildren();
   (doc.spec.nodes || []).forEach((n) => addRow("node", [n.id, n.agent]));

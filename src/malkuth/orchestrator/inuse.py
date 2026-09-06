@@ -10,12 +10,17 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import structlog
+
+from malkuth.core.errors import MalkuthError
 from malkuth.orchestrator.run import RunStatus
 
 if TYPE_CHECKING:
     from malkuth.authoring import InUse
     from malkuth.catalog import Catalog
     from malkuth.orchestrator.runstore import RunStore
+
+log = structlog.get_logger(__name__)
 
 ACTIVE = frozenset({str(RunStatus.RUNNING), str(RunStatus.DRAINING)})
 """드레인 중도 아직 그 그래프로 돈다 — 끝날 때까지 선언은 고정이다."""
@@ -38,7 +43,14 @@ def run_backed(store: RunStore, catalog: Catalog) -> InUse:
         for graph_name in active_graphs:
             try:
                 graph = catalog.graph(graph_name)
-            except Exception:  # noqa: BLE001 — 깨진 그래프는 카탈로그가 따로 보고한다
+            except MalkuthError as err:
+                # 실행 중 run 의 그래프가 안 읽힌다 — 그 자체가 운영자가 알아야 할 일이다.
+                # 여기서는 보호를 포기하지 않고 그 그래프만 건너뛴다
+                log.warning(
+                    "running graph cannot be read for in-use check",
+                    graph=graph_name,
+                    error_code=err.code,
+                )
                 continue
             if any(n.agent is not None and _agent_of(n.agent) == name for n in graph.spec.nodes):
                 return True

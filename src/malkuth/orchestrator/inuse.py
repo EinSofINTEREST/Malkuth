@@ -12,11 +12,11 @@ from typing import TYPE_CHECKING
 
 import structlog
 
+from malkuth.authoring import InUse
 from malkuth.core.errors import MalkuthError
 from malkuth.orchestrator.run import RunStatus
 
 if TYPE_CHECKING:
-    from malkuth.authoring import InUse
     from malkuth.catalog import Catalog
     from malkuth.orchestrator.runstore import RunStore
 
@@ -59,4 +59,13 @@ def run_backed(store: RunStore, catalog: Catalog) -> InUse:
     return in_use
 
 
-__all__ = ["ACTIVE", "run_backed"]
+def any_of(*predicates: InUse) -> InUse:
+    """실행 중 run 과 배포 — 어느 쪽이든 쓰고 있으면 사용 중이다."""
+
+    def in_use(kind: str, name: str) -> bool:
+        return any(p(kind, name) for p in predicates)
+
+    return in_use
+
+
+__all__ = ["ACTIVE", "any_of", "run_backed"]

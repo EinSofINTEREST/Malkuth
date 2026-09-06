@@ -87,6 +87,10 @@ class RuntimeConfig(BaseModel):
     agent_base_image: str = "malkuth/agent-base:0.1.0"
     default_resources: ResourceDefaults = Field(default_factory=ResourceDefaults)
     health_check: HealthCheckConfig = Field(default_factory=HealthCheckConfig)
+    agent_env: dict[str, str] = Field(default_factory=dict)
+    """모든 에이전트 컨테이너에 주입하는 **비밀이 아닌** 인프라 env — provider base URL
+    처럼 "어디에 있는가" 를 알리는 값. secrets 는 여기가 아니라 env_allowlist 로 간다
+    (02 Secrets Injection); 이름이 secret 패턴이면 기동을 거부한다 (#243)."""
 
     @model_validator(mode="after")
     def _reject_host_network(self) -> RuntimeConfig:
@@ -136,6 +140,10 @@ class OrchestratorConfig(BaseModel):
     """Control Plane bind 주소. 기본은 loopback — 이 표면은 인증이 없으므로
     외부에 열려면 그 앞을 막는 것이 배포하는 쪽의 책임이다."""
     control_port: int = Field(default=8700, gt=0, le=65535)
+    deployment_store: str | None = Field(default=None, min_length=1)
+    """배포 기록 저장소 경로 (sqlite). control plane 이 재시작한 뒤 살아 있는
+    컨테이너를 다시 찾으려면 프로세스 밖에 기록이 있어야 한다 (#243).
+    `run_store` 와 같은 규칙 — 파일 경로여야 한다."""
     control_token: str | None = Field(default=None, min_length=1)
     """Control Plane 의 Bearer 토큰. 이 표면은 파일을 쓰고 컨테이너를 띄우므로
     (#242~) 무인증으로 두지 않는다. loopback 밖으로 bind 하면서 토큰이 없으면
@@ -144,6 +152,19 @@ class OrchestratorConfig(BaseModel):
     max_service_runs: int = Field(default=5, gt=0)
     node_timeout_s: float = Field(default=300.0, gt=0)
     service_defaults: ServiceDefaults = Field(default_factory=ServiceDefaults)
+
+    @model_validator(mode="after")
+    def _deployment_store_is_a_file(self) -> OrchestratorConfig:
+        """run_store 와 같은 이유 — in-memory 는 연결마다 별개라 재시작을 넘기지 못한다."""
+        if self.deployment_store is None:
+            return self
+        target = self.deployment_store.strip()
+        if not target or target == MEMORY_DB or target.startswith(f"file:{MEMORY_DB}"):
+            raise ValueError(
+                "orchestrator.deployment_store must be a file path — "
+                "an in-memory database is private to each connection"
+            )
+        return self
 
     @model_validator(mode="after")
     def _run_store_is_a_file(self) -> OrchestratorConfig:

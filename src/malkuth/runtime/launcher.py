@@ -19,13 +19,14 @@ import structlog
 from malkuth.core.errors import NETWORK_RETRY, ErrorCategory, ErrorCode, MalkuthError
 from malkuth.memory.http import MEMORY_TOKEN_ENV, MEMORY_URL_ENV
 from malkuth.runtime.control import ControlClient
+from malkuth.runtime.docker.engine import DEFAULT_DRAIN_TIMEOUT_S, ContainerHandle
 from malkuth.runtime.lifecycle import AgentLifecycle, AgentState
 from malkuth.runtime.ports import A2APortAllocator
 from malkuth.runtime.spec import build_container_spec
 from malkuth.runtime.tokens import TokenIssuer, authenticated_env
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Mapping
+    from collections.abc import Awaitable, Callable, Mapping, Sequence
 
     from malkuth.core.manifest import AgentManifest
     from malkuth.observability.metrics import Metrics
@@ -51,6 +52,8 @@ class LaunchedAgent:
     # 들고 있지 않으면 정지가 엉뚱한 레플리카의 포트를 놓아준다
     replica: int = 0
     restart_args: dict[str, Any] = field(default_factory=dict, repr=False)
+    a2a_port: int | None = None
+    """할당받은 A2A 포트 — 배포 기록이 재시작 뒤 같은 포트를 돌려줘야 한다 (#243)."""
     """재기동에 필요한 인자 — 컨테이너를 새로 만들려면 원래 선언이 있어야 한다."""
 
     async def aclose(self) -> None:
@@ -102,6 +105,8 @@ class AgentLauncher:
     분명해야 하므로 감시를 원하는 조립만 켠다 (02 Lifecycle Rules 3)."""
     health_sleep: Callable[[float], object] | None = None
     """06 은 시간 의존 로직이 테스트에서 실제로 자는 것을 금지한다."""
+    drain_timeout_s: float = DEFAULT_DRAIN_TIMEOUT_S
+    """정지 전 진행 중 태스크를 기다리는 상한 (02 Lifecycle 4, 기본 30s)."""
     launched: dict[tuple[str, int], LaunchedAgent] = field(default_factory=dict)
     _cursors: dict[str, int] = field(default_factory=dict, init=False)
     _monitors: dict[tuple[str, int], asyncio.Task[None]] = field(default_factory=dict, init=False)
@@ -123,6 +128,7 @@ class AgentLauncher:
         a2a_port: int | None = None,
         memory: MemoryEndpoint | None = None,
         lifecycle: AgentLifecycle | None = None,
+        mounts: Sequence[Mapping[str, Any]] = (),
     ) -> LaunchedAgent:
         """Start one agent with its token injected and wired.
 
@@ -136,6 +142,8 @@ class AgentLauncher:
                 **DB 자격증명은 컨테이너에 넣지 않는다** (09 Access Enforcement 1).
             a2a_port: A2A port to use. 생략하면 할당기가 범위에서 고른다 —
                 03 은 포트를 runtime 이 준다고 규정한다.
+            mounts: Read-only binds carrying declarations into the image
+                (`build_container_spec`). 재시작에도 같은 것을 다시 건다.
             lifecycle: 이어붙일 상태. **재시작은 반드시 넘겨야 한다** — 새로
                 만들면 `RestartPolicy` 의 창(window)이 리셋되어 crash-loop
                 상한(02 Rule 6)이 영원히 걸리지 않는다.
@@ -166,6 +174,7 @@ class AgentLauncher:
             replica=replica,
             a2a_port=a2a_port,
             network=self.engine.network,
+            mounts=mounts,
         )
 
         # 02 Lifecycle — 이미지는 배포 파이프라인이 굽는다 (Rule 1). runtime 이
@@ -192,7 +201,13 @@ class AgentLauncher:
             client=client,
             replica=replica,
             lifecycle=lifecycle,
-            restart_args={"manifest": manifest, "secrets": secrets, "memory": memory},
+            restart_args={
+                "manifest": manifest,
+                "secrets": secrets,
+                "memory": memory,
+                "mounts": mounts,
+            },
+            a2a_port=a2a_port,
         )
         self.launched[agent, replica] = launched
         self._watch(launched)
@@ -227,7 +242,7 @@ class AgentLauncher:
             interval_s=self.health_interval_s,
             metrics=self.metrics,
             sleep=self.health_sleep,
-            on_state=lambda state: self._promote(launched, state),
+            on_state=lambda state, healthy: self._promote(launched, state, healthy=healthy),
         )
         self._monitors[launched.agent, launched.replica] = asyncio.create_task(
             self._poll(launched, monitor)
@@ -308,16 +323,18 @@ class AgentLauncher:
         await launched.aclose()
         await self.engine.stop(launched.handle)
         del self.launched[agent, replica]
-        if self.ports is not None:
-            # 포트를 쥔 채로 다시 잡으면 범위가 마른다. 같은 레플리카는 같은
-            # 포트를 다시 받으므로 peer 의 광고 주소도 유지된다
-            self.ports.release(agent, replica=replica)
+        # A2A 포트는 **놓지 않는다**: peer 들의 env 에 이 포트가 굳어 있다 (#243 배선).
+        # 할당기의 예약은 그대로 두고 같은 번호를 명시해 넘기면 start 가 재할당하지 않는다
 
         args = dict(launched.restart_args)
         # **같은 lifecycle 을 이어붙인다**: 새로 만들면 재시작 횟수가 리셋되어
         # crash-loop 상한이 영원히 걸리지 않는다
         await self.start(
-            args.pop("manifest"), replica=replica, lifecycle=launched.lifecycle, **args
+            args.pop("manifest"),
+            replica=replica,
+            lifecycle=launched.lifecycle,
+            a2a_port=launched.a2a_port,
+            **args,
         )
 
     def _record_restart(self, agent: str, *, reason: str) -> None:
@@ -346,18 +363,86 @@ class AgentLauncher:
         with contextlib.suppress(asyncio.CancelledError):
             await task
 
-    def _promote(self, launched: LaunchedAgent, state: AgentState) -> None:
-        """첫 health 성공을 Ready 로 올린다.
+    def _promote(self, launched: LaunchedAgent, state: AgentState, *, healthy: bool) -> None:
+        """첫 health **성공**을 Ready 로 올린다.
 
         02 Rule 2 — 기동만으로 Ready 를 선언하면 `initialize()` 가 끝내
         실패한 컨테이너가 태스크를 받는다. 그 판정은 monitor 가 아니라
         **runtime 이** 한다 (lifecycle 은 성공을 Ready 로 올리지 않는다).
+        임계 미만의 실패는 상태를 STARTING 에 두므로 상태만 보면 성공과
+        구분되지 않는다 — 성공 여부를 따로 본다.
         """
         if state is AgentState.STARTING:
-            launched.lifecycle.transition(AgentState.READY)
+            if healthy:
+                launched.lifecycle.transition(AgentState.READY)
             return
         if state is AgentState.UNHEALTHY:
             self._schedule_restart(launched)
+
+    async def adopt(
+        self,
+        agent: str,
+        *,
+        replica: int,
+        container_id: str,
+        image: str,
+        control_port: int,
+        token: str,
+        a2a_port: int | None = None,
+        restart_args: Mapping[str, Any] | None = None,
+    ) -> bool:
+        """Pick up a container this process did not start.
+
+        control plane 이 재시작하면 컨테이너는 Docker 가 그대로 들고 있다 —
+        기록(#243 `DeploymentRecord`)으로 다시 붙는다. 살아 있지 않으면 False 다:
+        조용히 새로 띄우면 기록과 실체가 어긋난 채 두 벌이 된다.
+
+        토큰은 기록에서 온다 — agentd 는 기동 시 받은 토큰을 바꿀 수 없으므로
+        재발급이 아니라 **기억**이다.
+
+        `restart_args` 는 이 컨테이너가 죽었을 때 같은 선언으로 다시 세우는 데
+        쓴다 — 없으면 health 감시가 첫 재시작에서 넘어진다.
+        """
+        try:
+            state: dict[str, Any] = await asyncio.to_thread(
+                self.engine.client.inspect, container_id
+            )
+        except Exception:  # noqa: BLE001 — 없는 컨테이너는 "못 붙는다" 이지 예외가 아니다
+            return False
+        if not state.get("Running"):
+            return False
+
+        handle = ContainerHandle(
+            agent=agent, container_id=container_id, image=image, control_port=control_port
+        )
+        self.issuer.remember(agent, token)
+        client = ControlClient(
+            f"http://127.0.0.1:{control_port}", agent=agent, retry=NETWORK_RETRY, token=token
+        )
+        # Ready 는 **선언하지 않는다** — 살아 있다는 것과 태스크를 받을 수 있다는
+        # 것은 다르다. 첫 health 성공이 올린다 (02 Rule 2, `_promote`)
+        lifecycle = AgentLifecycle(agent=agent)
+        lifecycle.transition(AgentState.BUILT)
+        lifecycle.transition(AgentState.STARTING)
+        launched = LaunchedAgent(
+            agent=agent,
+            handle=handle,
+            client=client,
+            replica=replica,
+            lifecycle=lifecycle,
+            a2a_port=a2a_port,
+            restart_args=dict(restart_args or {}),
+        )
+        self.launched[agent, replica] = launched
+        self._watch(launched)
+        log.info(
+            "agent adopted",
+            agent=agent,
+            container_id=handle.short_id,
+            image=image,
+            port=control_port,
+        )
+        return True
 
     def replicas_of(self, agent: str) -> list[LaunchedAgent]:
         """이 에이전트의 기동된 레플리카 — replica 순서로."""
@@ -418,6 +503,7 @@ class AgentLauncher:
             # STARTING 에서 바로 멈추는 경우도 있어 Draining 을 강요하지 않는다
             if launched.lifecycle.state is AgentState.READY:
                 launched.lifecycle.transition(AgentState.DRAINING)
+                await self._drain(launched)
             await launched.aclose()
             await self.engine.stop(launched.handle)
             if launched.lifecycle.state is not AgentState.STOPPED:
@@ -431,6 +517,27 @@ class AgentLauncher:
         if not self.replicas_of(agent):
             self.issuer.forget(agent)
             self._cursors.pop(agent, None)
+
+    async def _drain(self, launched: LaunchedAgent) -> None:
+        """02 Lifecycle 4 — 진행 중 태스크가 끝나길 기다린 뒤에 정지한다.
+
+        기다림의 상한을 넘기면 **그래도 정지한다** (Rule 5 의 SIGTERM 경로) —
+        다만 조용히는 아니다: 남은 태스크가 있었다는 사실을 RT_005 로 남긴다.
+        """
+        try:
+            await launched.client.drain(timeout_s=self.drain_timeout_s)
+        except asyncio.CancelledError:
+            raise
+        except Exception as err:  # noqa: BLE001 — drain 은 최선의 시도다; 어떤 실패도 정지를 막지 않는다
+            log.warning(
+                "agent drain did not complete; stopping anyway",
+                agent=launched.agent,
+                container_id=launched.handle.short_id,
+                image=launched.handle.image,
+                error_code=ErrorCode.RT_005,
+                timeout_s=self.drain_timeout_s,
+                exc_info=err,
+            )
 
     async def stop_all(self) -> None:
         """기동된 에이전트를 전부 정지한다 — 하나가 실패해도 나머지를 계속 정리한다."""

@@ -212,12 +212,14 @@ class ControlClient:
         """
         await self._request_json("POST", "/v1/reload")
 
-    async def drain(self) -> None:
-        """Begin graceful drain.
+    async def drain(self, *, timeout_s: float | None = None) -> None:
+        """Drain and wait for in-flight tasks.
 
-        새 태스크 수락을 중지하고 진행 중 태스크를 마치도록 요청합니다.
+        새 태스크 수락을 중지하고 진행 중 태스크를 마치도록 요청합니다. agentd 는
+        진행 중 태스크가 끝난 뒤에야 응답하므로, 이 호출이 돌아오면 drain 이
+        끝난 것이다 — timeout 이 곧 drain 대기 상한이다 (02 Lifecycle 4).
         """
-        await self._request_json("POST", "/v1/drain")
+        await self._request_json("POST", "/v1/drain", timeout_s=timeout_s)
 
     async def _post_json(
         self,

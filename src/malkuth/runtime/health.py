@@ -60,9 +60,11 @@ class HealthMonitor:
     metrics: Metrics | None = None
     breaker: CircuitBreaker | None = None
     sleep: Callable[[float], object] | None = None
-    on_state: Callable[[AgentState], None] | None = None
-    """매 확인 뒤 결과 상태를 받는 콜백 — 기동 성공 판정처럼 **runtime 이**
-    내려야 하는 결정을 monitor 밖에 남긴다 (02 Lifecycle Rules 2)."""
+    on_state: Callable[[AgentState, bool], None] | None = None
+    """매 확인 뒤 ``(결과 상태, 이번 확인의 성공 여부)`` 를 받는 콜백 — 기동 성공
+    판정처럼 **runtime 이** 내려야 하는 결정을 monitor 밖에 남긴다 (02 Lifecycle
+    Rules 2). 상태만 넘기면 임계 미만의 실패도 STARTING 그대로라 성공과 구분되지
+    않는다 — 실제 배포에서 첫 확인이 실패했는데 Ready 로 올라갔다 (#243)."""
 
     consecutive_failures: int = field(default=0, init=False)
     last_status: HealthState | None = field(default=None, init=False)
@@ -139,7 +141,7 @@ class HealthMonitor:
         while iterations is None or count < iterations:
             state = await self.check_once()
             if self.on_state is not None:
-                self.on_state(state)
+                self.on_state(state, self.consecutive_failures == 0)
             count += 1
             if iterations is None or count < iterations:
                 result = sleeper(self.interval_s)

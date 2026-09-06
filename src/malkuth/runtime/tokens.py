@@ -65,6 +65,14 @@ class TokenIssuer:
         self._tokens[agent] = generate_token()
         return self._tokens[agent]
 
+    def remember(self, agent: str, token: str) -> None:
+        """이미 기동한 컨테이너의 토큰을 **기억**한다 — 재발급이 아니다.
+
+        재시작 뒤 붙는 경로(#243)에서 쓴다. agentd 는 env 로 받은 토큰을
+        바꿀 수 없으므로, 새로 발급하면 그 컨테이너와 영원히 어긋난다.
+        """
+        self._tokens[agent] = token
+
     def known(self, agent: str) -> str | None:
         """이미 발급된 토큰 — 없으면 None (발급 부수효과 없음)."""
         return self._tokens.get(agent)

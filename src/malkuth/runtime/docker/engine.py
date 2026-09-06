@@ -101,6 +101,14 @@ class DockerClient(Protocol):
         """컨테이너를 제거한다."""
         ...
 
+    def find(self, name: str) -> str | None:
+        """이름으로 컨테이너 id 를 찾는다 — 없으면 None.
+
+        컨테이너 이름은 결정적(`malkuth-{agent}-{replica}`)이라 재시작을 넘겨
+        같은 자리를 가리킨다. id 는 재시작마다 바뀐다 (#243 reattach).
+        """
+        ...
+
 
 @dataclass(frozen=True)
 class ContainerHandle:

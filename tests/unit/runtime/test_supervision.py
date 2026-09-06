@@ -16,6 +16,7 @@ import yaml
 from prometheus_client import CollectorRegistry
 
 from malkuth.core.agent import ComponentHealth, HealthState, HealthStatus
+from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
 from malkuth.core.manifest import AgentManifest
 from malkuth.observability.metrics import Metrics
 from malkuth.runtime.docker.engine import DockerEngine
@@ -59,6 +60,13 @@ class ScriptedHealth:
     def __init__(self, results: list[HealthStatus]) -> None:
         self._results = list(results)
         self.calls = 0
+        self.drains: list[float | None] = []
+        self.drain_error: Exception | None = None
+
+    async def drain(self, *, timeout_s: float | None = None) -> None:
+        self.drains.append(timeout_s)
+        if self.drain_error is not None:
+            raise self.drain_error
 
     async def health(self) -> HealthStatus:
         self.calls += 1
@@ -95,6 +103,7 @@ async def start_with(agents: AgentLauncher, results: list[HealthStatus]):
     launched = await agents.start(manifest())
     probe = ScriptedHealth(results)
     launched.client.health = probe.health  # type: ignore[method-assign]
+    launched.client.drain = probe.drain  # type: ignore[method-assign]
     return launched, probe
 
 
@@ -123,6 +132,33 @@ async def test_the_first_healthy_check_promotes_to_ready():
     await agents.stop_all()
 
 
+async def test_a_failed_first_check_does_not_promote():
+    """#243 실 배포에서 드러났다 — 첫 확인이 NET_001 로 실패했는데 Ready 가 됐다.
+
+    임계 미만의 실패는 상태를 STARTING 에 두므로, 상태만 보고 올리면 실패도
+    성공으로 읽힌다. 확인 한 번 뒤 루프를 멈춰 두고 상태를 본다.
+    """
+    agents = launcher(StepSleep(0))
+    launched, probe = await start_with(agents, [sick()])
+
+    await until(lambda: probe.calls >= 1)
+    await spin(3)
+
+    assert launched.lifecycle.state is AgentState.STARTING
+    assert not launched.lifecycle.accepts_tasks
+    await agents.stop_all()
+
+
+async def test_the_first_success_after_a_failure_promotes():
+    agents = launcher(StepSleep(1))
+    launched, probe = await start_with(agents, [sick(), healthy()])
+
+    await until(lambda: launched.lifecycle.state is AgentState.READY)
+
+    assert probe.calls == 2
+    await agents.stop_all()
+
+
 async def test_repeated_failures_mark_the_agent_unhealthy():
     """02 Rule 3 — 3회 연속 실패가 Unhealthy 다."""
     # 통과 3회 = 확인 4회 (첫 확인은 대기 전이다). 더 돌면 대역이 다시
@@ -146,6 +182,104 @@ async def test_a_degraded_agent_still_accepts_tasks():
 
     assert launched.lifecycle.state is AgentState.READY
     await agents.stop_all()
+
+
+# --- 정지 = drain 후 stop (02 Lifecycle 4·5) ---------------------------------------
+
+
+async def test_stopping_a_ready_agent_drains_before_the_container_stops():
+    """#243 — launcher.stop 은 Draining 으로 **표시만** 하고 agentd 에 drain 을 청하지
+    않았다. 진행 중 태스크는 SIGTERM 과 함께 사라졌다."""
+    agents = launcher(StepSleep(0), drain_timeout_s=7.0)
+    launched, probe = await start_with(agents, [healthy()])
+    await until(lambda: launched.lifecycle.state is AgentState.READY)
+    order: list[str] = []
+    probe_drain = probe.drain
+
+    async def drain(*, timeout_s=None):
+        order.append("drain")
+        await probe_drain(timeout_s=timeout_s)
+
+    engine_stop = agents.engine.stop
+
+    async def stop(handle, **kwargs):
+        order.append("stop")
+        await engine_stop(handle, **kwargs)
+
+    launched.client.drain = drain  # type: ignore[method-assign]
+    agents.engine.stop = stop  # type: ignore[method-assign]
+
+    await agents.stop(manifest().name)
+
+    assert order == ["drain", "stop"]
+    assert probe.drains == [7.0]
+
+
+async def test_a_drain_that_times_out_still_stops_the_container():
+    agents = launcher(StepSleep(0))
+    launched, probe = await start_with(agents, [healthy()])
+    await until(lambda: launched.lifecycle.state is AgentState.READY)
+    probe.drain_error = MalkuthError(
+        category=ErrorCategory.TIMEOUT, code=ErrorCode.TO_001, message="slow"
+    )
+
+    await agents.stop(manifest().name)
+
+    assert probe.drains, "drain was never requested"
+    assert launched.lifecycle.state is AgentState.STOPPED
+    assert agents.launched == {}
+
+
+async def test_an_unexpected_drain_error_still_stops_the_container():
+    """MalkuthError 만 잡으면 JSON/타입 오류 같은 예외가 정지 경로를 통째로 끊는다."""
+    agents = launcher(StepSleep(0))
+    launched, probe = await start_with(agents, [healthy()])
+    await until(lambda: launched.lifecycle.state is AgentState.READY)
+    probe.drain_error = ValueError("garbled drain response")
+
+    await agents.stop(manifest().name)
+
+    assert launched.lifecycle.state is AgentState.STOPPED
+    assert agents.launched == {}
+
+
+async def test_a_restart_keeps_the_a2a_port_and_its_reservation():
+    """peer 들의 env 에 이 포트가 굳어 있다 — 재시작이 번호를 바꾸면 peer 가 못 찾는다."""
+    from malkuth.runtime.ports import A2APortAllocator
+    from malkuth.runtime.spec import A2A_PORT_ENV
+
+    agents = launcher(StepSleep(0), ports=A2APortAllocator(port_range=(9100, 9105)))
+    document = yaml.safe_load((REPO_ROOT / "agents" / "echo" / "manifest.yaml").read_text("utf-8"))
+    document["spec"]["a2a"] = {"enabled": True}
+    launched = await agents.start(AgentManifest.model_validate(document))
+    probe = ScriptedHealth([healthy()])
+    launched.client.health = probe.health  # type: ignore[method-assign]
+    launched.client.drain = probe.drain  # type: ignore[method-assign]
+    await until(lambda: launched.lifecycle.state is AgentState.READY)
+    port = launched.a2a_port
+    assert port is not None
+    launched.lifecycle.transition(AgentState.UNHEALTHY)
+
+    await agents._replace(launched)  # noqa: SLF001 — 재시작 경로
+
+    replaced = agents.launched[(manifest().name, 0)]
+    client = agents.engine.client
+    assert replaced.a2a_port == port
+    assert client.created[-1]["environment"][A2A_PORT_ENV] == str(port)
+    assert agents.ports is not None and list(agents.ports.assigned.values()) == [port]
+    await agents.stop_all()
+
+
+async def test_a_starting_agent_is_stopped_without_a_drain():
+    """되감기는 아직 Ready 가 아닌 컨테이너를 내린다 — 받은 태스크가 없으니 기다릴 것도 없다."""
+    agents = launcher(StepSleep(0))
+    launched, probe = await start_with(agents, [sick()])
+    await until(lambda: probe.calls >= 1)
+
+    await agents.stop(manifest().name)
+
+    assert probe.drains == []
+    assert launched.lifecycle.state is AgentState.STOPPED
 
 
 # --- 메트릭 -----------------------------------------------------------------

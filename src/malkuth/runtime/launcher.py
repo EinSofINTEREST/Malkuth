@@ -19,6 +19,7 @@ import structlog
 from malkuth.core.errors import NETWORK_RETRY, ErrorCategory, ErrorCode, MalkuthError
 from malkuth.memory.http import MEMORY_TOKEN_ENV, MEMORY_URL_ENV
 from malkuth.runtime.control import ControlClient
+from malkuth.runtime.docker.engine import ContainerHandle
 from malkuth.runtime.lifecycle import AgentLifecycle, AgentState
 from malkuth.runtime.ports import A2APortAllocator
 from malkuth.runtime.spec import build_container_spec
@@ -51,6 +52,8 @@ class LaunchedAgent:
     # 들고 있지 않으면 정지가 엉뚱한 레플리카의 포트를 놓아준다
     replica: int = 0
     restart_args: dict[str, Any] = field(default_factory=dict, repr=False)
+    a2a_port: int | None = None
+    """할당받은 A2A 포트 — 배포 기록이 재시작 뒤 같은 포트를 돌려줘야 한다 (#243)."""
     """재기동에 필요한 인자 — 컨테이너를 새로 만들려면 원래 선언이 있어야 한다."""
 
     async def aclose(self) -> None:
@@ -193,6 +196,7 @@ class AgentLauncher:
             replica=replica,
             lifecycle=lifecycle,
             restart_args={"manifest": manifest, "secrets": secrets, "memory": memory},
+            a2a_port=a2a_port,
         )
         self.launched[agent, replica] = launched
         self._watch(launched)
@@ -358,6 +362,65 @@ class AgentLauncher:
             return
         if state is AgentState.UNHEALTHY:
             self._schedule_restart(launched)
+
+    async def adopt(
+        self,
+        agent: str,
+        *,
+        replica: int,
+        container_id: str,
+        image: str,
+        control_port: int,
+        token: str,
+        a2a_port: int | None = None,
+    ) -> bool:
+        """Pick up a container this process did not start.
+
+        control plane 이 재시작하면 컨테이너는 Docker 가 그대로 들고 있다 —
+        기록(#243 `DeploymentRecord`)으로 다시 붙는다. 살아 있지 않으면 False 다:
+        조용히 새로 띄우면 기록과 실체가 어긋난 채 두 벌이 된다.
+
+        토큰은 기록에서 온다 — agentd 는 기동 시 받은 토큰을 바꿀 수 없으므로
+        재발급이 아니라 **기억**이다.
+        """
+        try:
+            state: dict[str, Any] = await asyncio.to_thread(
+                self.engine.client.inspect, container_id
+            )
+        except Exception:  # noqa: BLE001 — 없는 컨테이너는 "못 붙는다" 이지 예외가 아니다
+            return False
+        if not state.get("Running"):
+            return False
+
+        handle = ContainerHandle(
+            agent=agent, container_id=container_id, image=image, control_port=control_port
+        )
+        self.issuer.remember(agent, token)
+        client = ControlClient(
+            f"http://127.0.0.1:{control_port}", agent=agent, retry=NETWORK_RETRY, token=token
+        )
+        lifecycle = AgentLifecycle(agent=agent)
+        lifecycle.transition(AgentState.BUILT)
+        lifecycle.transition(AgentState.STARTING)
+        lifecycle.transition(AgentState.READY)
+        launched = LaunchedAgent(
+            agent=agent,
+            handle=handle,
+            client=client,
+            replica=replica,
+            lifecycle=lifecycle,
+            a2a_port=a2a_port,
+        )
+        self.launched[agent, replica] = launched
+        self._watch(launched)
+        log.info(
+            "agent adopted",
+            agent=agent,
+            container_id=handle.short_id,
+            image=image,
+            port=control_port,
+        )
+        return True
 
     def replicas_of(self, agent: str) -> list[LaunchedAgent]:
         """이 에이전트의 기동된 레플리카 — replica 순서로."""

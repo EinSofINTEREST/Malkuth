@@ -11,7 +11,7 @@ import asyncio
 import contextlib
 import uuid
 from collections import OrderedDict
-from collections.abc import Awaitable, Iterator, Mapping
+from collections.abc import Awaitable, Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -120,7 +120,9 @@ class RunService:
             # 제출 응답이 돌아간 직후의 GET 이 404 면 안 된다 — 드라이버가 기록을
             # 남기기 전이라도 **여기서** 먼저 쓴다 (read-your-writes)
             self._announce(run_id, topology)
-            self._drive(run_id, self.submitter.submit(topology, initial_state, run_id=run_id))
+            self._drive(
+                run_id, lambda: self.submitter.submit(topology, initial_state, run_id=run_id)
+            )
         bound.info("run submitted", deployment_id=deployment.deployment_id)
         return self._record(run_id, topology)
 
@@ -139,7 +141,7 @@ class RunService:
         else:
             self.results.pop(run_id, None)
             self._announce(run_id, topology)
-            self._drive(run_id, self.submitter.resume(topology, run_id))
+            self._drive(run_id, lambda: self.submitter.resume(topology, run_id))
         log.info("run resumed", graph=record.graph, run_id=run_id, mode=record.mode)
         return self._record(run_id, topology)
 
@@ -214,16 +216,18 @@ class RunService:
         )
         self.results.pop(run_id, None)
 
-    def _drive(self, run_id: str, driver: Awaitable[RunResult]) -> None:
+    def _drive(self, run_id: str, driver: Callable[[], Awaitable[RunResult]]) -> None:
         """mission 드라이버를 이 서비스 소유의 태스크로 띄운다 — 결과는 끝나는 순간 기록된다.
 
         done-callback 은 `gather` 보다 늦게 돌 수 있어 결과가 잠시 비어 보인다 —
-        결과 기록을 코루틴 안에 두면 태스크 완료가 곧 기록 완료다.
+        결과 기록을 코루틴 안에 두면 태스크 완료가 곧 기록 완료다. 드라이버는
+        **팩토리**로 받는다: 태스크가 시작 전에 취소되면 미리 만든 코루틴은 한 번도
+        await 되지 않은 채 버려진다.
         """
 
         async def run() -> RunResult:
             try:
-                result = await driver
+                result = await driver()
             except asyncio.CancelledError:
                 raise
             except Exception as err:  # noqa: BLE001 — 드라이버의 예외는 여기서 끝난다 (05 Fail Gracefully)

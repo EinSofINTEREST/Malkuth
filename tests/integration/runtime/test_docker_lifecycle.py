@@ -130,6 +130,10 @@ class CliDockerClient:
     def remove(self, container_id: str) -> None:
         docker("rm", "-f", container_id, check=False)
 
+    def find(self, name: str) -> str | None:
+        found = docker("inspect", "--format", "{{.Id}}", name, check=False)
+        return found or None
+
 
 def fetch(url: str, body: dict | None = None, *, timeout: float = 10.0) -> dict:
     """루프백 Control API 호출 — blocking 이므로 async 경로에서는 to_thread 로 감싼다."""

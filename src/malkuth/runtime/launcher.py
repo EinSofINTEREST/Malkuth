@@ -19,7 +19,7 @@ import structlog
 from malkuth.core.errors import NETWORK_RETRY, ErrorCategory, ErrorCode, MalkuthError
 from malkuth.memory.http import MEMORY_TOKEN_ENV, MEMORY_URL_ENV
 from malkuth.runtime.control import ControlClient
-from malkuth.runtime.docker.engine import ContainerHandle
+from malkuth.runtime.docker.engine import DEFAULT_DRAIN_TIMEOUT_S, ContainerHandle
 from malkuth.runtime.lifecycle import AgentLifecycle, AgentState
 from malkuth.runtime.ports import A2APortAllocator
 from malkuth.runtime.spec import build_container_spec
@@ -105,6 +105,8 @@ class AgentLauncher:
     분명해야 하므로 감시를 원하는 조립만 켠다 (02 Lifecycle Rules 3)."""
     health_sleep: Callable[[float], object] | None = None
     """06 은 시간 의존 로직이 테스트에서 실제로 자는 것을 금지한다."""
+    drain_timeout_s: float = DEFAULT_DRAIN_TIMEOUT_S
+    """정지 전 진행 중 태스크를 기다리는 상한 (02 Lifecycle 4, 기본 30s)."""
     launched: dict[tuple[str, int], LaunchedAgent] = field(default_factory=dict)
     _cursors: dict[str, int] = field(default_factory=dict, init=False)
     _monitors: dict[tuple[str, int], asyncio.Task[None]] = field(default_factory=dict, init=False)
@@ -498,6 +500,7 @@ class AgentLauncher:
             # STARTING 에서 바로 멈추는 경우도 있어 Draining 을 강요하지 않는다
             if launched.lifecycle.state is AgentState.READY:
                 launched.lifecycle.transition(AgentState.DRAINING)
+                await self._drain(launched)
             await launched.aclose()
             await self.engine.stop(launched.handle)
             if launched.lifecycle.state is not AgentState.STOPPED:
@@ -511,6 +514,25 @@ class AgentLauncher:
         if not self.replicas_of(agent):
             self.issuer.forget(agent)
             self._cursors.pop(agent, None)
+
+    async def _drain(self, launched: LaunchedAgent) -> None:
+        """02 Lifecycle 4 — 진행 중 태스크가 끝나길 기다린 뒤에 정지한다.
+
+        기다림의 상한을 넘기면 **그래도 정지한다** (Rule 5 의 SIGTERM 경로) —
+        다만 조용히는 아니다: 남은 태스크가 있었다는 사실을 RT_005 로 남긴다.
+        """
+        try:
+            await launched.client.drain(timeout_s=self.drain_timeout_s)
+        except MalkuthError as err:
+            log.warning(
+                "agent drain did not complete; stopping anyway",
+                agent=launched.agent,
+                container_id=launched.handle.short_id,
+                image=launched.handle.image,
+                error_code=ErrorCode.RT_005,
+                timeout_s=self.drain_timeout_s,
+                exc_info=err,
+            )
 
     async def stop_all(self) -> None:
         """기동된 에이전트를 전부 정지한다 — 하나가 실패해도 나머지를 계속 정리한다."""

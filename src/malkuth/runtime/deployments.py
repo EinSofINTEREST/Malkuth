@@ -32,6 +32,7 @@ from malkuth.runtime.spec import (
     A2A_EDGES_ENV,
     A2A_PEERS_ENV,
     A2A_SECRET_ENV,
+    DEFAULT_CONTROL_PORT,
     container_name,
 )
 
@@ -295,10 +296,10 @@ class DeploymentManager:
         record = self.store.get(deployment_id)
         if record is None:
             raise not_deployed(deployment_id)
-        return record
+        return self._refresh(record)
 
     def deployments(self) -> Sequence[DeploymentRecord]:
-        return self.store.list()
+        return [self._refresh(r) for r in self.store.list()]
 
     def in_use(self, kind: str, name: str) -> bool:
         """authoring 이 묻는다 — 배포 중인 선언은 지우거나 덮어쓰지 못한다 (#242)."""
@@ -412,12 +413,15 @@ class DeploymentManager:
                 continue
             missing = []
             for agent in record.agents:
-                if not await self.launcher.adopt(
+                # 이름으로 찾는다 — launcher 의 재시작이 컨테이너를 갈아 끼우면
+                # id 와 control 포트가 바뀌지만 이름은 같은 자리를 가리킨다
+                live = await self._live(agent)
+                if live is None or not await self.launcher.adopt(
                     agent.name,
                     replica=agent.replica,
-                    container_id=agent.container_id,
+                    container_id=live[0],
                     image=agent.image,
-                    control_port=agent.control_port,
+                    control_port=live[1],
                     token=agent.token,
                     a2a_port=agent.a2a_port,
                     restart_args=restart_args[agent.name],
@@ -426,8 +430,38 @@ class DeploymentManager:
             if missing:
                 self._mark_lost(record, f"containers missing: {', '.join(missing)}", touched)
             else:
-                touched.append(record)
+                touched.append(self._refresh(record))
         return touched
+
+    async def _live(self, agent: DeployedAgent) -> tuple[str, int] | None:
+        """이 자리에 지금 서 있는 컨테이너의 (id, control 포트) — 없으면 None."""
+        client = self.launcher.engine.client
+        container_id = await asyncio.to_thread(
+            client.find, container_name(agent.name, agent.replica)
+        )
+        if container_id is None:
+            return None
+        try:
+            port = await asyncio.to_thread(client.port_of, container_id, DEFAULT_CONTROL_PORT)
+        except Exception:  # noqa: BLE001 — 포트가 없으면 붙을 수 없는 컨테이너다
+            return None
+        return container_id, port
+
+    def _refresh(self, record: DeploymentRecord) -> DeploymentRecord:
+        """launcher 가 아는 현재 컨테이너로 기록을 맞춘다 — 재시작이 id/포트를 바꾼다."""
+        if record.status != DeploymentStatus.READY:
+            return record
+        agents = []
+        for agent in record.agents:
+            launched = self.launcher.launched.get((agent.name, agent.replica))
+            agents.append(_deployed(launched, agent.token) if launched is not None else agent)
+        if tuple(agents) == record.agents:
+            return record
+        refreshed = DeploymentRecord(
+            **{**record.__dict__, "agents": tuple(agents), "updated_at": _now()}
+        )
+        self.store.upsert(refreshed)
+        return refreshed
 
     def _mark_lost(
         self, record: DeploymentRecord, reason: str, touched: list[DeploymentRecord]

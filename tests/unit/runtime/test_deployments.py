@@ -21,6 +21,7 @@ from malkuth.runtime.deployments import (
 )
 from malkuth.runtime.docker.engine import DockerEngine
 from malkuth.runtime.launcher import AgentLauncher
+from malkuth.runtime.lifecycle import AgentState
 from malkuth.runtime.ports import A2APortAllocator
 from malkuth.runtime.spec import A2A_EDGES_ENV, A2A_PEERS_ENV, A2A_SECRET_ENV
 from tests.fixtures.fake_docker import FakeDockerClient
@@ -116,6 +117,13 @@ class NoSleep:
         await asyncio.sleep(0)
 
 
+class Tick:
+    """health 루프용 — 즉시 통과시키면 루프가 hot-spin 해 to_thread 결과가 밀린다."""
+
+    async def __call__(self, _delay: float) -> None:
+        await asyncio.sleep(0.01)
+
+
 @pytest.fixture
 def healthy(monkeypatch):
     """모든 Control 클라이언트가 건강하다 — 감시 루프가 Ready 로 올린다."""
@@ -123,7 +131,12 @@ def healthy(monkeypatch):
     async def well(self: ControlClient) -> HealthStatus:
         return HealthStatus(status=HealthState.HEALTHY)
 
+    async def drained(self: ControlClient, *, timeout_s: float | None = None) -> None:
+        return None
+
     monkeypatch.setattr(ControlClient, "health", well)
+    # Ready 인 에이전트의 정지는 drain 을 먼저 친다 — 대역이 없으면 실제 HTTP 재시도로 느려진다
+    monkeypatch.setattr(ControlClient, "drain", drained)
 
 
 @pytest.fixture
@@ -135,7 +148,7 @@ def docker() -> TrackingDocker:
 def manager(workspace, docker, healthy):
     catalog = Catalog.under(workspace)
     launcher = AgentLauncher(
-        engine=DockerEngine(client=docker), health_interval_s=10.0, health_sleep=NoSleep()
+        engine=DockerEngine(client=docker), health_interval_s=10.0, health_sleep=Tick()
     )
     return DeploymentManager(
         catalog=catalog,
@@ -224,7 +237,7 @@ async def test_agents_that_never_get_healthy_time_out_and_roll_back(workspace, d
         catalog=catalog,
         author=Author(catalog=catalog),
         launcher=AgentLauncher(
-            engine=DockerEngine(client=docker), health_interval_s=10.0, health_sleep=NoSleep()
+            engine=DockerEngine(client=docker), health_interval_s=10.0, health_sleep=Tick()
         ),
         store=InMemoryDeploymentStore(),
         secrets_env={"ANTHROPIC_API_KEY": "k"},
@@ -297,7 +310,7 @@ async def test_a_restarted_control_plane_reattaches_running_containers(workspace
         store=store,
         secrets_env={"ANTHROPIC_API_KEY": "k"},
         launcher=AgentLauncher(
-            engine=DockerEngine(client=docker), health_interval_s=10.0, health_sleep=NoSleep()
+            engine=DockerEngine(client=docker), health_interval_s=10.0, health_sleep=Tick()
         ),
         ready_poll_s=0.0,
         sleep=NoSleep(),
@@ -312,7 +325,7 @@ async def test_a_restarted_control_plane_reattaches_running_containers(workspace
         store=store,
         secrets_env={"ANTHROPIC_API_KEY": "k"},
         launcher=AgentLauncher(
-            engine=DockerEngine(client=docker), health_interval_s=10.0, health_sleep=NoSleep()
+            engine=DockerEngine(client=docker), health_interval_s=10.0, health_sleep=Tick()
         ),
         ready_poll_s=0.0,
         sleep=NoSleep(),
@@ -335,7 +348,7 @@ async def test_missing_containers_mark_the_deployment_lost(workspace, docker, he
         store=store,
         secrets_env={"ANTHROPIC_API_KEY": "k"},
         launcher=AgentLauncher(
-            engine=DockerEngine(client=docker), health_interval_s=10.0, health_sleep=NoSleep()
+            engine=DockerEngine(client=docker), health_interval_s=10.0, health_sleep=Tick()
         ),
         ready_poll_s=0.0,
         sleep=NoSleep(),
@@ -349,7 +362,7 @@ async def test_missing_containers_mark_the_deployment_lost(workspace, docker, he
         store=store,
         secrets_env={"ANTHROPIC_API_KEY": "k"},
         launcher=AgentLauncher(
-            engine=DockerEngine(client=docker), health_interval_s=10.0, health_sleep=NoSleep()
+            engine=DockerEngine(client=docker), health_interval_s=10.0, health_sleep=Tick()
         ),
         ready_poll_s=0.0,
         sleep=NoSleep(),
@@ -427,7 +440,7 @@ def wired_manager(workspace: Path, docker: TrackingDocker, store=None) -> Deploy
             engine=DockerEngine(client=docker),
             ports=A2APortAllocator(port_range=(9100, 9110)),
             health_interval_s=10.0,
-            health_sleep=NoSleep(),
+            health_sleep=Tick(),
         ),
         store=store or InMemoryDeploymentStore(),
         secrets_env={"ANTHROPIC_API_KEY": "k"},
@@ -555,3 +568,60 @@ async def test_the_sqlite_store_keeps_the_a2a_secret(tmp_path, workspace, docker
     reopened = SqliteDeploymentStore(path=tmp_path / "deployments.db")
 
     assert reopened.get(record.deployment_id).a2a_secret == record.a2a_secret
+
+
+# --- 재시작이 바꾼 컨테이너를 기록이 따라간다 (#243) ----------------------------------
+
+
+async def test_get_reflects_a_container_the_launcher_replaced(manager, docker):
+    """health 재시작은 id 와 control 포트를 바꾼다 — 기록이 옛 컨테이너를 가리키면
+    안 된다."""
+    record = await manager.deploy("two")
+    before = next(a for a in record.agents if a.name == "alpha")
+    launched = manager.launcher.launched[("alpha", 0)]
+    launched.lifecycle.transition(AgentState.UNHEALTHY)  # 재시작은 Unhealthy 에서 온다
+
+    await manager.launcher._replace(launched)  # noqa: SLF001 — 재시작 경로를 직접 태운다
+
+    after = next(a for a in manager.get(record.deployment_id).agents if a.name == "alpha")
+    assert after.container_id != before.container_id
+    assert after.container_id == manager.launcher.launched[("alpha", 0)].handle.container_id
+    assert before.container_id in docker.removed
+    await manager.launcher.stop_all()
+
+
+async def test_reattach_finds_the_replaced_container_by_name(workspace, docker, healthy):
+    """control plane 이 죽어 있는 동안 기록은 옛 id 를 들고 있다 — 이름으로 찾는다."""
+    catalog = Catalog.under(workspace)
+    store = InMemoryDeploymentStore()
+
+    def fresh() -> DeploymentManager:
+        return DeploymentManager(
+            catalog=catalog,
+            author=Author(catalog=catalog),
+            store=store,
+            secrets_env={"ANTHROPIC_API_KEY": "k"},
+            launcher=AgentLauncher(
+                engine=DockerEngine(client=docker), health_interval_s=10.0, health_sleep=Tick()
+            ),
+            ready_poll_s=0.0,
+            sleep=NoSleep(),
+        )
+
+    first = fresh()
+    record = await first.deploy("two")
+    replaced = first.launcher.launched[("alpha", 0)]
+    replaced.lifecycle.transition(AgentState.UNHEALTHY)
+    await first.launcher._replace(replaced)  # noqa: SLF001
+    live_id = first.launcher.launched[("alpha", 0)].handle.container_id
+    stale = store.get(record.deployment_id)
+    assert next(a for a in stale.agents if a.name == "alpha").container_id != live_id
+
+    second = fresh()
+    touched = await second.reattach()
+
+    assert [r.status for r in touched] == [DeploymentStatus.READY]
+    assert next(a for a in touched[0].agents if a.name == "alpha").container_id == live_id
+    assert second.launcher.launched[("alpha", 0)].handle.container_id == live_id
+    await first.launcher.stop_all()
+    await second.launcher.stop_all()

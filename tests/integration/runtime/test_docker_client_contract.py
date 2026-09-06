@@ -99,6 +99,16 @@ def test_the_security_settings_reach_the_container(client, container):
     assert raw.split() == ["true", "256", "500000000", "268435456", "[ALL]"]
 
 
+def test_find_resolves_a_name_to_the_live_id_only(client, container):
+    """재부착은 이름으로 찾는다 — 재시작마다 id 가 바뀌기 때문이다."""
+    container_id = container
+    name = f"contract-{type(client).__name__.lower()}"
+    assert client.find(name) == container_id
+    assert client.find("malkuth-no-such-container") is None
+    client.remove(container_id)
+    assert client.find(name) is None
+
+
 def test_remove_is_idempotent(client, container):
     client.remove(container)
 

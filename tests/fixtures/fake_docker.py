@@ -76,5 +76,13 @@ class FakeDockerClient:
             raise self._remove_error
         self.removed.append(container_id)
 
+    def find(self, name: str) -> str | None:
+        """이름이 같은 **살아 있는** 컨테이너의 id — 지워진 것은 없는 것이다."""
+        for index, kwargs in enumerate(self.created, start=1):
+            container_id = f"container-{index:04d}" + "0" * 20
+            if kwargs.get("name") == name and container_id not in self.removed:
+                return container_id
+        return None
+
 
 __all__ = ["FakeDockerClient"]

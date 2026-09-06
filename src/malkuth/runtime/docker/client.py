@@ -88,5 +88,12 @@ class SdkDockerClient:
         except NotFound:
             return  # 이미 없다 — 정리의 목적은 달성됐다
 
+    def find(self, name: str) -> str | None:
+        try:
+            container_id: str = self._sdk.containers.get(name).id
+        except NotFound:
+            return None
+        return container_id
+
 
 __all__ = ["SdkDockerClient"]

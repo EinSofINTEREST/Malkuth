@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -33,6 +34,7 @@ METRICS_PORT = 19702
 NETWORK = "malkuth-e2e-net"
 GRAPH = "research-pipeline"
 AGENTS = ("planner", "researcher", "writer")
+CONTAINER_NAME = re.compile(rf"malkuth-({'|'.join(AGENTS)})-\d+")
 DEADLINE_S = 120.0
 HEADERS = {"Authorization": f"Bearer {CONTROL_TOKEN}"}
 
@@ -144,13 +146,16 @@ def api(method: str, path: str, body: dict[str, Any] | None = None) -> tuple[int
 
 
 def deployed_containers() -> dict[str, str]:
-    """이름 → 상태. compose 의 것(`malkuth-e2e-*`)은 제외한다."""
+    """이 그래프의 에이전트 자리(`malkuth-{agent}-{replica}`)에 서 있는 컨테이너 — 이름 → 상태.
+
+    compose 의 `malkuth-e2e-*` 와 다른 테스트가 남긴 `malkuth-echo-*` 는 제외한다.
+    """
     out = docker("ps", "-a", "--format", "{{.Names}}\t{{.Status}}", "--filter", "name=^malkuth-")
     return {
         name: status
         for line in out.splitlines()
         for name, status in [line.split("\t", 1)]
-        if not name.startswith("malkuth-e2e-")
+        if CONTAINER_NAME.fullmatch(name)
     }
 
 
@@ -236,6 +241,26 @@ def test_deploy_reattach_and_teardown(plane):
     assert [a["container_id"] for a in again["agents"]] == [
         a["container_id"] for a in record["agents"]
     ]
+
+    # --- 감시/재시작: 죽은 컨테이너를 launcher 가 다시 세우고 기록이 그것을 따라간다
+    #     (02 Lifecycle 6 — #213/#215 가 launcher 에 넣은 경로가 이 배포에서 실제로 돈다)
+    old_writer = next(a for a in again["agents"] if a["name"] == "writer")
+    docker("kill", "malkuth-writer-0")
+
+    def replaced() -> dict | None:
+        status, current = api("GET", f"/v1/deployments/{record['deployment_id']}")
+        writer = next(a for a in current["agents"] if a["name"] == "writer")
+        if writer["container_id"] == old_writer["container_id"]:
+            return None
+        try:
+            health = fetch(f"http://127.0.0.1:{writer['control_port']}/v1/health")
+        except Exception:  # noqa: BLE001 — 새 컨테이너가 아직 뜨는 중
+            return None
+        return writer if health["status"] in ("healthy", "degraded") else None
+
+    new_writer = until(replaced, what="writer restarted after being killed")
+    assert new_writer["container_id"] != old_writer["container_id"]
+    assert deployed_containers()["malkuth-writer-0"].startswith("Up")
 
     # --- 해체: 컨테이너가 남지 않고 기록은 남는다
     status, stopped = api("DELETE", f"/v1/deployments/{record['deployment_id']}")

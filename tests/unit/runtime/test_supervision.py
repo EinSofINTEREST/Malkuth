@@ -16,6 +16,7 @@ import yaml
 from prometheus_client import CollectorRegistry
 
 from malkuth.core.agent import ComponentHealth, HealthState, HealthStatus
+from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
 from malkuth.core.manifest import AgentManifest
 from malkuth.observability.metrics import Metrics
 from malkuth.runtime.docker.engine import DockerEngine
@@ -59,6 +60,13 @@ class ScriptedHealth:
     def __init__(self, results: list[HealthStatus]) -> None:
         self._results = list(results)
         self.calls = 0
+        self.drains: list[float | None] = []
+        self.drain_error: Exception | None = None
+
+    async def drain(self, *, timeout_s: float | None = None) -> None:
+        self.drains.append(timeout_s)
+        if self.drain_error is not None:
+            raise self.drain_error
 
     async def health(self) -> HealthStatus:
         self.calls += 1
@@ -95,6 +103,7 @@ async def start_with(agents: AgentLauncher, results: list[HealthStatus]):
     launched = await agents.start(manifest())
     probe = ScriptedHealth(results)
     launched.client.health = probe.health  # type: ignore[method-assign]
+    launched.client.drain = probe.drain  # type: ignore[method-assign]
     return launched, probe
 
 
@@ -173,6 +182,64 @@ async def test_a_degraded_agent_still_accepts_tasks():
 
     assert launched.lifecycle.state is AgentState.READY
     await agents.stop_all()
+
+
+# --- 정지 = drain 후 stop (02 Lifecycle 4·5) ---------------------------------------
+
+
+async def test_stopping_a_ready_agent_drains_before_the_container_stops():
+    """#243 — launcher.stop 은 Draining 으로 **표시만** 하고 agentd 에 drain 을 청하지
+    않았다. 진행 중 태스크는 SIGTERM 과 함께 사라졌다."""
+    agents = launcher(StepSleep(0), drain_timeout_s=7.0)
+    launched, probe = await start_with(agents, [healthy()])
+    await until(lambda: launched.lifecycle.state is AgentState.READY)
+    order: list[str] = []
+    probe_drain = probe.drain
+
+    async def drain(*, timeout_s=None):
+        order.append("drain")
+        await probe_drain(timeout_s=timeout_s)
+
+    engine_stop = agents.engine.stop
+
+    async def stop(handle, **kwargs):
+        order.append("stop")
+        await engine_stop(handle, **kwargs)
+
+    launched.client.drain = drain  # type: ignore[method-assign]
+    agents.engine.stop = stop  # type: ignore[method-assign]
+
+    await agents.stop(manifest().name)
+
+    assert order == ["drain", "stop"]
+    assert probe.drains == [7.0]
+
+
+async def test_a_drain_that_times_out_still_stops_the_container():
+    agents = launcher(StepSleep(0))
+    launched, probe = await start_with(agents, [healthy()])
+    await until(lambda: launched.lifecycle.state is AgentState.READY)
+    probe.drain_error = MalkuthError(
+        category=ErrorCategory.TIMEOUT, code=ErrorCode.TO_001, message="slow"
+    )
+
+    await agents.stop(manifest().name)
+
+    assert probe.drains, "drain was never requested"
+    assert launched.lifecycle.state is AgentState.STOPPED
+    assert agents.launched == {}
+
+
+async def test_a_starting_agent_is_stopped_without_a_drain():
+    """되감기는 아직 Ready 가 아닌 컨테이너를 내린다 — 받은 태스크가 없으니 기다릴 것도 없다."""
+    agents = launcher(StepSleep(0))
+    launched, probe = await start_with(agents, [sick()])
+    await until(lambda: probe.calls >= 1)
+
+    await agents.stop(manifest().name)
+
+    assert probe.drains == []
+    assert launched.lifecycle.state is AgentState.STOPPED
 
 
 # --- 메트릭 -----------------------------------------------------------------

@@ -14,7 +14,8 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from malkuth.catalog import MODULE_TYPES, Catalog, load_yaml
+from malkuth.authoring import Author
+from malkuth.catalog import Catalog, load_yaml
 from malkuth.cli.control import CONTROL_TOKEN_ENV, DEFAULT_CONTROL_URL
 from malkuth.cli.integrity import (
     dangling_module_refs,
@@ -22,8 +23,8 @@ from malkuth.cli.integrity import (
     orphan_checkpoints,
 )
 from malkuth.config import DEFAULT_CONFIG_DIR, ENVIRONMENT_ENV, load_config, resolve_environment
-from malkuth.core.errors import ErrorCode, MalkuthError
-from malkuth.deploy import Finding, ValidationReport, validate_deployment
+from malkuth.core.errors import MalkuthError
+from malkuth.deploy import ValidationReport
 from malkuth.observability.logging import configure
 from malkuth.orchestrator.topology import GraphTopology
 
@@ -50,31 +51,10 @@ def validate_root(
     세 명령(`deploy` / `validate` / `run`)이 **같은 입력으로 같은 판정**을
     내리도록 한 곳에 모읍니다 — 흩어지면 한 명령만 통과하는 상태가 생깁니다.
     """
-    catalog = Catalog.under(root)
-    agents, groups = catalog.agents(), catalog.groups()
-    report = validate_deployment(
-        topologies,
-        manifests=agents.items,
-        groups=groups.items,
-        resolvable_refs=catalog.module_refs(),
-        global_secrets=(
-            frozenset(groups.items["global"].spec.secrets) if "global" in groups.items else ()
-        ),
-        a2a_port_range=a2a_port_range,
+    # 조립은 Author.validate 한 곳 — CLI 는 지목한 그래프만 판정한다 (with_saved_graphs=False)
+    return Author(catalog=Catalog.under(root), a2a_port_range=a2a_port_range).validate(
+        graphs=topologies, with_saved_graphs=False
     )
-    # 읽지 못한 선언은 검증에서 빠진 것이지 통과한 것이 아니다 — 실패로 합친다.
-    # 조용히 빼면 참조되지 않는 깨진 에이전트가 있어도 deploy 가 통과한다
-    broken = [*agents.problems, *groups.problems]
-    module_problems = [
-        problem for module_type in MODULE_TYPES for problem in catalog.modules(module_type).problems
-    ]
-    findings = [
-        Finding(
-            check="catalog", code=ErrorCode(p.code), message=p.message, details={"path": p.path}
-        )
-        for p in [*broken, *module_problems]
-    ]
-    return ValidationReport(findings=(*findings, *report.findings))
 
 
 def emit(payload: dict[str, Any], *, as_json: bool) -> None:

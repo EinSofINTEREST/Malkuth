@@ -21,6 +21,7 @@ from pathlib import Path
 import structlog
 import uvicorn
 
+from malkuth.authoring import Author
 from malkuth.catalog import Catalog
 from malkuth.config import (
     DEFAULT_CONFIG_DIR,
@@ -88,6 +89,7 @@ def main() -> None:
     # 설정의 registry.roots 는 상대 경로다 — 작업 디렉토리가 아니라 레포 루트 기준
     root = Path(os.environ.get(ROOT_ENV, ".")).resolve()
     catalog = Catalog.from_config(config.registry.roots, base=root)
+    author = Author(catalog=catalog, a2a_port_range=config.protocols.a2a.port_range)
     log.info(
         "control plane starting",
         port=orchestrator.control_port,
@@ -95,7 +97,7 @@ def main() -> None:
         repo_root=str(root),
     )
     uvicorn.run(
-        create_app(store, catalog=catalog, token=orchestrator.control_token),
+        create_app(store, catalog=catalog, token=orchestrator.control_token, author=author),
         host=orchestrator.control_host,
         port=orchestrator.control_port,
         log_config=None,

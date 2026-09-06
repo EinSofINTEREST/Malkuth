@@ -10,13 +10,16 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import uuid
+from collections import OrderedDict
 from collections.abc import Awaitable, Iterator, Mapping
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import structlog
 
 from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
+from malkuth.orchestrator.run import RunStatus
 from malkuth.orchestrator.runstore import RunRecord
 from malkuth.orchestrator.topology import GraphMode
 from malkuth.runtime.deployments import DeploymentStatus
@@ -31,6 +34,13 @@ if TYPE_CHECKING:
     from malkuth.runtime.launcher import AgentLauncher
 
 log = structlog.get_logger(__name__)
+
+DEFAULT_MAX_RESULTS = 256
+"""프로세스 메모리에 쥐는 완주 결과 수 — 넘치면 오래된 것부터 버린다."""
+
+
+def _now() -> str:
+    return datetime.now(UTC).isoformat()
 
 
 class RoutedClients(Mapping[str, "ControlClient"]):
@@ -81,7 +91,10 @@ class RunService:
     submitter: RunSubmitter
     store: RunStore
     drivers: dict[str, asyncio.Task[RunResult]] = field(default_factory=dict)
-    results: dict[str, RunResult] = field(default_factory=dict)
+    results: OrderedDict[str, RunResult] = field(default_factory=OrderedDict)
+    """완주한 mission 의 결과 — 최근 `max_results` 건만 쥔다. state 는 클 수 있고
+    control plane 은 오래 산다; 전부 쥐면 메모리가 run 수만큼 자란다."""
+    max_results: int = DEFAULT_MAX_RESULTS
 
     async def submit(
         self,
@@ -104,9 +117,10 @@ class RunService:
         if topology.spec.mode is GraphMode.SERVICE:
             await self.submitter.start_service(topology, initial_state, run_id=run_id)
         else:
+            # 제출 응답이 돌아간 직후의 GET 이 404 면 안 된다 — 드라이버가 기록을
+            # 남기기 전이라도 **여기서** 먼저 쓴다 (read-your-writes)
+            self._announce(run_id, topology)
             self._drive(run_id, self.submitter.submit(topology, initial_state, run_id=run_id))
-            # 기록은 드라이버가 첫 await 전에 남긴다 — 제출 응답이 그것을 보게 한다
-            await asyncio.sleep(0)
         bound.info("run submitted", deployment_id=deployment.deployment_id)
         return self._record(run_id, topology)
 
@@ -124,8 +138,8 @@ class RunService:
             await self.submitter.resume_service(topology, run_id)
         else:
             self.results.pop(run_id, None)
+            self._announce(run_id, topology)
             self._drive(run_id, self.submitter.resume(topology, run_id))
-            await asyncio.sleep(0)
         log.info("run resumed", graph=record.graph, run_id=run_id, mode=record.mode)
         return self._record(run_id, topology)
 
@@ -140,6 +154,8 @@ class RunService:
             # 종료 중이다 — 취소된/실패한 드라이버의 결과는 버린다
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
+        # 아직 시작도 못 한 드라이버는 finally 를 타지 않아 스스로 빠지지 않는다
+        self.drivers.clear()
         await self.submitter.stop_services()
 
     # --- 내부 --------------------------------------------------------------
@@ -164,13 +180,39 @@ class RunService:
             )
         return deployment, topology
 
-    def _record(self, run_id: str, topology: GraphTopology) -> RunRecord:
-        return self.store.get(run_id) or RunRecord(
-            run_id=run_id,
-            graph=topology.metadata.name,
-            mode=str(topology.spec.mode),
-            status="running",
+    def _announce(self, run_id: str, topology: GraphTopology) -> None:
+        self.store.upsert(
+            RunRecord(
+                run_id=run_id,
+                graph=topology.metadata.name,
+                mode=str(topology.spec.mode),
+                status=str(RunStatus.RUNNING),
+                updated_at=_now(),
+            )
         )
+
+    def _record(self, run_id: str, topology: GraphTopology) -> RunRecord:
+        record = self.store.get(run_id)
+        if record is None:  # pragma: no cover - 방금 썼다 (service 는 submitter 가 쓴다)
+            self._announce(run_id, topology)
+            record = self.store.get(run_id)
+        assert record is not None  # noqa: S101 — 바로 위에서 썼다
+        return record
+
+    def _remember(self, run_id: str, result: RunResult) -> None:
+        self.results[run_id] = result
+        self.results.move_to_end(run_id)
+        while len(self.results) > self.max_results:
+            self.results.popitem(last=False)
+
+    def _fail(self, run_id: str) -> None:
+        record = self.store.get(run_id)
+        if record is None or record.status != str(RunStatus.RUNNING):
+            return
+        self.store.upsert(
+            RunRecord(**{**record.__dict__, "status": str(RunStatus.FAILED), "updated_at": _now()})
+        )
+        self.results.pop(run_id, None)
 
     def _drive(self, run_id: str, driver: Awaitable[RunResult]) -> None:
         """mission 드라이버를 이 서비스 소유의 태스크로 띄운다 — 결과는 끝나는 순간 기록된다.
@@ -185,11 +227,13 @@ class RunService:
             except asyncio.CancelledError:
                 raise
             except Exception as err:  # noqa: BLE001 — 드라이버의 예외는 여기서 끝난다 (05 Fail Gracefully)
+                # 제출 시점에 쓴 running 기록을 그대로 두면 영원히 "진행 중" 으로 보인다
+                self._fail(run_id)
                 log.error("run driver failed", run_id=run_id, exc_info=err)
                 raise
             finally:
                 self.drivers.pop(run_id, None)
-            self.results[run_id] = result
+            self._remember(run_id, result)
             return result
 
         self.drivers[run_id] = asyncio.create_task(run(), name=run_id)

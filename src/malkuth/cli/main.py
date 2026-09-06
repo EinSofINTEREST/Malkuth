@@ -374,7 +374,12 @@ def _run_service(
     return EXIT_OK if handle.error is None else EXIT_FAILED
 
 
-FINISHED_STATUSES = frozenset({"completed", "failed", "halted", "stopped", "canceled"})
+def _finished_statuses() -> frozenset[str]:
+    """서버 계약에서 끌어온다 — 여기 따로 적으면 `RunStatus` 와 어긋난 채 남는다."""
+    from malkuth.orchestrator.run import RunStatus
+
+    live = (RunStatus.RUNNING, RunStatus.DRAINING)
+    return frozenset(str(s) for s in RunStatus if s not in live)
 
 
 def _run_on_deployment(args: argparse.Namespace, payload: dict[str, Any]) -> int:
@@ -395,8 +400,9 @@ def _run_on_deployment(args: argparse.Namespace, payload: dict[str, Any]) -> int
             emit(submitted, as_json=args.json)
             return EXIT_OK
         deadline = time.monotonic() + args.wait_timeout_s
+        finished = _finished_statuses()
         current = submitted
-        while current.get("status") not in FINISHED_STATUSES:
+        while current.get("status") not in finished:
             if time.monotonic() >= deadline:
                 emit({**current, "error": "timed out waiting for the run"}, as_json=args.json)
                 return EXIT_FAILED

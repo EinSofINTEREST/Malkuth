@@ -203,7 +203,8 @@ async def test_resume_drives_the_recorded_graph(parts):
     await runs.resume("s-1")
     await asyncio.gather(*runs.drivers.values())
 
-    assert submitter.calls == [("resume", "m-1"), ("resume_service", "s-1")]
+    # 드라이버는 다음 await 에서 돈다 — 호출 순서가 아니라 집합을 본다
+    assert sorted(submitter.calls) == [("resume", "m-1"), ("resume_service", "s-1")]
     assert runs.result_of("m-1").state == {"resumed": True}
 
 
@@ -238,3 +239,44 @@ def test_routed_clients_follow_the_launcher_and_miss_cleanly():
 
     assert clients.get("planner") is None
     assert len(clients) == 0 and list(clients) == []
+
+
+async def test_the_record_is_readable_right_after_submit_without_yielding(parts):
+    """202 직후의 GET 이 404 면 안 된다 — 드라이버가 아니라 제출이 기록을 쓴다."""
+    store, _, _, mission, _ = parts
+    runs = service_for(parts, deployed(mission.metadata.name))
+
+    record = await runs.submit("dep-1", {}, run_id="fresh")
+
+    assert store.get("fresh") is not None and record.status == "running"
+    await runs.close()
+
+
+async def test_a_driver_that_raises_leaves_a_failed_record(parts):
+    """제출 시점의 running 기록을 그대로 두면 영원히 진행 중으로 보인다."""
+    store, _, submitter, mission, _ = parts
+    runs = service_for(parts, deployed(mission.metadata.name))
+
+    async def broken(topology, initial_state, *, run_id=None):
+        raise RuntimeError("driver exploded")
+
+    submitter.submit = broken  # type: ignore[method-assign]
+    await runs.submit("dep-1", {}, run_id="boom")
+    with pytest.raises(RuntimeError):
+        await asyncio.gather(*runs.drivers.values())
+
+    assert store.get("boom").status == "failed"
+    assert runs.result_of("boom") is None
+
+
+async def test_results_are_bounded(parts):
+    _, _, submitter, mission, _ = parts
+    runs = service_for(parts, deployed(mission.metadata.name))
+    runs.max_results = 2
+    submitter.gate.set()
+    for i in range(3):
+        await runs.submit("dep-1", {}, run_id=f"r{i}")
+        await asyncio.gather(*runs.drivers.values())
+
+    assert list(runs.results) == ["r1", "r2"]
+    assert runs.result_of("r0") is None

@@ -104,9 +104,15 @@ class ControlClient:
         """
         url = f"{self._base}{path}"
         try:
-            response = httpx.request(
-                method, url, timeout=self._timeout_s, headers=self._headers, json=body
-            )
+            # 본문이 없는 요청에 `json=None` 을 넘기면 httpx 가 리터럴 null 을 싣는다
+            if body is None:
+                response = httpx.request(
+                    method, url, timeout=self._timeout_s, headers=self._headers
+                )
+            else:
+                response = httpx.request(
+                    method, url, timeout=self._timeout_s, headers=self._headers, json=body
+                )
         except httpx.HTTPError as err:
             raise unreachable(self._base, err) from err
 

@@ -73,14 +73,25 @@ def test_the_configured_store_is_served(tmp_path, monkeypatch):
     assert served["app"] is not None
 
 
-def test_the_served_app_refuses_resume(tmp_path):
-    """이 프로세스는 run 을 구동하지 않는다 — 조용히 성공하면 운영자가 오해한다."""
+async def test_the_served_app_refuses_resume(tmp_path):
+    """이 프로세스는 run 을 구동하지 않는다 — 조용히 성공하면 운영자가 오해한다.
+
+    라우트가 *있는지* 가 아니라 **실제로 거절하는지**를 본다 — 라우트 목록 검사는
+    라우터 구조가 바뀌면 깨지고, 있다는 것만으로는 501 인지 200 인지 모른다.
+    """
+    import httpx
+
+    from malkuth.orchestrator.runstore import RunRecord
+
     store = SqliteRunStore(path=str(tmp_path / "runs.db"))
-    app = create_app(store)
+    store.upsert(RunRecord(run_id="halted", graph="g", mode="service", status="halted"))
+    transport = httpx.ASGITransport(app=create_app(store))
 
-    routes = {route.path for route in app.routes}  # type: ignore[attr-defined]
+    async with httpx.AsyncClient(transport=transport, base_url="http://cp") as api:
+        response = await api.post("/v1/runs/halted/resume")
 
-    assert "/v1/runs/{run_id}/resume" in routes
+    assert response.status_code == 501
+    assert "does not drive the run" in response.text
 
 
 def test_the_cli_records_runs_when_a_store_is_configured(tmp_path):

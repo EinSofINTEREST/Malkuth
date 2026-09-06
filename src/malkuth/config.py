@@ -136,6 +136,10 @@ class OrchestratorConfig(BaseModel):
     """Control Plane bind 주소. 기본은 loopback — 이 표면은 인증이 없으므로
     외부에 열려면 그 앞을 막는 것이 배포하는 쪽의 책임이다."""
     control_port: int = Field(default=8700, gt=0, le=65535)
+    control_token: str | None = Field(default=None, min_length=1)
+    """Control Plane 의 Bearer 토큰. 이 표면은 파일을 쓰고 컨테이너를 띄우므로
+    (#242~) 무인증으로 두지 않는다. loopback 밖으로 bind 하면서 토큰이 없으면
+    진입점이 기동을 거부한다 — `MALKUTH_ORCHESTRATOR__CONTROL_TOKEN` 으로 준다."""
     max_concurrent_runs: int = Field(default=10, gt=0)
     max_service_runs: int = Field(default=5, gt=0)
     node_timeout_s: float = Field(default=300.0, gt=0)

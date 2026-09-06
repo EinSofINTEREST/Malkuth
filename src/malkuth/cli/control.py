@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
 DEFAULT_CONTROL_URL = "http://127.0.0.1:8700"
+CONTROL_TOKEN_ENV = "MALKUTH_CONTROL_TOKEN"  # noqa: S105 — 키 이름이지 값이 아니다
 DEFAULT_TIMEOUT_S = 10.0
 
 
@@ -74,10 +75,16 @@ class ControlClient:
     """
 
     def __init__(
-        self, base_url: str = DEFAULT_CONTROL_URL, *, timeout_s: float = DEFAULT_TIMEOUT_S
+        self,
+        base_url: str = DEFAULT_CONTROL_URL,
+        *,
+        timeout_s: float = DEFAULT_TIMEOUT_S,
+        token: str | None = None,
     ) -> None:
         self._base = base_url.rstrip("/")
         self._timeout_s = timeout_s
+        # 값을 속성에 그대로 두지 않는다 — repr/로그로 새는 경로를 하나 줄인다
+        self._headers = {"authorization": f"Bearer {token}"} if token else {}
 
     def _request(self, method: str, path: str, *, run_scoped: bool = True) -> Any:
         """요청 한 건 — 연결 실패와 서비스 실패를 나눠 옮긴다.
@@ -90,7 +97,7 @@ class ControlClient:
         """
         url = f"{self._base}{path}"
         try:
-            response = httpx.request(method, url, timeout=self._timeout_s)
+            response = httpx.request(method, url, timeout=self._timeout_s, headers=self._headers)
         except httpx.HTTPError as err:
             raise unreachable(self._base, err) from err
 
@@ -121,6 +128,7 @@ class ControlClient:
 
 
 __all__ = [
+    "CONTROL_TOKEN_ENV",
     "DEFAULT_CONTROL_URL",
     "ControlClient",
     "unreachable",

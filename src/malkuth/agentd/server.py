@@ -13,12 +13,13 @@ import asyncio
 from typing import TYPE_CHECKING, Any
 
 from a2a.utils.constants import AGENT_CARD_WELL_KNOWN_PATH
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, status
+from fastapi import APIRouter, Depends, FastAPI, Request, status
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict
 
 from malkuth.core.agent import HealthState, HealthStatus, TaskRequest, TaskResult
 from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError, MalkuthErrorPayload
+from malkuth.http_auth import require_token
 from malkuth.http_errors import status_for
 
 if TYPE_CHECKING:
@@ -111,26 +112,6 @@ def _error_response(err: MalkuthError, http_status: int) -> JSONResponse:
     return JSONResponse(status_code=http_status, content=err.payload().model_dump(mode="json"))
 
 
-def require_token(expected: str | None) -> Callable[[Request], None]:
-    """Build a dependency enforcing the per-agent token.
-
-    per-agent 토큰을 요구하는 의존성을 만듭니다. ``/health`` 는 이 의존성을
-    쓰지 않습니다 — Docker healthcheck 가 직접 호출하기 때문입니다.
-    """
-
-    def check(request: Request) -> None:
-        if expected is None:
-            return
-        header = request.headers.get("authorization", "")
-        if header != f"Bearer {expected}":
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="invalid agent token",
-            )
-
-    return check
-
-
 def create_app(runtime: AgentRuntime, *, token: str | None = None) -> FastAPI:
     """Build the Control API application.
 
@@ -144,7 +125,7 @@ def create_app(runtime: AgentRuntime, *, token: str | None = None) -> FastAPI:
         The FastAPI application.
     """
     app = FastAPI(title=f"malkuth-agentd:{runtime.agent}")
-    guard = Depends(require_token(token))
+    guard = Depends(require_token(token, realm="agent token"))
 
     @app.exception_handler(MalkuthError)
     async def _structured(_request: Request, err: MalkuthError) -> JSONResponse:

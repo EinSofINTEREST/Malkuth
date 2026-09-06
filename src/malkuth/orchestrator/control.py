@@ -14,11 +14,12 @@ from __future__ import annotations
 from dataclasses import asdict
 from typing import TYPE_CHECKING, Any
 
-from fastapi import FastAPI, Request, status
+from fastapi import APIRouter, Depends, FastAPI, Request, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 
 from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
+from malkuth.http_auth import require_token
 from malkuth.http_errors import status_for
 
 if TYPE_CHECKING:
@@ -72,6 +73,7 @@ def create_app(
     *,
     resume: Callable[[str], Any] | None = None,
     catalog: Catalog | None = None,
+    token: str | None = None,
 ) -> FastAPI:
     """Build the Control Plane app.
 
@@ -84,11 +86,21 @@ def create_app(
             운영자가 재개됐다고 오해합니다.
         catalog: What the repository declares (#240). 없으면 카탈로그 라우트를
             열지 않는다 — 빈 목록을 돌려주면 "선언이 없다" 로 읽힌다.
+        token: Bearer token every request must present (#241). None 이면 검사하지
+            않는다 — 그것이 안전한지(loopback 인지)는 진입점이 판단한다.
+            ``/v1/health`` 만 예외다 (02 API Rules 4 와 같은 이유).
 
     Returns:
         The FastAPI application.
     """
     app = FastAPI(title="Malkuth Control Plane")
+    # 읽기도 보호한다 — 카탈로그에는 env_allowlist 같은 운영 정보가 있다
+    api = APIRouter(dependencies=[Depends(require_token(token, realm="control plane token"))])
+
+    @app.get("/v1/health")
+    async def health() -> dict[str, str]:
+        """무인증 — 살아 있는지만 답한다. 운영 정보는 싣지 않는다."""
+        return {"status": "ok"}
 
     @app.exception_handler(MalkuthError)
     async def _on_error(_request: Request, err: MalkuthError) -> JSONResponse:
@@ -101,12 +113,12 @@ def create_app(
             status_code=status_for(err), content={"error": err.payload().model_dump()}
         )
 
-    @app.get("/v1/runs")
+    @api.get("/v1/runs")
     async def list_runs(mode: str | None = None) -> list[dict[str, Any]]:
         """기록된 run 목록 — mode 로 좁힐 수 있습니다."""
         return [view_of(record).model_dump() for record in store.list(mode=mode)]
 
-    @app.get("/v1/runs/{run_id}")
+    @api.get("/v1/runs/{run_id}")
     async def get_run(run_id: str) -> dict[str, Any]:
         """run 하나의 상태."""
         record = store.get(run_id)
@@ -114,7 +126,7 @@ def create_app(
             raise unknown_run(run_id)
         return view_of(record).model_dump()
 
-    @app.post("/v1/runs/{run_id}/drain")
+    @api.post("/v1/runs/{run_id}/drain")
     async def drain_run(run_id: str) -> dict[str, Any]:
         """Ask a run to stop after its current iteration.
 
@@ -129,7 +141,7 @@ def create_app(
             raise unknown_run(run_id)
         return view_of(record).model_dump()
 
-    @app.post("/v1/runs/{run_id}/resume")
+    @api.post("/v1/runs/{run_id}/resume")
     async def resume_run(run_id: str) -> dict[str, Any]:
         """Restart a halted run from its last iteration.
 
@@ -155,12 +167,13 @@ def create_app(
         return {"run_id": getattr(handle, "run_id", run_id), "status": "resumed"}
 
     if catalog is not None:
-        _mount_catalog(app, catalog)
+        _mount_catalog(api, catalog)
 
+    app.include_router(api)
     return app
 
 
-def _mount_catalog(app: FastAPI, catalog: Catalog) -> None:
+def _mount_catalog(api: APIRouter, catalog: Catalog) -> None:
     """읽기 전용 카탈로그 — UI 가 "무엇으로 조립할 수 있는가" 를 보는 표면.
 
     목록은 파싱된 것과 **깨진 것을 함께** 돌려준다. 하나가 깨졌다고 전체를
@@ -173,7 +186,7 @@ def _mount_catalog(app: FastAPI, catalog: Catalog) -> None:
             "problems": [asdict(problem) for problem in found.problems],
         }
 
-    @app.get("/v1/agents")
+    @api.get("/v1/agents")
     async def list_agents() -> dict[str, Any]:
         return listing(
             catalog.agents(),
@@ -186,11 +199,11 @@ def _mount_catalog(app: FastAPI, catalog: Catalog) -> None:
             },
         )
 
-    @app.get("/v1/agents/{name}")
+    @api.get("/v1/agents/{name}")
     async def get_agent(name: str) -> dict[str, Any]:
         return catalog.agent(name).model_dump(mode="json")
 
-    @app.get("/v1/graphs")
+    @api.get("/v1/graphs")
     async def list_graphs() -> dict[str, Any]:
         return listing(
             catalog.graphs(),
@@ -204,11 +217,11 @@ def _mount_catalog(app: FastAPI, catalog: Catalog) -> None:
             },
         )
 
-    @app.get("/v1/graphs/{name}")
+    @api.get("/v1/graphs/{name}")
     async def get_graph(name: str) -> dict[str, Any]:
         return catalog.graph(name).model_dump(mode="json")
 
-    @app.get("/v1/groups")
+    @api.get("/v1/groups")
     async def list_groups() -> dict[str, Any]:
         return listing(
             catalog.groups(),
@@ -219,11 +232,11 @@ def _mount_catalog(app: FastAPI, catalog: Catalog) -> None:
             },
         )
 
-    @app.get("/v1/groups/{name}")
+    @api.get("/v1/groups/{name}")
     async def get_group(name: str) -> dict[str, Any]:
         return catalog.group(name).model_dump(mode="json")
 
-    @app.get("/v1/modules/{module_type}")
+    @api.get("/v1/modules/{module_type}")
     async def list_modules(module_type: str) -> dict[str, Any]:
         found = catalog.modules(module_type)
         return {
@@ -233,7 +246,7 @@ def _mount_catalog(app: FastAPI, catalog: Catalog) -> None:
             "problems": [asdict(problem) for problem in found.problems],
         }
 
-    @app.get("/v1/modules/{module_type}/{name}/{version}")
+    @api.get("/v1/modules/{module_type}/{name}/{version}")
     async def get_module(module_type: str, name: str, version: str) -> dict[str, Any]:
         return catalog.module(module_type, name, version)
 

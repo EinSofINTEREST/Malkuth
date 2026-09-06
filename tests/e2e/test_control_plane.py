@@ -37,6 +37,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # feed-monitor 의 watcher/classifier/notifier 노드가 각각 이들을 쓴다
 AGENT_PORTS = {"researcher": 18083, "planner": 18082, "writer": 18084}
 CONTROL_PORT = 18701
+CONTROL_TOKEN = "e2e-control-token"  # noqa: S105
 METRICS_PORT = 19701
 DEADLINE_S = 90.0
 
@@ -60,6 +61,8 @@ def write_config(directory: Path, store_path: Path) -> Path:
                 "orchestrator": {
                     "run_store": str(store_path),
                     "control_port": CONTROL_PORT,
+                    # 인증을 켠 채로 돈다 — 무인증으로 통과하면 인증 회귀를 못 잡는다 (#241)
+                    "control_token": CONTROL_TOKEN,
                     "service_defaults": {"idle_min_delay_s": 0.1, "idle_max_delay_s": 0.1},
                 }
             }
@@ -77,7 +80,12 @@ def cli(*argv: str, config_dir: Path) -> subprocess.CompletedProcess[str]:
         text=True,
         check=False,
         cwd=REPO_ROOT,
-        env={**os.environ, "MALKUTH_ENV": "e2e", "MALKUTH_CONFIG_DIR": str(config_dir)},
+        env={
+            **os.environ,
+            "MALKUTH_ENV": "e2e",
+            "MALKUTH_CONFIG_DIR": str(config_dir),
+            "MALKUTH_CONTROL_TOKEN": CONTROL_TOKEN,
+        },
     )
 
 

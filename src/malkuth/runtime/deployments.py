@@ -146,6 +146,12 @@ CREATE TABLE IF NOT EXISTS deployments (
 );
 """
 
+_ADDED_COLUMNS = {
+    "a2a_secret": "TEXT NOT NULL DEFAULT ''",
+    "declared": "TEXT NOT NULL DEFAULT '[]'",
+}
+"""첫 스키마 이후 더해진 컬럼 — `_migrate` 가 옛 DB 에 채운다. 새로 더할 때 여기에도 적는다."""
+
 
 @dataclass
 class SqliteDeploymentStore:
@@ -160,7 +166,9 @@ class SqliteDeploymentStore:
                 self._conn = sqlite3.connect(
                     str(self.path), isolation_level=None, check_same_thread=False
                 )
+                self._conn.row_factory = sqlite3.Row
                 self._conn.execute(_SCHEMA)
+                _migrate(self._conn)
             except sqlite3.Error as err:
                 raise _storage_error(
                     "deployment store could not be opened", path=str(self.path)
@@ -205,18 +213,30 @@ class SqliteDeploymentStore:
         return [_row(r) for r in rows]
 
 
-def _row(row: tuple[Any, ...]) -> DeploymentRecord:
-    deployment_id, graph, version, status, agents, error, updated_at, a2a_secret, declared = row
+def _migrate(conn: sqlite3.Connection) -> None:
+    """있는 DB 에 빠진 컬럼을 더한다 — `CREATE TABLE IF NOT EXISTS` 는 그러지 않는다.
+
+    #254: 컬럼이 늘어난 코드로 옛 DB 를 열면 기동이 죽었다. 기본값이 있는 컬럼만 더하므로
+    기존 행은 그대로 읽힌다.
+    """
+    existing = {row["name"] for row in conn.execute("PRAGMA table_info(deployments)")}
+    for name, declaration in _ADDED_COLUMNS.items():
+        if name not in existing:
+            conn.execute(f"ALTER TABLE deployments ADD COLUMN {name} {declaration}")  # noqa: S608 — 상수
+
+
+def _row(row: sqlite3.Row) -> DeploymentRecord:
+    """컬럼 **이름**으로 읽는다 — 순서에 기대면 컬럼이 늘 때마다 깨진다 (#254)."""
     return DeploymentRecord(
-        deployment_id=deployment_id,
-        graph=graph,
-        version=version,
-        status=status,
-        agents=tuple(DeployedAgent(**a) for a in json.loads(agents)),
-        error=error,
-        updated_at=updated_at,
-        a2a_secret=a2a_secret,
-        declared=tuple(json.loads(declared)),
+        deployment_id=row["deployment_id"],
+        graph=row["graph"],
+        version=row["version"],
+        status=row["status"],
+        agents=tuple(DeployedAgent(**a) for a in json.loads(row["agents"])),
+        error=row["error"],
+        updated_at=row["updated_at"],
+        a2a_secret=row["a2a_secret"],
+        declared=tuple(json.loads(row["declared"])),
     )
 
 

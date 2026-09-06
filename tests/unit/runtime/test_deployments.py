@@ -15,6 +15,7 @@ from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
 from malkuth.runtime.control import ControlClient
 from malkuth.runtime.deployments import (
     DeploymentManager,
+    DeploymentRecord,
     DeploymentStatus,
     InMemoryDeploymentStore,
     SqliteDeploymentStore,
@@ -686,3 +687,32 @@ async def test_port_exhaustion_fails_the_deployment_and_frees_what_it_took(
     assert manager.launcher.ports.assigned == {}
     assert manager.deployments()[0].status == DeploymentStatus.FAILED
     assert docker.created == []
+
+
+# --- 저장소 스키마 마이그레이션 (#254) ---------------------------------------------
+
+
+def test_the_sqlite_store_opens_a_database_from_before_the_new_columns(tmp_path):
+    """실 스택에서 기동이 죽었다 — 옛 DB 는 `a2a_secret`/`declared` 컬럼이 없다."""
+    import sqlite3
+
+    path = tmp_path / "deployments.db"
+    with sqlite3.connect(path) as old:
+        old.execute(
+            "CREATE TABLE deployments (deployment_id TEXT PRIMARY KEY, graph TEXT NOT NULL, "
+            "version TEXT NOT NULL, status TEXT NOT NULL, agents TEXT NOT NULL, error TEXT, "
+            "updated_at TEXT NOT NULL)"
+        )
+        old.execute(
+            "INSERT INTO deployments VALUES (?,?,?,?,?,?,?)",
+            ("dep-old", "two", "1.0.0", "ready", "[]", None, "2026-09-06T00:00:00+00:00"),
+        )
+
+    store = SqliteDeploymentStore(path=path)
+    record = store.get("dep-old")
+
+    assert record is not None and record.status == DeploymentStatus.READY
+    assert record.a2a_secret == "" and record.declared == ()
+    store.upsert(DeploymentRecord(**{**record.__dict__, "declared": ("alpha",), "a2a_secret": "s"}))
+    assert store.get("dep-old").declared == ("alpha",)
+    assert [r.deployment_id for r in store.list()] == ["dep-old"]

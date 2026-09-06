@@ -11,6 +11,7 @@ Resume 은 다르다: 이어갈 state 가 구동 프로세스의 핸들에 있�
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from dataclasses import asdict
 from typing import TYPE_CHECKING, Annotated, Any
 
@@ -26,12 +27,13 @@ from malkuth.http_errors import status_for
 from malkuth.orchestrator.topology import GraphTopology
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import AsyncIterator, Callable
 
     from malkuth.authoring import Author
     from malkuth.catalog import Catalog, Listing
     from malkuth.deploy import ValidationReport
     from malkuth.orchestrator.runstore import RunRecord, RunStore
+    from malkuth.runtime.deployments import DeploymentManager, DeploymentRecord
 
 
 def unknown_run(run_id: str) -> MalkuthError:
@@ -80,6 +82,7 @@ def create_app(
     catalog: Catalog | None = None,
     token: str | None = None,
     author: Author | None = None,
+    deployments: DeploymentManager | None = None,
 ) -> FastAPI:
     """Build the Control Plane app.
 
@@ -92,6 +95,8 @@ def create_app(
             운영자가 재개됐다고 오해합니다.
         catalog: What the repository declares (#240). 없으면 카탈로그 라우트를
             열지 않는다 — 빈 목록을 돌려주면 "선언이 없다" 로 읽힌다.
+        deployments: Turns graphs into running containers (#243). 없으면 배포
+            라우트를 열지 않는다. 기동 시 살아 있는 컨테이너에 다시 붙는다.
         author: Validates and writes graphs and manifests (#242). 없으면 쓰기
             라우트를 열지 않는다 — 읽기 전용 배포가 있을 수 있다.
         token: Bearer token every request must present (#241). None 이면 검사하지
@@ -101,7 +106,16 @@ def create_app(
     Returns:
         The FastAPI application.
     """
-    app = FastAPI(title="Malkuth Control Plane")
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+        # 재시작 뒤 Docker 가 들고 있는 컨테이너를 기록과 대조해 다시 붙는다 —
+        # 서버의 이벤트 루프 안에서 해야 health 감시 태스크가 살아남는다
+        if deployments is not None:
+            await deployments.reattach()
+        yield
+
+    app = FastAPI(title="Malkuth Control Plane", lifespan=lifespan)
     # 읽기도 보호한다 — 카탈로그에는 env_allowlist 같은 운영 정보가 있다
     api = APIRouter(dependencies=[Depends(require_token(token, realm="control plane token"))])
 
@@ -201,6 +215,8 @@ def create_app(
         _mount_catalog(api, catalog)
     if author is not None:
         _mount_authoring(api, author)
+    if deployments is not None:
+        _mount_deployments(api, deployments)
 
     app.include_router(api)
     return app
@@ -378,6 +394,56 @@ def _mount_authoring(api: APIRouter, author: Author) -> None:
     @api.delete("/v1/agents/{name}", status_code=status.HTTP_204_NO_CONTENT)
     async def delete_agent(name: str) -> None:
         author.delete_agent(name)
+
+
+def _deployment_view(record: DeploymentRecord) -> dict[str, Any]:
+    return {
+        "deployment_id": record.deployment_id,
+        "graph": record.graph,
+        "version": record.version,
+        "status": record.status,
+        "error": record.error,
+        "updated_at": record.updated_at,
+        "agents": [
+            {
+                "name": a.name,
+                "replica": a.replica,
+                "container_id": a.container_id[:12],
+                "image": a.image,
+                "control_port": a.control_port,
+                "a2a_port": a.a2a_port,
+            }
+            for a in record.agents
+        ],
+    }
+
+
+class DeployRequest(BaseModel):
+    graph: str
+
+
+def _mount_deployments(api: APIRouter, deployments: DeploymentManager) -> None:
+    """배포 lifecycle — 검증 → 실제 컨테이너 기동 → health → 기록 → 해체 (#243).
+
+    토큰은 응답에 싣지 않는다 — 기록에는 있지만 API 로 내보낼 이유가 없다.
+    """
+
+    @api.post("/v1/deployments", status_code=status.HTTP_201_CREATED)
+    async def create_deployment(body: Annotated[Any, Body()]) -> dict[str, Any]:
+        request = _parsed(body, DeployRequest)
+        return _deployment_view(await deployments.deploy(request.graph))
+
+    @api.get("/v1/deployments")
+    async def list_deployments() -> dict[str, Any]:
+        return {"items": [_deployment_view(r) for r in deployments.deployments()]}
+
+    @api.get("/v1/deployments/{deployment_id}")
+    async def get_deployment(deployment_id: str) -> dict[str, Any]:
+        return _deployment_view(deployments.get(deployment_id))
+
+    @api.delete("/v1/deployments/{deployment_id}")
+    async def delete_deployment(deployment_id: str) -> dict[str, Any]:
+        return _deployment_view(await deployments.teardown(deployment_id))
 
 
 __all__ = ["RunView", "create_app", "unknown_run", "view_of"]

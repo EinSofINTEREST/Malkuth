@@ -213,3 +213,23 @@ def test_a_whitespace_padded_memory_marker_is_still_rejected(tmp_path):
         run_manager_for(args_for(tmp_path))
 
     assert excinfo.value.code == ErrorCode.CFG_001
+
+
+def test_the_served_author_pins_running_declarations(monkeypatch, tmp_path):
+    """#249 리뷰 — 프로덕션 Author 에 in_use 가 비어 있으면 가드가 무동작이다."""
+    write_config(tmp_path, {"run_store": str(tmp_path / "runs.db"), "control_port": 18999})
+    monkeypatch.setenv("MALKUTH_ENV", "local")
+    monkeypatch.setenv("MALKUTH_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setenv("MALKUTH_REPO_ROOT", str(Path(__file__).resolve().parents[3]))
+    monkeypatch.setattr(entrypoint, "_setup_observability", lambda: None)
+    captured: dict = {}
+    monkeypatch.setattr(
+        entrypoint, "create_app", lambda store, **kw: captured.update(kw) or object()
+    )
+    monkeypatch.setattr(entrypoint.uvicorn, "run", lambda app, **_kw: None)
+
+    entrypoint.main()
+
+    author = captured["author"]
+    assert author.in_use is not None, "in_use 미배선 — 배포/실행 중 선언이 보호되지 않는다"
+    assert author.in_use("graph", "research-pipeline") is False  # run 이 없으면 사용 중이 아니다

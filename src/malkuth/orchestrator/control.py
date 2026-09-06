@@ -12,20 +12,25 @@ Resume 은 다르다: 이어갈 state 가 구동 프로세스의 핸들에 있�
 from __future__ import annotations
 
 from dataclasses import asdict
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Annotated, Any
 
-from fastapi import APIRouter, Depends, FastAPI, Request, status
+from fastapi import APIRouter, Body, Depends, FastAPI, Request, status
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
+from malkuth.core.manifest import AgentManifest
 from malkuth.http_auth import require_token
 from malkuth.http_errors import status_for
+from malkuth.orchestrator.topology import GraphTopology
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from malkuth.authoring import Author
     from malkuth.catalog import Catalog, Listing
+    from malkuth.deploy import ValidationReport
     from malkuth.orchestrator.runstore import RunRecord, RunStore
 
 
@@ -74,6 +79,7 @@ def create_app(
     resume: Callable[[str], Any] | None = None,
     catalog: Catalog | None = None,
     token: str | None = None,
+    author: Author | None = None,
 ) -> FastAPI:
     """Build the Control Plane app.
 
@@ -86,6 +92,8 @@ def create_app(
             운영자가 재개됐다고 오해합니다.
         catalog: What the repository declares (#240). 없으면 카탈로그 라우트를
             열지 않는다 — 빈 목록을 돌려주면 "선언이 없다" 로 읽힌다.
+        author: Validates and writes graphs and manifests (#242). 없으면 쓰기
+            라우트를 열지 않는다 — 읽기 전용 배포가 있을 수 있다.
         token: Bearer token every request must present (#241). None 이면 검사하지
             않는다 — 그것이 안전한지(loopback 인지)는 진입점이 판단한다.
             ``/v1/health`` 만 예외다 (02 API Rules 4 와 같은 이유).
@@ -101,6 +109,29 @@ def create_app(
     async def health() -> dict[str, str]:
         """무인증 — 살아 있는지만 답한다. 운영 정보는 싣지 않는다."""
         return {"status": "ok"}
+
+    @app.exception_handler(RequestValidationError)
+    async def _on_bad_body(_request: Request, err: RequestValidationError) -> JSONResponse:
+        """본문이 JSON 도 아니거나 라우트 시그니처에 못 미치면 FastAPI 가 여기 오기 전에
+        422 를 낸다 — 카탈로그·authoring 이 내는 `VAL_002` 와 같은 모양으로 맞춘다.
+        UI 가 한 가지 모양만 다루게 (#242 리뷰)."""
+        problem = MalkuthError(
+            category=ErrorCategory.VALIDATION,
+            code=ErrorCode.VAL_002,
+            message="request failed validation",
+            details={
+                "errors": [
+                    {
+                        "field": ".".join(str(loc) for loc in e.get("loc", ())),
+                        "problem": e.get("msg", ""),
+                    }
+                    for e in err.errors()
+                ]
+            },
+        )
+        return JSONResponse(
+            status_code=status_for(problem), content={"error": problem.payload().model_dump()}
+        )
 
     @app.exception_handler(MalkuthError)
     async def _on_error(_request: Request, err: MalkuthError) -> JSONResponse:
@@ -168,6 +199,8 @@ def create_app(
 
     if catalog is not None:
         _mount_catalog(api, catalog)
+    if author is not None:
+        _mount_authoring(api, author)
 
     app.include_router(api)
     return app
@@ -249,6 +282,102 @@ def _mount_catalog(api: APIRouter, catalog: Catalog) -> None:
     @api.get("/v1/modules/{module_type}/{name}/{version}")
     async def get_module(module_type: str, name: str, version: str) -> dict[str, Any]:
         return catalog.module(module_type, name, version)
+
+
+def _parsed[T: BaseModel](body: Any, model: type[T]) -> T:
+    """요청 본문을 모델로 — 스키마 위반은 **어느 필드가 왜** 인지 담아 400 으로.
+
+    FastAPI 의 기본 422 는 카탈로그가 깨진 파일에 대해 내는 형식과 다르다 —
+    UI 가 한 가지 모양만 다루게 같은 `VAL_002` details 로 맞춘다. 본문을 ``Any`` 로
+    받는 이유도 같다: ``dict`` 로 받으면 배열·문자열 본문이 여기 오기 전에 422 로 샌다.
+    """
+    try:
+        return model.model_validate(body)
+    except ValidationError as err:
+        raise MalkuthError(
+            category=ErrorCategory.VALIDATION,
+            code=ErrorCode.VAL_002,
+            message="request body failed schema validation",
+            details={
+                "errors": [
+                    {"field": ".".join(str(loc) for loc in e["loc"]), "problem": e["msg"]}
+                    for e in err.errors()
+                ]
+            },
+        ) from err
+
+
+def _report(report: ValidationReport) -> dict[str, Any]:
+    return {
+        "ok": report.ok,
+        "findings": [
+            {"check": f.check, "code": str(f.code), "message": f.message, **f.details}
+            for f in report.findings
+        ],
+    }
+
+
+class Declarations(BaseModel):
+    """`/v1/declarations` 본문 — 이름 → 문서. 이름이 곧 경로다."""
+
+    graphs: dict[str, Any] = {}
+    agents: dict[str, Any] = {}
+
+
+class Draft(BaseModel):
+    """`/v1/validate` 본문 — 저장하지 않을 초안들.
+
+    모듈 수준에 두는 이유: `from __future__ import annotations` 아래에서 FastAPI 는
+    annotation 을 문자열로 해석한다 — 함수 안의 클래스는 못 찾고 본문을 쿼리
+    파라미터로 오해한다 (#241 의 `Request` 와 같은 함정).
+    """
+
+    graphs: list[dict[str, Any]] = []
+    agents: list[dict[str, Any]] = []
+
+
+def _mount_authoring(api: APIRouter, author: Author) -> None:
+    """검증 후 저장 — 검증 없이 쓰는 경로는 없다 (01 Contract Validation)."""
+
+    @api.post("/v1/validate")
+    async def validate(body: Annotated[Any, Body()]) -> dict[str, Any]:
+        draft = _parsed(body, Draft)
+        """초안을 저장된 것과 함께 검증만 한다 — 아무것도 쓰지 않는다."""
+        return _report(
+            author.validate(
+                graphs=[_parsed(g, GraphTopology) for g in draft.graphs],
+                agents=[_parsed(a, AgentManifest) for a in draft.agents],
+            )
+        )
+
+    @api.put("/v1/declarations")
+    async def put_declarations(body: Annotated[Any, Body()]) -> dict[str, Any]:
+        """그래프와 에이전트를 **함께** 검증하고 함께 쓴다 — 에이전트 버전을 올리면서
+        그것을 참조하는 그래프를 같이 올릴 때 따로는 어느 순서로도 통과하지 못한다."""
+        draft = _parsed(body, Declarations)
+        written = author.save_all(
+            graphs={n: _parsed(g, GraphTopology) for n, g in draft.graphs.items()},
+            agents={n: _parsed(a, AgentManifest) for n, a in draft.agents.items()},
+        )
+        return {"written": [str(p) for p in written]}
+
+    @api.put("/v1/graphs/{name}")
+    async def put_graph(name: str, body: Annotated[Any, Body()]) -> dict[str, Any]:
+        path = author.save_graph(name, _parsed(body, GraphTopology))
+        return {"name": name, "path": str(path)}
+
+    @api.delete("/v1/graphs/{name}", status_code=status.HTTP_204_NO_CONTENT)
+    async def delete_graph(name: str) -> None:
+        author.delete_graph(name)
+
+    @api.put("/v1/agents/{name}")
+    async def put_agent(name: str, body: Annotated[Any, Body()]) -> dict[str, Any]:
+        path = author.save_agent(name, _parsed(body, AgentManifest))
+        return {"name": name, "path": str(path)}
+
+    @api.delete("/v1/agents/{name}", status_code=status.HTTP_204_NO_CONTENT)
+    async def delete_agent(name: str) -> None:
+        author.delete_agent(name)
 
 
 __all__ = ["RunView", "create_app", "unknown_run", "view_of"]

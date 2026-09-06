@@ -14,8 +14,7 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-import yaml
-
+from malkuth.catalog import MODULE_TYPES, Catalog, load_yaml
 from malkuth.cli.control import DEFAULT_CONTROL_URL
 from malkuth.cli.integrity import (
     dangling_module_refs,
@@ -23,9 +22,8 @@ from malkuth.cli.integrity import (
     orphan_checkpoints,
 )
 from malkuth.config import DEFAULT_CONFIG_DIR, ENVIRONMENT_ENV, load_config, resolve_environment
-from malkuth.core.errors import MalkuthError
-from malkuth.core.manifest import AgentManifest, GroupManifest
-from malkuth.deploy import ValidationReport, validate_deployment
+from malkuth.core.errors import ErrorCode, MalkuthError
+from malkuth.deploy import Finding, ValidationReport, validate_deployment
 from malkuth.observability.logging import configure
 from malkuth.orchestrator.topology import GraphTopology
 
@@ -37,64 +35,6 @@ EXIT_FAILED = 1
 """검증/점검 실패 — 운영 스크립트가 분기할 수 있도록 0 과 구분한다."""
 
 EXIT_USAGE = 2
-
-
-def load_yaml(path: Path) -> dict[str, Any]:
-    """Read a YAML document.
-
-    YAML 문서를 읽습니다.
-
-    Raises:
-        MalkuthError: CONFIG/``CFG_001`` if the file cannot be read or parsed.
-    """
-    from malkuth.config import config_error
-
-    try:
-        document = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError) as err:
-        raise config_error("cannot read yaml document", path=str(path)) from err
-
-    if not isinstance(document, dict):
-        raise config_error("yaml document must be a mapping", path=str(path))
-    return document
-
-
-def discover_agents(root: Path) -> dict[str, AgentManifest]:
-    """Load every agent manifest under a directory.
-
-    디렉토리 아래의 모든 에이전트 manifest 를 읽습니다.
-    """
-    manifests: dict[str, AgentManifest] = {}
-    for path in sorted(root.glob("*/manifest.yaml")):
-        manifest = AgentManifest.model_validate(load_yaml(path))
-        manifests[manifest.name] = manifest
-    return manifests
-
-
-def discover_groups(root: Path) -> dict[str, GroupManifest]:
-    """Load every group definition under a directory."""
-    groups: dict[str, GroupManifest] = {}
-    for path in sorted(root.glob("*.yaml")):
-        group = GroupManifest.model_validate(load_yaml(path))
-        groups[group.metadata.name] = group
-    return groups
-
-
-def discover_refs(root: Path) -> frozenset[str]:
-    """Collect every published module ref under the registry roots.
-
-    registry 루트 아래의 게시된 모듈 ref 를 모읍니다 — 디렉토리 구조가
-    ``{type}/{name}/{version}/`` 이므로 경로에서 ref 를 복원합니다.
-    """
-    refs: set[str] = set()
-    for module_type in ("skillsets", "promptsets", "memorysets"):
-        type_root = root / module_type
-        if not type_root.is_dir():
-            continue
-        for version_dir in sorted(type_root.glob("*/*")):
-            if version_dir.is_dir():
-                refs.add(f"{module_type}/{version_dir.parent.name}@{version_dir.name}")
-    return frozenset(refs)
 
 
 def validate_root(
@@ -110,15 +50,31 @@ def validate_root(
     세 명령(`deploy` / `validate` / `run`)이 **같은 입력으로 같은 판정**을
     내리도록 한 곳에 모읍니다 — 흩어지면 한 명령만 통과하는 상태가 생깁니다.
     """
-    groups = discover_groups(root / "groups")
-    return validate_deployment(
+    catalog = Catalog.under(root)
+    agents, groups = catalog.agents(), catalog.groups()
+    report = validate_deployment(
         topologies,
-        manifests=discover_agents(root / "agents"),
-        groups=groups,
-        resolvable_refs=discover_refs(root / "modules"),
-        global_secrets=frozenset(groups["global"].spec.secrets) if "global" in groups else (),
+        manifests=agents.items,
+        groups=groups.items,
+        resolvable_refs=catalog.module_refs(),
+        global_secrets=(
+            frozenset(groups.items["global"].spec.secrets) if "global" in groups.items else ()
+        ),
         a2a_port_range=a2a_port_range,
     )
+    # 읽지 못한 선언은 검증에서 빠진 것이지 통과한 것이 아니다 — 실패로 합친다.
+    # 조용히 빼면 참조되지 않는 깨진 에이전트가 있어도 deploy 가 통과한다
+    broken = [*agents.problems, *groups.problems]
+    module_problems = [
+        problem for module_type in MODULE_TYPES for problem in catalog.modules(module_type).problems
+    ]
+    findings = [
+        Finding(
+            check="catalog", code=ErrorCode(p.code), message=p.message, details={"path": p.path}
+        )
+        for p in [*broken, *module_problems]
+    ]
+    return ValidationReport(findings=(*findings, *report.findings))
 
 
 def emit(payload: dict[str, Any], *, as_json: bool) -> None:
@@ -147,7 +103,7 @@ def cmd_deploy(args: argparse.Namespace) -> int:
     """
     root = Path(args.root)
     topology = GraphTopology.model_validate(load_yaml(Path(args.graph)))
-    manifests = discover_agents(root / "agents")
+    manifests = Catalog.under(root).agents().items
 
     report = validate_root(root, [topology], a2a_port_range=args.a2a_port_range)
 
@@ -169,7 +125,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
     저장소의 모든 그래프를 검증합니다 — 배포 전 일괄 점검용입니다.
     """
     root = Path(args.root)
-    manifests = discover_agents(root / "agents")
+    manifests = Catalog.under(root).agents().items
     topologies = [
         GraphTopology.model_validate(load_yaml(path))
         for path in sorted((root / "graphs").glob("*.yaml"))
@@ -195,21 +151,21 @@ def cmd_status(args: argparse.Namespace) -> int:
     저장소에 선언된 것을 요약합니다. 실행 중 상태 조회는 runtime 연결이
     필요하므로, 이 명령은 **선언 상태**를 보고합니다.
     """
-    root = Path(args.root)
-    manifests = discover_agents(root / "agents")
-    groups = discover_groups(root / "groups")
-    graphs = sorted(p.stem for p in (root / "graphs").glob("*.yaml"))
+    catalog = Catalog.under(Path(args.root))
+    agents, groups, graphs = catalog.agents(), catalog.groups(), catalog.graphs()
 
-    emit(
-        {
-            "agents": sorted(manifests),
-            "groups": sorted(groups),
-            "graphs": graphs,
-            "modules": sorted(discover_refs(root / "modules")),
-        },
-        as_json=args.json,
-    )
-    return EXIT_OK
+    payload: dict[str, Any] = {
+        "agents": sorted(agents.items),
+        "groups": sorted(groups.items),
+        "graphs": sorted(graphs.items),
+        "modules": sorted(catalog.module_refs()),
+    }
+    # 깨진 선언은 조용히 빼지 않는다 — 운영자가 빠진 줄 모른다
+    problems = [*agents.problems, *groups.problems, *graphs.problems]
+    if problems:
+        payload["problems"] = [f"{p.path}: [{p.code}] {p.message}" for p in problems]
+    emit(payload, as_json=args.json)
+    return EXIT_OK if not problems else EXIT_FAILED
 
 
 def cmd_config(args: argparse.Namespace) -> int:

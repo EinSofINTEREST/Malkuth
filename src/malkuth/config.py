@@ -209,6 +209,7 @@ class RegistryRoots(BaseModel):
     memorysets: str = "./modules/memorysets"
     agents: str = "./agents"
     graphs: str = "./graphs"
+    groups: str = "./groups"
 
 
 class RegistryConfig(BaseModel):

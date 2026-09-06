@@ -73,6 +73,7 @@ class RegistryRoots:
     memorysets: Path
     agents: Path
     graphs: Path
+    groups: Path
 
     @classmethod
     def under(cls, base: Path) -> RegistryRoots:
@@ -86,6 +87,7 @@ class RegistryRoots:
             memorysets=base / "modules" / "memorysets",
             agents=base / "agents",
             graphs=base / "graphs",
+            groups=base / "groups",
         )
 
     def for_type(self, module_type: str) -> Path:

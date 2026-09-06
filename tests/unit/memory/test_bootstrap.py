@@ -101,3 +101,27 @@ def test_a_forged_token_is_refused(deployment):
         response = client.get("/v1/spaces", headers={"Authorization": "Bearer forged"})
 
     assert response.status_code == 401
+
+
+# --- 불완전한 카탈로그로 서비스를 띄우지 않는다 (#247 리뷰) ---------------------------
+
+
+def test_bootstrap_refuses_unreadable_declarations(tmp_path, monkeypatch):
+    """깨진 에이전트는 토큰을 못 받고, 깨진 그룹은 멀쩡한 에이전트의 group space 를 지운다."""
+    from malkuth.config import load_config
+    from malkuth.core.errors import ErrorCode, MalkuthError
+    from malkuth.memory.bootstrap import build_deployment
+
+    root = tmp_path
+    (root / "agents" / "bad").mkdir(parents=True)
+    (root / "agents" / "bad" / "manifest.yaml").write_text("kind: Agent\n", encoding="utf-8")
+    for d in ("groups", "graphs", "modules"):
+        (root / d).mkdir(exist_ok=True)
+
+    with pytest.raises(MalkuthError) as excinfo:
+        build_deployment(load_config("dev", config_dir="configs"), root=root)
+
+    assert excinfo.value.code == ErrorCode.CFG_001
+    assert any(
+        p["path"].endswith("agents/bad/manifest.yaml") for p in excinfo.value.details["problems"]
+    )

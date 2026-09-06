@@ -14,6 +14,7 @@ import asyncio
 import json
 import secrets
 import sqlite3
+import threading
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -155,10 +156,15 @@ _ADDED_COLUMNS = {
 
 @dataclass
 class SqliteDeploymentStore:
-    """runstore 와 같은 배치 — 파일 하나, 프로세스 재시작을 넘긴다."""
+    """runstore 와 같은 배치 — 파일 하나, 프로세스 재시작을 넘긴다.
+
+    Control plane 은 별도 스레드에서 서빙된다 (`SqliteRunStore` 와 같은 사정) —
+    연결 생성/마이그레이션과 모든 쿼리를 `_lock` 으로 직렬화해 경쟁 상태를 막는다.
+    """
 
     path: str | Path
     _conn: sqlite3.Connection | None = field(default=None, init=False, repr=False)
+    _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
     def _connect(self) -> sqlite3.Connection:
         if self._conn is None:
@@ -177,39 +183,44 @@ class SqliteDeploymentStore:
 
     def upsert(self, record: DeploymentRecord) -> None:
         try:
-            self._connect().execute(
-                "INSERT INTO deployments VALUES (?,?,?,?,?,?,?,?,?) "
-                "ON CONFLICT(deployment_id) DO UPDATE SET "
-                "graph=excluded.graph, version=excluded.version, status=excluded.status, "
-                "agents=excluded.agents, error=excluded.error, updated_at=excluded.updated_at, "
-                "a2a_secret=excluded.a2a_secret, declared=excluded.declared",
-                (
-                    record.deployment_id,
-                    record.graph,
-                    record.version,
-                    record.status,
-                    json.dumps([a.__dict__ for a in record.agents]),
-                    record.error,
-                    record.updated_at,
-                    record.a2a_secret,
-                    json.dumps(list(record.declared)),
-                ),
-            )
+            with self._lock:
+                self._connect().execute(
+                    "INSERT INTO deployments VALUES (?,?,?,?,?,?,?,?,?) "
+                    "ON CONFLICT(deployment_id) DO UPDATE SET "
+                    "graph=excluded.graph, version=excluded.version, status=excluded.status, "
+                    "agents=excluded.agents, error=excluded.error, updated_at=excluded.updated_at, "
+                    "a2a_secret=excluded.a2a_secret, declared=excluded.declared",
+                    (
+                        record.deployment_id,
+                        record.graph,
+                        record.version,
+                        record.status,
+                        json.dumps([a.__dict__ for a in record.agents]),
+                        record.error,
+                        record.updated_at,
+                        record.a2a_secret,
+                        json.dumps(list(record.declared)),
+                    ),
+                )
         except sqlite3.Error as err:
             raise _storage_error(
                 "deployment could not be stored", deployment_id=record.deployment_id
             ) from err
 
     def get(self, deployment_id: str) -> DeploymentRecord | None:
-        row = (
-            self._connect()
-            .execute("SELECT * FROM deployments WHERE deployment_id = ?", (deployment_id,))
-            .fetchone()
-        )
+        with self._lock:
+            row = (
+                self._connect()
+                .execute("SELECT * FROM deployments WHERE deployment_id = ?", (deployment_id,))
+                .fetchone()
+            )
         return _row(row) if row else None
 
     def list(self) -> Sequence[DeploymentRecord]:
-        rows = self._connect().execute("SELECT * FROM deployments ORDER BY updated_at").fetchall()
+        with self._lock:
+            rows = (
+                self._connect().execute("SELECT * FROM deployments ORDER BY updated_at").fetchall()
+            )
         return [_row(r) for r in rows]
 
 

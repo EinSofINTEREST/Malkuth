@@ -15,11 +15,23 @@ from typing import TYPE_CHECKING, Any
 
 import docker
 from docker.errors import ImageNotFound, NotFound
+from docker.utils import parse_repository_tag
 
 if TYPE_CHECKING:
     from docker import DockerClient as SdkHandle
 
 BRIDGE = "bridge"
+
+
+def image_reference(image: str) -> tuple[str, str]:
+    """이미지 참조를 (repository, tag|digest) 로 — SDK 자신의 파서로 나눈다.
+
+    `rpartition(":")` 은 `registry:5000/img` 를 태그로 오독하고, `img@sha256:…` 은
+    digest 를 태그 자리에 잘못 넣는다. tag 가 없으면 docker CLI 처럼 `latest` 다 —
+    None 으로 넘기면 SDK 가 **모든 태그**를 당긴다.
+    """
+    repository, tag = parse_repository_tag(image)
+    return repository, tag or "latest"
 
 
 class SdkDockerClient:
@@ -42,8 +54,8 @@ class SdkDockerClient:
         try:
             self._sdk.images.get(image)
         except ImageNotFound:
-            repository, _, tag = image.rpartition(":")
-            self._sdk.images.pull(repository or image, tag=tag or None)
+            repository, tag = image_reference(image)
+            self._sdk.images.pull(repository, tag=tag)
 
     def ensure_network(self, name: str) -> None:
         """네트워크를 확보한다 — 없으면 bridge 로 생성 (02 Network)."""

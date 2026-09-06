@@ -230,6 +230,46 @@ async def test_a_drain_that_times_out_still_stops_the_container():
     assert agents.launched == {}
 
 
+async def test_an_unexpected_drain_error_still_stops_the_container():
+    """MalkuthError 만 잡으면 JSON/타입 오류 같은 예외가 정지 경로를 통째로 끊는다."""
+    agents = launcher(StepSleep(0))
+    launched, probe = await start_with(agents, [healthy()])
+    await until(lambda: launched.lifecycle.state is AgentState.READY)
+    probe.drain_error = ValueError("garbled drain response")
+
+    await agents.stop(manifest().name)
+
+    assert launched.lifecycle.state is AgentState.STOPPED
+    assert agents.launched == {}
+
+
+async def test_a_restart_keeps_the_a2a_port_and_its_reservation():
+    """peer 들의 env 에 이 포트가 굳어 있다 — 재시작이 번호를 바꾸면 peer 가 못 찾는다."""
+    from malkuth.runtime.ports import A2APortAllocator
+    from malkuth.runtime.spec import A2A_PORT_ENV
+
+    agents = launcher(StepSleep(0), ports=A2APortAllocator(port_range=(9100, 9105)))
+    document = yaml.safe_load((REPO_ROOT / "agents" / "echo" / "manifest.yaml").read_text("utf-8"))
+    document["spec"]["a2a"] = {"enabled": True}
+    launched = await agents.start(AgentManifest.model_validate(document))
+    probe = ScriptedHealth([healthy()])
+    launched.client.health = probe.health  # type: ignore[method-assign]
+    launched.client.drain = probe.drain  # type: ignore[method-assign]
+    await until(lambda: launched.lifecycle.state is AgentState.READY)
+    port = launched.a2a_port
+    assert port is not None
+    launched.lifecycle.transition(AgentState.UNHEALTHY)
+
+    await agents._replace(launched)  # noqa: SLF001 — 재시작 경로
+
+    replaced = agents.launched[(manifest().name, 0)]
+    client = agents.engine.client
+    assert replaced.a2a_port == port
+    assert client.created[-1]["environment"][A2A_PORT_ENV] == str(port)
+    assert agents.ports is not None and list(agents.ports.assigned.values()) == [port]
+    await agents.stop_all()
+
+
 async def test_a_starting_agent_is_stopped_without_a_drain():
     """되감기는 아직 Ready 가 아닌 컨테이너를 내린다 — 받은 태스크가 없으니 기다릴 것도 없다."""
     agents = launcher(StepSleep(0))

@@ -25,6 +25,7 @@ from malkuth.runtime.lifecycle import AgentState
 from malkuth.runtime.ports import A2APortAllocator
 from malkuth.runtime.spec import A2A_EDGES_ENV, A2A_PEERS_ENV, A2A_SECRET_ENV
 from tests.fixtures.fake_docker import FakeDockerClient
+from tests.fixtures.waiting import until
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
@@ -334,6 +335,9 @@ async def test_a_restarted_control_plane_reattaches_running_containers(workspace
 
     assert [r.status for r in touched] == [DeploymentStatus.READY]
     assert sorted(second.launcher.launched) == [("alpha", 0), ("beta", 0)]
+    adopted = second.launcher.launched[("alpha", 0)]
+    # 살아 있다고 Ready 는 아니다 — 첫 health 성공이 올린다 (02 Rule 2)
+    await until(lambda: adopted.lifecycle.accepts_tasks)
     assert second.launcher.route("alpha").agent == "alpha"
     assert second.in_use("agent", "alpha")
     await second.launcher.stop_all()
@@ -371,8 +375,17 @@ async def test_missing_containers_mark_the_deployment_lost(workspace, docker, he
 
     assert touched[0].status == DeploymentStatus.LOST
     assert "alpha" in (touched[0].error or "")
-    assert not second.in_use("agent", "alpha"), "lost 는 배포 중이 아니다"
-    await second.launcher.stop_all()
+    # 붙은 쪽(beta)은 그대로 감시한다 — 그 컨테이너가 아직 선언으로 돌고 있으므로
+    # 선언도 계속 보호한다 (리뷰: LOST 를 in_use 에서 빼면 덮어쓸 수 있다)
+    assert list(second.launcher.launched) == [("beta", 0)]
+    assert second.in_use("agent", "beta") and second.in_use("agent", "alpha")
+    assert second.in_use("graph", "two")
+
+    stopped = await second.teardown(record.deployment_id)
+
+    assert stopped.status == DeploymentStatus.STOPPED
+    assert second.launcher.launched == {}
+    assert not second.in_use("agent", "beta")
 
 
 # --- 저장소 ----------------------------------------------------------------------
@@ -625,3 +638,51 @@ async def test_reattach_finds_the_replaced_container_by_name(workspace, docker, 
     assert second.launcher.launched[("alpha", 0)].handle.container_id == live_id
     await first.launcher.stop_all()
     await second.launcher.stop_all()
+
+
+# --- 리뷰(#250) 가 짚은 경계 -------------------------------------------------------
+
+
+async def test_declarations_are_protected_while_agents_are_still_starting(
+    workspace, docker, healthy, monkeypatch
+):
+    """`agents` 는 Ready 뒤에야 채워진다 — 기동 중에 in_use 가 False 면 authoring 이
+    그 선언을 덮어쓴다."""
+    wired_workspace(workspace)
+    manager = wired_manager(workspace, docker)
+    gate = asyncio.Event()
+    original = AgentLauncher.start
+
+    async def slow_start(self, manifest, **kwargs):
+        await gate.wait()
+        return await original(self, manifest, **kwargs)
+
+    monkeypatch.setattr(AgentLauncher, "start", slow_start)
+    deploying = asyncio.create_task(manager.deploy("wired"))
+    await asyncio.sleep(0)
+
+    assert manager.in_use("agent", "alpha") and manager.in_use("agent", "beta")
+    assert manager.in_use("graph", "wired")
+    assert manager.deployments()[0].status == DeploymentStatus.STARTING
+
+    gate.set()
+    await deploying
+    await manager.launcher.stop_all()
+
+
+async def test_port_exhaustion_fails_the_deployment_and_frees_what_it_took(
+    workspace, docker, healthy
+):
+    """준비 단계의 실패도 실패 경계 안이다 — 기록은 FAILED, 잡은 포트는 돌려준다."""
+    wired_workspace(workspace)
+    manager = wired_manager(workspace, docker)
+    assert manager.launcher.ports is not None
+    manager.launcher.ports.port_range = (9100, 9100)  # 두 에이전트, 포트 하나
+
+    with pytest.raises(MalkuthError) as exc_info:
+        await manager.deploy("wired")
+
+    assert exc_info.value.code == ErrorCode.RT_001
+    assert manager.launcher.ports.assigned == {}
+    assert manager.deployments()[0].status == DeploymentStatus.FAILED
+    assert docker.created == []

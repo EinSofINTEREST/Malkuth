@@ -57,7 +57,8 @@ class DeploymentStatus(StrEnum):
     FAILED = "failed"
     STOPPED = "stopped"
     LOST = "lost"
-    """재시작 후 컨테이너가 사라져 있었다 — 운영자가 알아야 하므로 지우지 않는다."""
+    """재시작 후 일부/전부를 다시 붙이지 못했다 — 운영자가 알아야 하므로 지우지 않는다.
+    붙은 컨테이너는 그대로 감시하며, 선언도 계속 보호한다. 정리는 teardown 이 한다."""
 
 
 @dataclass(frozen=True)
@@ -91,6 +92,9 @@ class DeploymentRecord:
     a2a_secret: str = ""
     """이 배포의 per-edge 토큰 서명 키 — 컨테이너들이 기동 시 받은 값이라
     재시작 뒤 같은 배포에 새 컨테이너를 세우려면 같은 키여야 한다."""
+    declared: tuple[str, ...] = ()
+    """이 배포가 쓰는 에이전트 이름 — 컨테이너가 서기 **전에** 적는다. `agents` 는
+    Ready 가 되어야 채워지므로 그것만 보면 기동 중인 선언을 덮어쓸 수 있다."""
 
 
 @runtime_checkable
@@ -137,7 +141,8 @@ CREATE TABLE IF NOT EXISTS deployments (
     agents        TEXT NOT NULL,
     error         TEXT,
     updated_at    TEXT NOT NULL,
-    a2a_secret    TEXT NOT NULL DEFAULT ''
+    a2a_secret    TEXT NOT NULL DEFAULT '',
+    declared      TEXT NOT NULL DEFAULT '[]'
 );
 """
 
@@ -165,11 +170,11 @@ class SqliteDeploymentStore:
     def upsert(self, record: DeploymentRecord) -> None:
         try:
             self._connect().execute(
-                "INSERT INTO deployments VALUES (?,?,?,?,?,?,?,?) "
+                "INSERT INTO deployments VALUES (?,?,?,?,?,?,?,?,?) "
                 "ON CONFLICT(deployment_id) DO UPDATE SET "
                 "graph=excluded.graph, version=excluded.version, status=excluded.status, "
                 "agents=excluded.agents, error=excluded.error, updated_at=excluded.updated_at, "
-                "a2a_secret=excluded.a2a_secret",
+                "a2a_secret=excluded.a2a_secret, declared=excluded.declared",
                 (
                     record.deployment_id,
                     record.graph,
@@ -179,6 +184,7 @@ class SqliteDeploymentStore:
                     record.error,
                     record.updated_at,
                     record.a2a_secret,
+                    json.dumps(list(record.declared)),
                 ),
             )
         except sqlite3.Error as err:
@@ -200,7 +206,7 @@ class SqliteDeploymentStore:
 
 
 def _row(row: tuple[Any, ...]) -> DeploymentRecord:
-    deployment_id, graph, version, status, agents, error, updated_at, a2a_secret = row
+    deployment_id, graph, version, status, agents, error, updated_at, a2a_secret, declared = row
     return DeploymentRecord(
         deployment_id=deployment_id,
         graph=graph,
@@ -210,6 +216,7 @@ def _row(row: tuple[Any, ...]) -> DeploymentRecord:
         error=error,
         updated_at=updated_at,
         a2a_secret=a2a_secret,
+        declared=tuple(json.loads(declared)),
     )
 
 
@@ -236,6 +243,14 @@ class Provision:
     env: Mapping[str, str]
     mounts: tuple[Mapping[str, Any], ...]
     a2a_port: int | None
+
+
+_HOLDS_DECLARATIONS = (DeploymentStatus.STARTING, DeploymentStatus.READY, DeploymentStatus.LOST)
+"""컨테이너가 (아직/여전히) 선언을 쓰고 있을 수 있는 상태 — authoring 이 손대면 안 된다."""
+
+
+def _agents_declared(record: DeploymentRecord) -> frozenset[str]:
+    return frozenset(record.declared) | frozenset(a.name for a in record.agents)
 
 
 def not_deployed(deployment_id: str) -> MalkuthError:
@@ -303,14 +318,11 @@ class DeploymentManager:
 
     def in_use(self, kind: str, name: str) -> bool:
         """authoring 이 묻는다 — 배포 중인 선언은 지우거나 덮어쓰지 못한다 (#242)."""
-        live = [
-            r
-            for r in self.store.list()
-            if r.status in (DeploymentStatus.READY, DeploymentStatus.STARTING)
-        ]
+        # LOST 도 포함한다 — 일부만 다시 붙은 배포의 컨테이너가 아직 그 선언으로 돈다
+        live = [r for r in self.store.list() if r.status in _HOLDS_DECLARATIONS]
         if kind == "graph":
             return any(r.graph == name for r in live)
-        return any(a.name == name for r in live for a in r.agents)
+        return any(name in _agents_declared(r) for r in live)
 
     # --- 배포 --------------------------------------------------------------
 
@@ -330,6 +342,7 @@ class DeploymentManager:
                 details={"graph": graph_name, "findings": [f.message for f in report.findings]},
             )
 
+        manifests = self._agents_of(topology)
         deployment_id = f"dep-{uuid.uuid4().hex[:12]}"
         record = DeploymentRecord(
             deployment_id=deployment_id,
@@ -338,14 +351,16 @@ class DeploymentManager:
             status=DeploymentStatus.STARTING,
             updated_at=_now(),
             a2a_secret=secrets.token_urlsafe(32),
+            # 첫 await 전에 적는다 — 기동 중에도 authoring 이 이 선언을 못 건드리게
+            declared=tuple(m.name for m in manifests),
         )
         self.store.upsert(record)
         bound = self._bind_log(record)
 
-        manifests = self._agents_of(topology)
-        provisions = self._provision(topology, manifests, a2a_secret=record.a2a_secret)
+        provisions: dict[str, Provision] = {}
         launched: list[LaunchedAgent] = []
         try:
+            provisions = self._provision(topology, manifests, a2a_secret=record.a2a_secret)
             for manifest in manifests:
                 launched.append(await self._launch(manifest, provisions[manifest.name]))
             await self._wait_ready(launched)
@@ -515,9 +530,15 @@ class DeploymentManager:
         ]
         assigned: dict[str, int] = dict(ports or {})
         if ports is None and self.launcher.ports is not None:
-            for manifest in manifests:
-                if manifest.spec.a2a.enabled:
-                    assigned[manifest.name] = self.launcher.ports.allocate(manifest.name)
+            try:
+                for manifest in manifests:
+                    if manifest.spec.a2a.enabled:
+                        assigned[manifest.name] = self.launcher.ports.allocate(manifest.name)
+            except MalkuthError:
+                # 범위가 말랐다 — 여기서 잡은 것은 여기서 돌려준다
+                for name in assigned:
+                    self.launcher.ports.release(name)
+                raise
 
         provisions: dict[str, Provision] = {}
         for manifest in manifests:
@@ -635,7 +656,11 @@ class DeploymentManager:
                 await self.launcher.stop(agent.agent, replica=agent.replica)
             except Exception as err:  # noqa: BLE001 — 되감기 중 하나가 실패해도 나머지를 계속 정리한다
                 log.error(
-                    "rollback could not stop an agent", agent=agent.agent, error_code=_code(err)
+                    "rollback could not stop an agent",
+                    agent=agent.agent,
+                    container_id=agent.handle.short_id,
+                    image=agent.handle.image,
+                    error_code=_code(err),
                 )
 
     def _bind_log(self, record: DeploymentRecord) -> Any:

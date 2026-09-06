@@ -323,16 +323,18 @@ class AgentLauncher:
         await launched.aclose()
         await self.engine.stop(launched.handle)
         del self.launched[agent, replica]
-        if self.ports is not None:
-            # 포트를 쥔 채로 다시 잡으면 범위가 마른다. 같은 레플리카는 같은
-            # 포트를 다시 받으므로 peer 의 광고 주소도 유지된다
-            self.ports.release(agent, replica=replica)
+        # A2A 포트는 **놓지 않는다**: peer 들의 env 에 이 포트가 굳어 있다 (#243 배선).
+        # 할당기의 예약은 그대로 두고 같은 번호를 명시해 넘기면 start 가 재할당하지 않는다
 
         args = dict(launched.restart_args)
         # **같은 lifecycle 을 이어붙인다**: 새로 만들면 재시작 횟수가 리셋되어
         # crash-loop 상한이 영원히 걸리지 않는다
         await self.start(
-            args.pop("manifest"), replica=replica, lifecycle=launched.lifecycle, **args
+            args.pop("manifest"),
+            replica=replica,
+            lifecycle=launched.lifecycle,
+            a2a_port=launched.a2a_port,
+            **args,
         )
 
     def _record_restart(self, agent: str, *, reason: str) -> None:
@@ -417,10 +419,11 @@ class AgentLauncher:
         client = ControlClient(
             f"http://127.0.0.1:{control_port}", agent=agent, retry=NETWORK_RETRY, token=token
         )
+        # Ready 는 **선언하지 않는다** — 살아 있다는 것과 태스크를 받을 수 있다는
+        # 것은 다르다. 첫 health 성공이 올린다 (02 Rule 2, `_promote`)
         lifecycle = AgentLifecycle(agent=agent)
         lifecycle.transition(AgentState.BUILT)
         lifecycle.transition(AgentState.STARTING)
-        lifecycle.transition(AgentState.READY)
         launched = LaunchedAgent(
             agent=agent,
             handle=handle,
@@ -523,7 +526,9 @@ class AgentLauncher:
         """
         try:
             await launched.client.drain(timeout_s=self.drain_timeout_s)
-        except MalkuthError as err:
+        except asyncio.CancelledError:
+            raise
+        except Exception as err:  # noqa: BLE001 — drain 은 최선의 시도다; 어떤 실패도 정지를 막지 않는다
             log.warning(
                 "agent drain did not complete; stopping anyway",
                 agent=launched.agent,

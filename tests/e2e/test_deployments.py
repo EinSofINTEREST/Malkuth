@@ -140,7 +140,8 @@ def api(method: str, path: str, body: dict[str, Any] | None = None) -> tuple[int
     )
     try:
         with urllib.request.urlopen(request, timeout=DEADLINE_S) as response:  # noqa: S310
-            return response.status, json.loads(response.read())
+            raw = response.read()
+            return response.status, (json.loads(raw) if raw else None)  # 204 는 본문이 없다
     except urllib.error.HTTPError as err:
         return err.code, json.loads(err.read() or b"null")
 
@@ -224,6 +225,33 @@ def test_deploy_reattach_and_teardown(plane):
         "{{range .Mounts}}{{.Destination}}:{{.RW}} {{end}}",
     )
     assert "/app/manifest.yaml:false" in mounts and "/app/modules/promptsets:false" in mounts
+
+    # --- UI (#245): 같은 프로세스가 화면을 서빙하고, 화면이 만드는 모양의 문서로 저작이 된다
+    page = urllib.request.urlopen(f"{plane_url()}/ui/", timeout=10).read().decode()  # noqa: S310
+    assert "<title>Malkuth</title>" in page
+    draft = {
+        "apiVersion": "malkuth/v1",
+        "kind": "Graph",
+        "metadata": {"name": "ui-e2e", "version": "0.1.0", "description": "made in the ui"},
+        "spec": {
+            "mode": "mission",
+            "goal": "ui e2e",
+            "state": {"schema": "malkuth.graphs.schemas:ResearchState"},
+            "nodes": [{"id": "planner", "agent": "agents/planner@0.4.0"}],
+            "edges": [{"from": "START", "to": "planner"}, {"from": "planner", "to": "END"}],
+            "connections": [],
+        },
+    }
+    status, verdict = api("POST", "/v1/validate", {"graphs": [draft]})
+    assert status == 200 and verdict["ok"], verdict
+    try:
+        status, saved = api("PUT", "/v1/graphs/ui-e2e", draft)
+        assert status == 200, saved
+        status, listed = api("GET", "/v1/graphs")
+        assert "ui-e2e" in [g["name"] for g in listed["items"]]
+    finally:
+        status, _ = api("DELETE", "/v1/graphs/ui-e2e")  # 실패해도 저장소에 남기지 않는다
+    assert status == 204
 
     # --- run 제출 (#244): 주소를 모르고도 배포에 run 을 내고, GET 으로 완주를 본다
     status, submitted = api(

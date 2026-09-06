@@ -17,7 +17,8 @@ from typing import TYPE_CHECKING, Annotated, Any
 
 from fastapi import APIRouter, Body, Depends, FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
@@ -25,6 +26,7 @@ from malkuth.core.manifest import AgentManifest
 from malkuth.http_auth import require_token
 from malkuth.http_errors import status_for
 from malkuth.orchestrator.topology import GraphTopology
+from malkuth.ui import UI_ROOT
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
@@ -238,7 +240,21 @@ def create_app(
         _mount_runs(api, runs)
 
     app.include_router(api)
+    _mount_ui(app)
     return app
+
+
+def _mount_ui(app: FastAPI) -> None:
+    """운영자 화면 — 정적 파일. 인증은 화면이 아니라 화면이 부르는 `/v1/*` 에 있다.
+
+    페이지 자체는 비밀이 아니다 (토큰 없이는 카탈로그도 못 읽는다). 별도 프로세스 없이
+    같은 포트에서 서빙한다 (#245 기술 결정 — 빌드 없는 정적 자산).
+    """
+    app.mount("/ui", StaticFiles(directory=str(UI_ROOT), html=True), name="ui")
+
+    @app.get("/", include_in_schema=False)
+    async def root() -> RedirectResponse:
+        return RedirectResponse(url="/ui/")
 
 
 def _mount_catalog(api: APIRouter, catalog: Catalog) -> None:

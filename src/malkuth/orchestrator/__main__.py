@@ -15,10 +15,12 @@ Control Plane 을 프로세스로 실행한다 — ``python -m malkuth.orchestra
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import structlog
 import uvicorn
 
+from malkuth.catalog import Catalog
 from malkuth.config import (
     DEFAULT_CONFIG_DIR,
     load_config,
@@ -31,6 +33,8 @@ from malkuth.orchestrator.runstore import SqliteRunStore
 log = structlog.get_logger(__name__)
 
 CONFIG_DIR_ENV = "MALKUTH_CONFIG_DIR"
+ROOT_ENV = "MALKUTH_REPO_ROOT"
+"""카탈로그가 읽는 레포 루트 — memory 서비스와 같은 이름을 쓴다."""
 LOG_LEVEL_ENV = "MALKUTH_LOG_LEVEL"
 LOG_FORMAT_ENV = "MALKUTH_LOG_FORMAT"
 METRICS_PORT_ENV = "MALKUTH_METRICS_PORT"
@@ -59,10 +63,11 @@ def _setup_observability() -> Metrics:
 def main() -> None:
     """Serve the Control Plane over the configured run store."""
     _setup_observability()
-    orchestrator = load_config(
+    config = load_config(
         resolve_environment(),
         config_dir=os.environ.get(CONFIG_DIR_ENV, DEFAULT_CONFIG_DIR),
-    ).orchestrator
+    )
+    orchestrator = config.orchestrator
 
     if orchestrator.run_store is None:
         # 빈 목록을 돌려주면 운영자는 "run 이 없다" 고 읽는다 — 설정이 빠진 것과
@@ -70,13 +75,17 @@ def main() -> None:
         raise config_missing_store()
 
     store = SqliteRunStore(path=orchestrator.run_store)
+    # 설정의 registry.roots 는 상대 경로다 — 작업 디렉토리가 아니라 레포 루트 기준
+    root = Path(os.environ.get(ROOT_ENV, ".")).resolve()
+    catalog = Catalog.from_config(config.registry.roots, base=root)
     log.info(
         "control plane starting",
         port=orchestrator.control_port,
         run_store=orchestrator.run_store,
+        repo_root=str(root),
     )
     uvicorn.run(
-        create_app(store),
+        create_app(store, catalog=catalog),
         host=orchestrator.control_host,
         port=orchestrator.control_port,
         log_config=None,

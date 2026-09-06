@@ -11,6 +11,7 @@ Resume 은 다르다: 이어갈 state 가 구동 프로세스의 핸들에 있�
 
 from __future__ import annotations
 
+from dataclasses import asdict
 from typing import TYPE_CHECKING, Any
 
 from fastapi import FastAPI, Request, status
@@ -23,6 +24,7 @@ from malkuth.http_errors import status_for
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from malkuth.catalog import Catalog, Listing
     from malkuth.orchestrator.runstore import RunRecord, RunStore
 
 
@@ -69,6 +71,7 @@ def create_app(
     store: RunStore,
     *,
     resume: Callable[[str], Any] | None = None,
+    catalog: Catalog | None = None,
 ) -> FastAPI:
     """Build the Control Plane app.
 
@@ -79,6 +82,8 @@ def create_app(
         resume: Resumes a halted run; 이 프로세스가 그 run 을 구동할 때만
             제공됩니다. 없으면 resume 은 501 로 거절합니다 — 조용히 성공하면
             운영자가 재개됐다고 오해합니다.
+        catalog: What the repository declares (#240). 없으면 카탈로그 라우트를
+            열지 않는다 — 빈 목록을 돌려주면 "선언이 없다" 로 읽힌다.
 
     Returns:
         The FastAPI application.
@@ -149,7 +154,87 @@ def create_app(
         handle = await resume(run_id)
         return {"run_id": getattr(handle, "run_id", run_id), "status": "resumed"}
 
+    if catalog is not None:
+        _mount_catalog(app, catalog)
+
     return app
+
+
+def _mount_catalog(app: FastAPI, catalog: Catalog) -> None:
+    """읽기 전용 카탈로그 — UI 가 "무엇으로 조립할 수 있는가" 를 보는 표면.
+
+    목록은 파싱된 것과 **깨진 것을 함께** 돌려준다. 하나가 깨졌다고 전체를
+    500 으로 답하면 운영자는 어느 파일인지 모른다.
+    """
+
+    def listing(found: Listing[Any], summary: Callable[[Any], dict[str, Any]]) -> dict[str, Any]:
+        return {
+            "items": [summary(item) for item in found.items.values()],
+            "problems": [asdict(problem) for problem in found.problems],
+        }
+
+    @app.get("/v1/agents")
+    async def list_agents() -> dict[str, Any]:
+        return listing(
+            catalog.agents(),
+            lambda m: {
+                "name": m.name,
+                "version": m.metadata.version,
+                "group": m.metadata.group,
+                "description": m.metadata.description,
+                "model": {"provider": m.spec.model.provider, "name": m.spec.model.name},
+            },
+        )
+
+    @app.get("/v1/agents/{name}")
+    async def get_agent(name: str) -> dict[str, Any]:
+        return catalog.agent(name).model_dump(mode="json")
+
+    @app.get("/v1/graphs")
+    async def list_graphs() -> dict[str, Any]:
+        return listing(
+            catalog.graphs(),
+            lambda g: {
+                "name": g.metadata.name,
+                "version": g.metadata.version,
+                "description": g.metadata.description,
+                "mode": str(g.spec.mode),
+                "goal": g.spec.goal,
+                "nodes": len(g.spec.nodes),
+            },
+        )
+
+    @app.get("/v1/graphs/{name}")
+    async def get_graph(name: str) -> dict[str, Any]:
+        return catalog.graph(name).model_dump(mode="json")
+
+    @app.get("/v1/groups")
+    async def list_groups() -> dict[str, Any]:
+        return listing(
+            catalog.groups(),
+            lambda g: {
+                "name": g.metadata.name,
+                "description": g.metadata.description,
+                "quotas": g.spec.quotas.model_dump(mode="json"),
+            },
+        )
+
+    @app.get("/v1/groups/{name}")
+    async def get_group(name: str) -> dict[str, Any]:
+        return catalog.group(name).model_dump(mode="json")
+
+    @app.get("/v1/modules/{module_type}")
+    async def list_modules(module_type: str) -> dict[str, Any]:
+        return {
+            "items": [
+                {"name": name, "versions": list(versions)}
+                for name, versions in catalog.modules(module_type).items()
+            ]
+        }
+
+    @app.get("/v1/modules/{module_type}/{name}/{version}")
+    async def get_module(module_type: str, name: str, version: str) -> dict[str, Any]:
+        return catalog.module(module_type, name, version)
 
 
 __all__ = ["RunView", "create_app", "unknown_run", "view_of"]

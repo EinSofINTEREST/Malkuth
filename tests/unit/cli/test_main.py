@@ -15,7 +15,6 @@ from malkuth.cli.main import (
     EXIT_FAILED,
     EXIT_OK,
     build_parser,
-    discover_refs,
     main,
     validate_root,
 )
@@ -208,19 +207,6 @@ def test_check_rejects_a_non_mapping_state(tmp_path, capsys):
 
     assert run_cli(["check", str(state)]) == EXIT_FAILED
     assert "CFG_001" in capsys.readouterr().err
-
-
-# --- ref discovery ------------------------------------------------------------
-
-
-def test_refs_are_recovered_from_the_directory_layout(workspace):
-    refs = discover_refs(workspace / "modules")
-
-    assert refs == frozenset({"promptsets/solo@0.1.0"})
-
-
-def test_missing_module_root_yields_no_refs(tmp_path):
-    assert discover_refs(tmp_path / "absent") == frozenset()
 
 
 # --- 실제 저장소 ---------------------------------------------------------------

@@ -110,10 +110,11 @@ def build_deployment(
     Returns:
         The app plus one token per declared agent.
     """
-    from malkuth.cli.main import discover_agents, discover_groups
+    from malkuth.catalog import Catalog
 
-    manifests = discover_agents(root / "agents")
-    groups = discover_groups(root / "groups")
+    catalog = Catalog.under(root)
+    manifests = catalog.agents().items
+    groups = catalog.groups().items
     loader = MemorysetLoader(ModuleRegistry.under(root))
 
     embedding, chunk = _embedding_source(manifests, groups, loader)

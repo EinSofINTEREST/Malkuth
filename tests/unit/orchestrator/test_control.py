@@ -6,6 +6,8 @@ API 가 저장소만으로 답할 수 있어야 하고, resume 은 구동 프로
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import httpx
 import pytest
 
@@ -280,3 +282,96 @@ async def test_an_unknown_run_is_still_not_found(api):
 
     assert response.status_code == 404
     assert response.json()["error"]["code"] == ErrorCode.NF_001
+
+
+# --- 카탈로그 (#240) ---------------------------------------------------------------
+
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+
+
+@pytest.fixture
+async def catalog_api(store):
+    from malkuth.catalog import Catalog
+
+    async with client_for(create_app(store, catalog=Catalog.under(REPO_ROOT))) as client:
+        yield client
+
+
+async def test_agents_are_listed_with_a_summary(catalog_api):
+    body = (await catalog_api.get("/v1/agents")).json()
+
+    names = {item["name"] for item in body["items"]}
+    assert {"planner", "researcher", "writer"} <= names
+    planner = next(i for i in body["items"] if i["name"] == "planner")
+    assert {"name", "version", "group", "model"} <= planner.keys()
+    assert body["problems"] == []
+
+
+async def test_an_agent_is_returned_in_full(catalog_api):
+    body = (await catalog_api.get("/v1/agents/planner")).json()
+
+    assert body["metadata"]["name"] == "planner"
+    assert "promptset" in body["spec"]
+
+
+async def test_an_unknown_agent_is_404(catalog_api):
+    response = await catalog_api.get("/v1/agents/nope")
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == ErrorCode.NF_001
+
+
+async def test_graphs_carry_mode_and_node_count(catalog_api):
+    body = (await catalog_api.get("/v1/graphs")).json()
+
+    pipeline = next(i for i in body["items"] if i["name"] == "research-pipeline")
+    assert pipeline["mode"] == "mission"
+    assert pipeline["nodes"] == 3
+
+
+async def test_a_graph_is_returned_in_full(catalog_api):
+    body = (await catalog_api.get("/v1/graphs/feed-monitor")).json()
+
+    assert body["spec"]["mode"] == "service"
+    assert [n["id"] for n in body["spec"]["nodes"]]
+
+
+async def test_groups_are_listed_with_quotas(catalog_api):
+    body = (await catalog_api.get("/v1/groups")).json()
+
+    assert any(item["name"] == "global" for item in body["items"])
+    assert all("quotas" in item for item in body["items"])
+
+
+async def test_modules_are_listed_by_version(catalog_api):
+    body = (await catalog_api.get("/v1/modules/promptsets")).json()
+
+    assert body["items"], "저장소에 promptset 이 없을 리 없다"
+    assert all(item["versions"] for item in body["items"])
+
+
+async def test_a_module_document_is_returned(catalog_api):
+    listed = (await catalog_api.get("/v1/modules/promptsets")).json()["items"][0]
+    version = listed["versions"][0]
+
+    body = (await catalog_api.get(f"/v1/modules/promptsets/{listed['name']}/{version}")).json()
+
+    assert body["metadata"]["name"] == listed["name"]
+    assert body["metadata"]["version"] == version
+
+
+async def test_an_unknown_module_type_is_404(catalog_api):
+    response = await catalog_api.get("/v1/modules/agents")
+
+    assert response.status_code == 404
+
+
+async def test_without_a_catalog_the_routes_do_not_exist(api):
+    """빈 목록을 돌려주면 "선언이 없다" 로 읽힌다 — 라우트가 아예 없어야 한다."""
+    response = await api.get("/v1/agents")
+
+    assert response.status_code == 404
+    assert (
+        "error" not in response.json() or response.json()["error"].get("code") != ErrorCode.NF_001
+    )

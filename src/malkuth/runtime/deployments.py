@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import secrets
 import sqlite3
 import time
 import uuid
@@ -27,6 +28,12 @@ import structlog
 from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
 from malkuth.runtime.launcher import LaunchedAgent, MemoryEndpoint
 from malkuth.runtime.scope import ScopedSecrets
+from malkuth.runtime.spec import (
+    A2A_EDGES_ENV,
+    A2A_PEERS_ENV,
+    A2A_SECRET_ENV,
+    container_name,
+)
 
 if TYPE_CHECKING:
     from malkuth.authoring import Author
@@ -80,6 +87,9 @@ class DeploymentRecord:
     agents: tuple[DeployedAgent, ...] = ()
     error: str | None = None
     updated_at: str = ""
+    a2a_secret: str = ""
+    """이 배포의 per-edge 토큰 서명 키 — 컨테이너들이 기동 시 받은 값이라
+    재시작 뒤 같은 배포에 새 컨테이너를 세우려면 같은 키여야 한다."""
 
 
 @runtime_checkable
@@ -125,7 +135,8 @@ CREATE TABLE IF NOT EXISTS deployments (
     status        TEXT NOT NULL,
     agents        TEXT NOT NULL,
     error         TEXT,
-    updated_at    TEXT NOT NULL
+    updated_at    TEXT NOT NULL,
+    a2a_secret    TEXT NOT NULL DEFAULT ''
 );
 """
 
@@ -153,10 +164,11 @@ class SqliteDeploymentStore:
     def upsert(self, record: DeploymentRecord) -> None:
         try:
             self._connect().execute(
-                "INSERT INTO deployments VALUES (?,?,?,?,?,?,?) "
+                "INSERT INTO deployments VALUES (?,?,?,?,?,?,?,?) "
                 "ON CONFLICT(deployment_id) DO UPDATE SET "
                 "graph=excluded.graph, version=excluded.version, status=excluded.status, "
-                "agents=excluded.agents, error=excluded.error, updated_at=excluded.updated_at",
+                "agents=excluded.agents, error=excluded.error, updated_at=excluded.updated_at, "
+                "a2a_secret=excluded.a2a_secret",
                 (
                     record.deployment_id,
                     record.graph,
@@ -165,6 +177,7 @@ class SqliteDeploymentStore:
                     json.dumps([a.__dict__ for a in record.agents]),
                     record.error,
                     record.updated_at,
+                    record.a2a_secret,
                 ),
             )
         except sqlite3.Error as err:
@@ -186,7 +199,7 @@ class SqliteDeploymentStore:
 
 
 def _row(row: tuple[Any, ...]) -> DeploymentRecord:
-    deployment_id, graph, version, status, agents, error, updated_at = row
+    deployment_id, graph, version, status, agents, error, updated_at, a2a_secret = row
     return DeploymentRecord(
         deployment_id=deployment_id,
         graph=graph,
@@ -195,11 +208,33 @@ def _row(row: tuple[Any, ...]) -> DeploymentRecord:
         agents=tuple(DeployedAgent(**a) for a in json.loads(agents)),
         error=error,
         updated_at=updated_at,
+        a2a_secret=a2a_secret,
     )
 
 
 def _agent_of(ref: str) -> str:
     return ref.split("/", 1)[1].split("@", 1)[0]
+
+
+MANIFEST_MOUNT_PATH = "/app/manifest.yaml"
+MODULES_MOUNT_PATH = "/app/modules"
+"""agentd 의 기본 `MALKUTH_MANIFEST` / `MALKUTH_ROOT` 위치 — base 이미지 계약."""
+
+MODULE_TYPES = ("skillsets", "promptsets", "memorysets")
+
+
+@dataclass(frozen=True)
+class Provision:
+    """runtime 이 한 에이전트 컨테이너에 실어 보내는 것 — 선언(mounts)과 배선(env).
+
+    03 Discovery: 에이전트는 peer 주소를 스스로 알아내지 않는다. 그래프의
+    `connections` 를 edge/peer env 로 번역해 주는 곳이 여기다 — compose 가
+    손으로 적던 값이다.
+    """
+
+    env: Mapping[str, str]
+    mounts: tuple[Mapping[str, Any], ...]
+    a2a_port: int | None
 
 
 def not_deployed(deployment_id: str) -> MalkuthError:
@@ -301,17 +336,21 @@ class DeploymentManager:
             version=topology.metadata.version,
             status=DeploymentStatus.STARTING,
             updated_at=_now(),
+            a2a_secret=secrets.token_urlsafe(32),
         )
         self.store.upsert(record)
         bound = self._bind_log(record)
 
+        manifests = self._agents_of(topology)
+        provisions = self._provision(topology, manifests, a2a_secret=record.a2a_secret)
         launched: list[LaunchedAgent] = []
         try:
-            for manifest in self._agents_of(topology):
-                launched.append(await self._launch(manifest))
+            for manifest in manifests:
+                launched.append(await self._launch(manifest, provisions[manifest.name]))
             await self._wait_ready(launched)
         except BaseException as err:
             await self._rollback(launched)
+            self._release_ports(provisions)
             failed = DeploymentRecord(
                 **{
                     **record.__dict__,
@@ -364,6 +403,13 @@ class DeploymentManager:
         for record in self.store.list():
             if record.status != DeploymentStatus.READY:
                 continue
+            try:
+                restart_args = self._restart_args_of(record)
+            except MalkuthError as err:
+                # 선언이나 secrets 가 사라졌으면 다시 세울 수 없다 — 붙지 않고
+                # 운영자에게 보인다. 조용히 붙이면 첫 재시작에서 넘어진다
+                self._mark_lost(record, f"cannot rebuild from declarations: {err.message}", touched)
+                continue
             missing = []
             for agent in record.agents:
                 if not await self.launcher.adopt(
@@ -374,23 +420,29 @@ class DeploymentManager:
                     control_port=agent.control_port,
                     token=agent.token,
                     a2a_port=agent.a2a_port,
+                    restart_args=restart_args[agent.name],
                 ):
                     missing.append(agent.name)
             if missing:
-                lost = DeploymentRecord(
-                    **{
-                        **record.__dict__,
-                        "status": DeploymentStatus.LOST,
-                        "error": f"containers missing: {', '.join(missing)}",
-                        "updated_at": _now(),
-                    }
-                )
-                self.store.upsert(lost)
-                touched.append(lost)
-                self._bind_log(lost).warning("deployment lost its containers", missing=missing)
+                self._mark_lost(record, f"containers missing: {', '.join(missing)}", touched)
             else:
                 touched.append(record)
         return touched
+
+    def _mark_lost(
+        self, record: DeploymentRecord, reason: str, touched: list[DeploymentRecord]
+    ) -> None:
+        lost = DeploymentRecord(
+            **{
+                **record.__dict__,
+                "status": DeploymentStatus.LOST,
+                "error": reason,
+                "updated_at": _now(),
+            }
+        )
+        self.store.upsert(lost)
+        touched.append(lost)
+        self._bind_log(lost).warning("deployment lost", reason=reason)
 
     # --- 내부 --------------------------------------------------------------
 
@@ -405,22 +457,127 @@ class DeploymentManager:
                 seen[name] = self.catalog.agent(name)
         return list(seen.values())
 
-    async def _launch(self, manifest: AgentManifest) -> LaunchedAgent:
-        groups = self.catalog.groups().items
-        secrets = ScopedSecrets.for_agent(
+    def _provision(
+        self,
+        topology: GraphTopology,
+        manifests: Sequence[AgentManifest],
+        *,
+        a2a_secret: str,
+        ports: Mapping[str, int] | None = None,
+    ) -> dict[str, Provision]:
+        """그래프 하나의 에이전트 전부에 대한 선언 마운트와 A2A 배선.
+
+        peer 주소에 상대의 포트가 들어가므로 포트는 **기동 전에 전부** 정한다.
+        `ports` 를 주면(재부착) 할당하지 않고 그 값을 쓴다 — 컨테이너 안의 env 는
+        이미 그 포트로 굳어 있다.
+        """
+        agent_of_node = {
+            node.id: _agent_of(node.agent) for node in topology.spec.nodes if node.agent
+        }
+        edges = [
+            (agent_of_node[c.caller], agent_of_node[c.callee])
+            for c in topology.spec.connections
+            if c.caller in agent_of_node and c.callee in agent_of_node
+        ]
+        assigned: dict[str, int] = dict(ports or {})
+        if ports is None and self.launcher.ports is not None:
+            for manifest in manifests:
+                if manifest.spec.a2a.enabled:
+                    assigned[manifest.name] = self.launcher.ports.allocate(manifest.name)
+
+        provisions: dict[str, Provision] = {}
+        for manifest in manifests:
+            env: dict[str, str] = {}
+            if edges:
+                env[A2A_EDGES_ENV] = ",".join(f"{caller}>{callee}" for caller, callee in edges)
+                env[A2A_SECRET_ENV] = a2a_secret
+            peers = [
+                f"{callee}={container_name(callee, 0)}:{assigned[callee]}"
+                for caller, callee in edges
+                if caller == manifest.name and callee in assigned
+            ]
+            if peers:
+                env[A2A_PEERS_ENV] = ",".join(peers)
+            provisions[manifest.name] = Provision(
+                env=env, mounts=self._mounts(manifest.name), a2a_port=assigned.get(manifest.name)
+            )
+        return provisions
+
+    def _restart_args_of(self, record: DeploymentRecord) -> dict[str, dict[str, Any]]:
+        """기록된 배포의 컨테이너를 같은 선언으로 다시 세우는 데 필요한 것 전부."""
+        topology = self.catalog.graph(record.graph)
+        manifests = self._agents_of(topology)
+        ports = {a.name: a.a2a_port for a in record.agents if a.a2a_port is not None}
+        provisions = self._provision(topology, manifests, a2a_secret=record.a2a_secret, ports=ports)
+        return {
+            m.name: {
+                "manifest": m,
+                "secrets": self._env_for(m, provisions[m.name]),
+                "memory": self._memory_for(m),
+                "mounts": provisions[m.name].mounts,
+            }
+            for m in manifests
+        }
+
+    def _mounts(self, agent: str) -> tuple[Mapping[str, Any], ...]:
+        """base 이미지에 선언을 들여보낸다 — manifest 하나와 모듈 루트들, 전부 읽기 전용.
+
+        없는 모듈 루트는 걸지 않는다: Docker 는 없는 호스트 경로를 root 소유
+        디렉토리로 만들어 버린다.
+        """
+        roots = self.catalog.roots
+        mounts: list[Mapping[str, Any]] = [
+            {
+                "name": str((roots.agents / agent / "manifest.yaml").resolve()),
+                "mount_path": MANIFEST_MOUNT_PATH,
+                "read_only": True,
+            }
+        ]
+        for module_type in MODULE_TYPES:
+            root = roots.for_type(module_type).resolve()
+            if root.is_dir():
+                mounts.append(
+                    {
+                        "name": str(root),
+                        "mount_path": f"{MODULES_MOUNT_PATH}/{module_type}",
+                        "read_only": True,
+                    }
+                )
+        return tuple(mounts)
+
+    def _env_for(self, manifest: AgentManifest, provision: Provision) -> dict[str, str]:
+        """컨테이너 env — 인프라(agent_env) < 스코프 secrets < 배선(provision) 순으로 겹친다."""
+        scoped = ScopedSecrets.for_agent(
             manifest,
-            groups=groups,
+            groups=self.catalog.groups().items,
             local=self.secrets_env,
             group_values=self.secrets_env,
             global_values=self.secrets_env,
         ).env_for(tuple(manifest.spec.runtime.env_allowlist))
-        memory = None
+        return {**self.agent_env, **scoped, **provision.env}
+
+    def _memory_for(self, manifest: AgentManifest) -> MemoryEndpoint | None:
         token = self.memory_tokens.get(manifest.name)
         if self.memory_url and token:
-            memory = MemoryEndpoint(url=self.memory_url, token=token)
+            return MemoryEndpoint(url=self.memory_url, token=token)
+        return None
+
+    async def _launch(self, manifest: AgentManifest, provision: Provision) -> LaunchedAgent:
         return await self.launcher.start(
-            manifest, secrets={**self.agent_env, **secrets}, memory=memory
+            manifest,
+            secrets=self._env_for(manifest, provision),
+            memory=self._memory_for(manifest),
+            mounts=provision.mounts,
+            a2a_port=provision.a2a_port,
         )
+
+    def _release_ports(self, provisions: Mapping[str, Provision]) -> None:
+        """되감기 뒤 미리 잡아 둔 포트를 돌려준다 — 기동 전에 실패하면 stop 이 안 돌려준다."""
+        if self.launcher.ports is None:
+            return
+        for agent, provision in provisions.items():
+            if provision.a2a_port is not None:
+                self.launcher.ports.release(agent)
 
     async def _wait_ready(self, launched: Sequence[LaunchedAgent]) -> None:
         deadline = self.clock() + self.ready_timeout_s

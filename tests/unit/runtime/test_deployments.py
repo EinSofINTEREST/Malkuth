@@ -11,7 +11,7 @@ import yaml
 from malkuth.authoring import Author
 from malkuth.catalog import Catalog
 from malkuth.core.agent import HealthState, HealthStatus
-from malkuth.core.errors import ErrorCode, MalkuthError
+from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
 from malkuth.runtime.control import ControlClient
 from malkuth.runtime.deployments import (
     DeploymentManager,
@@ -21,6 +21,8 @@ from malkuth.runtime.deployments import (
 )
 from malkuth.runtime.docker.engine import DockerEngine
 from malkuth.runtime.launcher import AgentLauncher
+from malkuth.runtime.ports import A2APortAllocator
+from malkuth.runtime.spec import A2A_EDGES_ENV, A2A_PEERS_ENV, A2A_SECRET_ENV
 from tests.fixtures.fake_docker import FakeDockerClient
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -308,6 +310,7 @@ async def test_a_restarted_control_plane_reattaches_running_containers(workspace
         catalog=catalog,
         author=Author(catalog=catalog),
         store=store,
+        secrets_env={"ANTHROPIC_API_KEY": "k"},
         launcher=AgentLauncher(
             engine=DockerEngine(client=docker), health_interval_s=10.0, health_sleep=NoSleep()
         ),
@@ -344,6 +347,7 @@ async def test_missing_containers_mark_the_deployment_lost(workspace, docker, he
         catalog=catalog,
         author=Author(catalog=catalog),
         store=store,
+        secrets_env={"ANTHROPIC_API_KEY": "k"},
         launcher=AgentLauncher(
             engine=DockerEngine(client=docker), health_interval_s=10.0, health_sleep=NoSleep()
         ),
@@ -398,3 +402,156 @@ async def test_agent_env_reaches_the_container_alongside_secrets(manager, docker
     assert env["ANTHROPIC_BASE_URL"] == "http://fake:8000"
     assert env["ANTHROPIC_API_KEY"] == "k"
     await manager.launcher.stop_all()
+
+
+# --- 선언 마운트와 A2A 배선 (#243) -------------------------------------------------
+
+
+def wired_workspace(workspace: Path) -> None:
+    """beta → alpha 를 선언한 그래프. 두 에이전트 모두 A2A 를 켠다."""
+    for name in ("alpha", "beta"):
+        doc = agent_doc(name)
+        doc["spec"]["a2a"] = {"enabled": True}
+        write(workspace / "agents" / name / "manifest.yaml", doc)
+    graph = graph_doc("wired", ["alpha", "beta"])
+    graph["spec"]["connections"] = [{"caller": "n1", "callee": "n0"}]
+    write(workspace / "graphs" / "wired.yaml", graph)
+
+
+def wired_manager(workspace: Path, docker: TrackingDocker, store=None) -> DeploymentManager:
+    catalog = Catalog.under(workspace)
+    return DeploymentManager(
+        catalog=catalog,
+        author=Author(catalog=catalog),
+        launcher=AgentLauncher(
+            engine=DockerEngine(client=docker),
+            ports=A2APortAllocator(port_range=(9100, 9110)),
+            health_interval_s=10.0,
+            health_sleep=NoSleep(),
+        ),
+        store=store or InMemoryDeploymentStore(),
+        secrets_env={"ANTHROPIC_API_KEY": "k"},
+        ready_poll_s=0.0,
+        sleep=NoSleep(),
+    )
+
+
+def env_of(docker: TrackingDocker, agent: str) -> dict[str, str]:
+    for created in docker.created:
+        if created["name"] == f"malkuth-{agent}-0":
+            return created["environment"]
+    raise AssertionError(f"{agent} was not created")
+
+
+async def test_the_graph_connections_become_a2a_env_in_the_containers(workspace, docker, healthy):
+    """03 Discovery — compose 가 손으로 적던 EDGES/SECRET/PEERS 를 runtime 이 준다."""
+    wired_workspace(workspace)
+    manager = wired_manager(workspace, docker)
+
+    record = await manager.deploy("wired")
+
+    alpha, beta = env_of(docker, "alpha"), env_of(docker, "beta")
+    assert alpha[A2A_EDGES_ENV] == beta[A2A_EDGES_ENV] == "beta>alpha"
+    assert alpha[A2A_SECRET_ENV] == beta[A2A_SECRET_ENV] == record.a2a_secret
+    assert len(record.a2a_secret) >= 32
+    # caller 만 peer 주소를 받는다 — 상대의 컨테이너 이름과 **상대의** A2A 포트
+    alpha_port = next(a.a2a_port for a in record.agents if a.name == "alpha")
+    assert beta[A2A_PEERS_ENV] == f"alpha=malkuth-alpha-0:{alpha_port}"
+    assert A2A_PEERS_ENV not in alpha
+    await manager.launcher.stop_all()
+
+
+async def test_declarations_are_mounted_read_only_into_the_base_image(workspace, docker, healthy):
+    """02 Rule 2 — declarative agent 는 이미지를 굽지 않으므로 runtime 이 선언을 싣는다."""
+    wired_workspace(workspace)
+    manager = wired_manager(workspace, docker)
+
+    await manager.deploy("wired")
+
+    volumes = next(c for c in docker.created if c["name"] == "malkuth-alpha-0")["volumes"]
+    manifest = str((workspace / "agents" / "alpha" / "manifest.yaml").resolve())
+    promptsets = str((workspace / "modules" / "promptsets").resolve())
+    assert volumes[manifest] == {"bind": "/app/manifest.yaml", "mode": "ro"}
+    assert volumes[promptsets] == {"bind": "/app/modules/promptsets", "mode": "ro"}
+    # 없는 모듈 루트는 걸지 않는다 — Docker 가 root 소유 디렉토리를 만들어 버린다
+    assert not any(v["bind"].endswith("/memorysets") for v in volumes.values())
+    assert all(v["mode"] == "ro" for v in volumes.values())
+    await manager.launcher.stop_all()
+
+
+def test_runtime_a2a_env_names_match_agentd():
+    """runtime 이 agentd 를 import 하지 않으므로 상수를 두 벌 둔다 — 드리프트 방지."""
+    from malkuth.agentd import a2a_server
+
+    assert (A2A_EDGES_ENV, A2A_SECRET_ENV, A2A_PEERS_ENV) == (
+        a2a_server.EDGES_ENV,
+        a2a_server.SECRET_ENV,
+        a2a_server.PEERS_ENV,
+    )
+
+
+async def test_a_failed_deploy_returns_the_preallocated_ports(
+    workspace, docker, healthy, monkeypatch
+):
+    wired_workspace(workspace)
+    manager = wired_manager(workspace, docker)
+    original = DockerEngine.start
+
+    async def second_fails(self, spec):
+        if spec.name == "malkuth-beta-0":
+            raise MalkuthError(category=ErrorCategory.RUNTIME, code=ErrorCode.RT_001, message="x")
+        return await original(self, spec)
+
+    monkeypatch.setattr(DockerEngine, "start", second_fails)
+
+    with pytest.raises(MalkuthError):
+        await manager.deploy("wired")
+
+    assert manager.launcher.ports is not None
+    assert manager.launcher.ports.assigned == {}
+    assert running(docker) == []
+
+
+async def test_reattach_hands_the_launcher_what_a_restart_needs(workspace, docker, healthy):
+    wired_workspace(workspace)
+    store = InMemoryDeploymentStore()
+    first = wired_manager(workspace, docker, store)
+    record = await first.deploy("wired")
+
+    second = wired_manager(workspace, docker, store)
+    await second.reattach()
+
+    adopted = second.launcher.launched[("beta", 0)]
+    args = adopted.restart_args
+    assert args["manifest"].name == "beta"
+    assert args["secrets"][A2A_SECRET_ENV] == record.a2a_secret
+    assert args["secrets"][A2A_PEERS_ENV].endswith(f":{record.agents[0].a2a_port}")
+    assert args["mounts"][0]["mount_path"] == "/app/manifest.yaml"
+    # 기록된 포트를 그대로 잡는다 — 컨테이너 안의 env 는 이미 그 포트로 굳어 있다
+    assert adopted.a2a_port == next(a.a2a_port for a in record.agents if a.name == "beta")
+    await second.launcher.stop_all()
+
+
+async def test_reattach_without_the_secrets_marks_the_deployment_lost(workspace, docker, healthy):
+    """조용히 붙이면 첫 재시작에서 넘어진다 — 붙지 않고 이유를 남긴다."""
+    wired_workspace(workspace)
+    store = InMemoryDeploymentStore()
+    await wired_manager(workspace, docker, store).deploy("wired")
+    second = wired_manager(workspace, docker, store)
+    second.secrets_env = {}
+
+    touched = await second.reattach()
+
+    assert [r.status for r in touched] == [DeploymentStatus.LOST]
+    assert "ANTHROPIC_API_KEY" in (touched[0].error or "")
+    assert second.launcher.launched == {}
+
+
+async def test_the_sqlite_store_keeps_the_a2a_secret(tmp_path, workspace, docker, healthy):
+    wired_workspace(workspace)
+    store = SqliteDeploymentStore(path=tmp_path / "deployments.db")
+    record = await wired_manager(workspace, docker, store).deploy("wired")
+
+    reopened = SqliteDeploymentStore(path=tmp_path / "deployments.db")
+
+    assert reopened.get(record.deployment_id).a2a_secret == record.a2a_secret

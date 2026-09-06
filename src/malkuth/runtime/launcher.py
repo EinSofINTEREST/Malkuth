@@ -26,7 +26,7 @@ from malkuth.runtime.spec import build_container_spec
 from malkuth.runtime.tokens import TokenIssuer, authenticated_env
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Mapping
+    from collections.abc import Awaitable, Callable, Mapping, Sequence
 
     from malkuth.core.manifest import AgentManifest
     from malkuth.observability.metrics import Metrics
@@ -126,6 +126,7 @@ class AgentLauncher:
         a2a_port: int | None = None,
         memory: MemoryEndpoint | None = None,
         lifecycle: AgentLifecycle | None = None,
+        mounts: Sequence[Mapping[str, Any]] = (),
     ) -> LaunchedAgent:
         """Start one agent with its token injected and wired.
 
@@ -139,6 +140,8 @@ class AgentLauncher:
                 **DB 자격증명은 컨테이너에 넣지 않는다** (09 Access Enforcement 1).
             a2a_port: A2A port to use. 생략하면 할당기가 범위에서 고른다 —
                 03 은 포트를 runtime 이 준다고 규정한다.
+            mounts: Read-only binds carrying declarations into the image
+                (`build_container_spec`). 재시작에도 같은 것을 다시 건다.
             lifecycle: 이어붙일 상태. **재시작은 반드시 넘겨야 한다** — 새로
                 만들면 `RestartPolicy` 의 창(window)이 리셋되어 crash-loop
                 상한(02 Rule 6)이 영원히 걸리지 않는다.
@@ -169,6 +172,7 @@ class AgentLauncher:
             replica=replica,
             a2a_port=a2a_port,
             network=self.engine.network,
+            mounts=mounts,
         )
 
         # 02 Lifecycle — 이미지는 배포 파이프라인이 굽는다 (Rule 1). runtime 이
@@ -195,7 +199,12 @@ class AgentLauncher:
             client=client,
             replica=replica,
             lifecycle=lifecycle,
-            restart_args={"manifest": manifest, "secrets": secrets, "memory": memory},
+            restart_args={
+                "manifest": manifest,
+                "secrets": secrets,
+                "memory": memory,
+                "mounts": mounts,
+            },
             a2a_port=a2a_port,
         )
         self.launched[agent, replica] = launched
@@ -373,6 +382,7 @@ class AgentLauncher:
         control_port: int,
         token: str,
         a2a_port: int | None = None,
+        restart_args: Mapping[str, Any] | None = None,
     ) -> bool:
         """Pick up a container this process did not start.
 
@@ -382,6 +392,9 @@ class AgentLauncher:
 
         토큰은 기록에서 온다 — agentd 는 기동 시 받은 토큰을 바꿀 수 없으므로
         재발급이 아니라 **기억**이다.
+
+        `restart_args` 는 이 컨테이너가 죽었을 때 같은 선언으로 다시 세우는 데
+        쓴다 — 없으면 health 감시가 첫 재시작에서 넘어진다.
         """
         try:
             state: dict[str, Any] = await asyncio.to_thread(
@@ -410,6 +423,7 @@ class AgentLauncher:
             replica=replica,
             lifecycle=lifecycle,
             a2a_port=a2a_port,
+            restart_args=dict(restart_args or {}),
         )
         self.launched[agent, replica] = launched
         self._watch(launched)

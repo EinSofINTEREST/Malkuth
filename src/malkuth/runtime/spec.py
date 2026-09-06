@@ -14,7 +14,7 @@ from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
 from malkuth.core.manifest import AgentManifest
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Mapping, Sequence
 
 DEFAULT_NETWORK: Final = "malkuth-net"
 DEFAULT_CONTROL_PORT: Final = 8080
@@ -25,6 +25,11 @@ A2A_PORT_ENV: Final = "MALKUTH_A2A_PORT"
 """할당된 A2A 포트를 컨테이너에 알리는 키 — agentd 가 이것으로 서버를 띄운다."""
 
 A2A_HOST_ENV: Final = "MALKUTH_A2A_ADVERTISED_HOST"
+# 아래 셋은 agentd.a2a_server 의 계약과 같은 값이어야 한다 — runtime 이 agentd 를
+# import 하지 않도록 여기 다시 적고, 단위 테스트가 두 쪽의 드리프트를 막는다
+A2A_EDGES_ENV: Final = "MALKUTH_A2A_EDGES"
+A2A_SECRET_ENV: Final = "MALKUTH_A2A_SECRET"  # noqa: S105 — 키 이름이지 값이 아니다
+A2A_PEERS_ENV: Final = "MALKUTH_A2A_PEERS"
 """카드에 실을 도달 주소 — peer 가 이 이름으로 접속한다."""
 
 # 컨테이너가 쓸 수 있어야 하는 임시 경로 — read-only rootfs 위의 tmpfs.
@@ -127,6 +132,7 @@ def build_container_spec(
     network: str = DEFAULT_NETWORK,
     a2a_port: int | None = None,
     base_image: str = DEFAULT_BASE_IMAGE,
+    mounts: Sequence[Mapping[str, Any]] = (),
 ) -> ContainerSpec:
     """Derive a container spec from an agent manifest.
 
@@ -140,6 +146,10 @@ def build_container_spec(
         network: Dedicated bridge network to attach; shared/host networks are rejected.
         a2a_port: A2A port assigned by the runtime, when A2A is enabled.
         base_image: Image used when the manifest declares none.
+        mounts: Read-only binds the runtime adds on top of the manifest's
+            volumes — 선언(manifest, modules)을 base 이미지에 들여보내는 통로다.
+            02 Rule 2 의 declarative agent 는 이미지를 굽지 않으므로 runtime 이
+            선언을 실어 줘야 한다 (#243).
 
     Returns:
         The container specification.
@@ -177,7 +187,7 @@ def build_container_spec(
             "read_only": volume.read_only,
         }
         for volume in runtime.volumes
-    )
+    ) + tuple(dict(mount) for mount in mounts)
 
     return ContainerSpec(
         name=container_name(manifest.name, replica),

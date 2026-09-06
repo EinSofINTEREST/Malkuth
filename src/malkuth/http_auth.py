@@ -10,6 +10,7 @@ import 하는 것은 07 의 의존 방향에 어긋나므로, 둘 다 여기서 
 
 from __future__ import annotations
 
+import hmac
 from typing import TYPE_CHECKING
 
 from fastapi import HTTPException, Request, status
@@ -44,7 +45,10 @@ def require_token(expected: str | None, *, realm: str = "token") -> Callable[[Re
     def check(request: Request) -> None:
         if expected is None:
             return
-        if presented_token(request) != expected:
+        presented = presented_token(request) or ""
+        # 상수 시간 비교 — 일반 `!=` 는 첫 불일치 바이트에서 끝나 토큰을 한 바이트씩
+        # 맞춰 볼 수 있다. 값이 없으면 빈 문자열과 비교해 분기 시간을 같게 둔다
+        if not hmac.compare_digest(presented.encode(), expected.encode()):
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail=f"invalid {realm}",

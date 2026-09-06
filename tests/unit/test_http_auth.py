@@ -73,3 +73,36 @@ class _Req:
 )
 def test_presented_token_is_strict_about_the_scheme(header, expected):
     assert presented_token(_Req(header)) == expected  # type: ignore[arg-type]
+
+
+def test_the_comparison_is_constant_time(monkeypatch):
+    """일반 `!=` 는 첫 불일치에서 끝나 토큰을 한 바이트씩 맞춰 볼 수 있다.
+
+    타이밍 자체를 재는 것은 불안정하다 — 비교가 `hmac.compare_digest` 를 **거치는지**를 본다.
+    """
+    import hmac
+
+    seen: list[tuple[bytes, bytes]] = []
+    real = hmac.compare_digest
+
+    def spy(a, b):
+        seen.append((bytes(a), bytes(b)))
+        return real(a, b)
+
+    monkeypatch.setattr(hmac, "compare_digest", spy)
+    app_with("s3cret").get("/guarded", headers={"authorization": "Bearer wrong"})
+
+    assert seen == [(b"wrong", b"s3cret")]
+
+
+def test_a_missing_token_still_goes_through_the_constant_time_path(monkeypatch):
+    """없는 토큰을 먼저 걸러 내면 그 분기가 타이밍으로 드러난다."""
+    import hmac
+
+    calls: list[int] = []
+    real = hmac.compare_digest
+    monkeypatch.setattr(hmac, "compare_digest", lambda a, b: calls.append(1) or real(a, b))
+
+    app_with("s3cret").get("/guarded")
+
+    assert calls == [1]

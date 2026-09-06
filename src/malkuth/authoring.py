@@ -10,7 +10,10 @@ UI 가 조립한 결과를 **저장할 통로**와, 저장 전에 **검증할 �
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+import contextlib
+import os
+import tempfile
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -95,7 +98,7 @@ class Author:
         *,
         graphs: Sequence[GraphTopology] = (),
         agents: Sequence[AgentManifest] = (),
-        replacing: Path | None = None,
+        replacing: Path | Sequence[Path] | None = None,
         with_saved_graphs: bool = True,
     ) -> ValidationReport:
         """Validate drafts together with everything already saved.
@@ -131,19 +134,26 @@ class Author:
             ),
             a2a_port_range=self.a2a_port_range,
         )
+        # 저장된 그래프의 문제는 저장된 그래프를 검증할 때만 — 그래프 하나를 지목한
+        # CLI 검증이 무관한 깨진 그래프 때문에 실패하면 docstring 과 어긋난다.
+        # 에이전트/그룹/모듈은 그 검사들이 애초에 저장소 전체를 보므로 늘 포함한다
         problems = [
             *saved_agents.problems,
             *saved_groups.problems,
-            *saved_graphs.problems,
+            *(saved_graphs.problems if with_saved_graphs else ()),
             *(p for t in MODULE_TYPES for p in self.catalog.modules(t).problems),
         ]
-        target = str(replacing) if replacing is not None else None
+        targets = (
+            set()
+            if replacing is None
+            else {str(p) for p in ([replacing] if isinstance(replacing, Path) else replacing)}
+        )
         broken = [
             Finding(
                 check="catalog", code=ErrorCode(p.code), message=p.message, details={"path": p.path}
             )
             for p in problems
-            if p.path != target
+            if p.path not in targets
         ]
         return ValidationReport(findings=(*broken, *report.findings))
 
@@ -170,6 +180,86 @@ class Author:
         self._require_ok(self.validate(graphs=[topology], replacing=self._graph_path(name)))
         _round_trips(topology, GraphTopology)
         return self._write(self._graph_path(name), topology)
+
+    def save_all(
+        self,
+        *,
+        graphs: Mapping[str, GraphTopology] | None = None,
+        agents: Mapping[str, AgentManifest] | None = None,
+    ) -> list[Path]:
+        """Validate a set of declarations together and commit them together.
+
+        여러 선언을 **함께** 검증하고 **함께** 씁니다. 에이전트를 0.2.0 으로 올리면서
+        그것을 참조하는 그래프도 함께 올려야 할 때, 둘을 따로 저장하면 어느 순서로도
+        통과하지 못한다 — 그래프가 먼저면 없는 버전을 가리키고, 에이전트가 먼저면
+        저장된 그래프의 ref 가 깨진다. 함께 검증하면 둘 다 통과한다.
+
+        커밋은 전부 아니면 전무다: 쓰기 전 원본을 스냅샷하고, 하나라도 실패하면
+        되돌린다. 원자적 파일 교체는 개별 `_write` 가, 묶음의 원자성은 스냅샷이 맡는다.
+        """
+        graphs = graphs or {}
+        agents = agents or {}
+        for name, topology in graphs.items():
+            if topology.metadata.name != name:
+                raise _rejected(
+                    "graph name in the path does not match the declaration",
+                    path_name=name,
+                    declared=topology.metadata.name,
+                )
+        for name, manifest in agents.items():
+            if manifest.name != name:
+                raise _rejected(
+                    "agent name in the path does not match the declaration",
+                    path_name=name,
+                    declared=manifest.name,
+                )
+
+        targets: dict[Path, BaseModel] = {}
+        for name, topology in graphs.items():
+            existing = self._existing(name, self.catalog.graph)
+            if existing == topology:
+                continue
+            if existing is not None:
+                self._require_bump(
+                    "graph", name, existing.metadata.version, topology.metadata.version
+                )
+            self._refuse_if_in_use("graph", name)
+            _round_trips(topology, GraphTopology)
+            targets[self._graph_path(name)] = topology
+        for name, manifest in agents.items():
+            existing_agent = self._existing(name, self.catalog.agent)
+            if existing_agent == manifest:
+                continue
+            if existing_agent is not None:
+                self._require_bump(
+                    "agent", name, existing_agent.metadata.version, manifest.metadata.version
+                )
+            self._refuse_if_in_use("agent", name)
+            _round_trips(manifest, AgentManifest)
+            targets[self._agent_path(name)] = manifest
+        if not targets:
+            return []
+
+        self._require_ok(
+            self.validate(
+                graphs=list(graphs.values()), agents=list(agents.values()), replacing=list(targets)
+            )
+        )
+
+        snapshots = {path: (path.read_bytes() if path.is_file() else None) for path in targets}
+        written: list[Path] = []
+        try:
+            for path, model in targets.items():
+                written.append(self._write(path, model))
+        except BaseException:
+            for path, before in snapshots.items():
+                if before is None:
+                    with contextlib.suppress(FileNotFoundError):
+                        path.unlink()
+                else:
+                    path.write_bytes(before)
+            raise
+        return written
 
     def delete_graph(self, name: str) -> None:
         path = self._graph_path(name)
@@ -275,8 +365,21 @@ class Author:
 
     @staticmethod
     def _write(path: Path, model: BaseModel) -> Path:
+        """같은 디렉토리의 임시 파일에 쓰고 ``os.replace`` 로 바꿔 넣는다.
+
+        ``write_text`` 는 먼저 비우고 쓴다 — 중간에 죽으면 잘린 파일이 남고 마지막
+        정상 버전은 사라진다. 이 API 가 선언을 바꾸는 주 경로이므로 원자적이어야 한다.
+        """
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(_serialize(model), encoding="utf-8")
+        fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(_serialize(model))
+            Path(tmp).replace(path)
+        except BaseException:
+            with contextlib.suppress(FileNotFoundError):
+                Path(tmp).unlink()
+            raise
         return path
 
 

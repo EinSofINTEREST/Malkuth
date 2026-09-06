@@ -185,3 +185,43 @@ async def test_without_an_author_the_write_routes_do_not_exist(workspace):
 
     assert response.status_code == 405
     assert not (workspace / "graphs" / "pipeline.yaml").exists()
+
+
+# --- 리뷰 반영 (#249) --------------------------------------------------------------
+
+
+@pytest.mark.parametrize("body", ["[]", '"x"', "42", "not json at all"])
+async def test_a_non_object_or_non_json_body_is_400_val_002(api, body):
+    """FastAPI 의 422 가 아니라 카탈로그와 같은 모양이어야 UI 가 한 가지만 다룬다."""
+    response = await api.put(
+        "/v1/graphs/x", content=body, headers={"content-type": "application/json"}
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == ErrorCode.VAL_002
+
+
+async def test_declarations_saves_an_agent_bump_with_its_graph(api, workspace):
+    await api.put("/v1/graphs/pipeline", json=graph_doc("pipeline"))
+    bumped = agent_doc("alpha", "0.2.0")
+    g = graph_doc("pipeline", "1.1.0")
+    g["spec"]["nodes"][0]["agent"] = "agents/alpha@0.2.0"
+
+    response = await api.put(
+        "/v1/declarations", json={"graphs": {"pipeline": g}, "agents": {"alpha": bumped}}
+    )
+
+    assert response.status_code == 200, response.text
+    assert len(response.json()["written"]) == 2
+    assert (await api.get("/v1/agents/alpha")).json()["metadata"]["version"] == "0.2.0"
+
+
+async def test_declarations_rejects_an_inconsistent_set_without_writing(api, workspace):
+    await api.put("/v1/graphs/pipeline", json=graph_doc("pipeline"))
+    g = graph_doc("pipeline", "1.1.0")
+    g["spec"]["nodes"][0]["agent"] = "agents/alpha@9.9.9"
+
+    response = await api.put("/v1/declarations", json={"graphs": {"pipeline": g}})
+
+    assert response.status_code == 400
+    assert (await api.get("/v1/graphs/pipeline")).json()["metadata"]["version"] == "1.0.0"

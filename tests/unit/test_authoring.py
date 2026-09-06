@@ -259,7 +259,13 @@ def test_the_author_has_no_module_writer():
     """04 Registry 2 — 게시된 모듈은 불변. 쓰는 메서드가 생기면 그것이 위반이다."""
     writers = [n for n in dir(Author) if n.startswith(("save_", "delete_"))]
 
-    assert sorted(writers) == ["delete_agent", "delete_graph", "save_agent", "save_graph"]
+    assert sorted(writers) == [
+        "delete_agent",
+        "delete_graph",
+        "save_agent",
+        "save_all",
+        "save_graph",
+    ]
 
 
 # --- 깨진 파일 -----------------------------------------------------------------------
@@ -283,3 +289,82 @@ def test_unrelated_broken_declarations_block_saving(author, workspace):
         author.save_graph("pipeline", graph("pipeline"))
 
     assert any(f.get("check") == "catalog" for f in excinfo.value.details["findings"])
+
+
+# --- 리뷰 반영 (#249) --------------------------------------------------------------
+
+
+def test_writes_are_atomic_a_failure_leaves_the_old_file_intact(author, workspace, monkeypatch):
+    """`write_text` 는 먼저 비운다 — 중간에 죽으면 마지막 정상 버전이 사라진다."""
+    author.save_graph("pipeline", graph("pipeline"))
+    before = (workspace / "graphs" / "pipeline.yaml").read_text(encoding="utf-8")
+    import malkuth.authoring as authoring
+
+    def exploding(model):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(authoring, "_serialize", exploding)
+
+    with pytest.raises(OSError):
+        author.save_graph("pipeline", graph("pipeline", "1.1.0"))
+
+    assert (workspace / "graphs" / "pipeline.yaml").read_text(encoding="utf-8") == before
+    assert not list((workspace / "graphs").glob(".*.tmp")), "임시 파일이 남았다"
+
+
+def test_an_agent_bump_and_its_graph_can_only_be_saved_together(author, workspace):
+    """따로는 어느 순서로도 통과하지 못한다 — 함께 검증하면 통과한다."""
+    author.save_graph("pipeline", graph("pipeline"))
+    bumped_agent = agent("alpha", "0.2.0")
+    bumped_graph = graph("pipeline", "1.1.0", agent_version="0.2.0")
+
+    with pytest.raises(MalkuthError):
+        author.save_agent("alpha", bumped_agent)  # 저장된 그래프의 ref 가 깨진다
+    with pytest.raises(MalkuthError):
+        author.save_graph("pipeline", bumped_graph)  # 아직 없는 버전을 가리킨다
+
+    written = author.save_all(graphs={"pipeline": bumped_graph}, agents={"alpha": bumped_agent})
+
+    assert len(written) == 2
+    assert Catalog.under(workspace).agent("alpha").metadata.version == "0.2.0"
+    assert Catalog.under(workspace).graph("pipeline").metadata.version == "1.1.0"
+
+
+def test_save_all_rolls_back_every_file_when_one_write_fails(author, workspace, monkeypatch):
+    author.save_graph("pipeline", graph("pipeline"))
+    before_graph = (workspace / "graphs" / "pipeline.yaml").read_bytes()
+    before_agent = (workspace / "agents" / "alpha" / "manifest.yaml").read_bytes()
+    real = Author._write
+    calls = {"n": 0}
+
+    def second_fails(path, model):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise OSError("disk full")
+        return real(path, model)
+
+    monkeypatch.setattr(Author, "_write", staticmethod(second_fails))
+
+    with pytest.raises(OSError):
+        author.save_all(
+            graphs={"pipeline": graph("pipeline", "1.1.0", agent_version="0.2.0")},
+            agents={"alpha": agent("alpha", "0.2.0")},
+        )
+
+    assert (workspace / "graphs" / "pipeline.yaml").read_bytes() == before_graph
+    assert (workspace / "agents" / "alpha" / "manifest.yaml").read_bytes() == before_agent
+
+
+def test_save_all_with_nothing_changed_writes_nothing(author):
+    author.save_graph("pipeline", graph("pipeline"))
+
+    assert author.save_all(graphs={"pipeline": graph("pipeline")}) == []
+
+
+def test_cli_scoped_validation_ignores_unrelated_broken_graphs(workspace):
+    """지목한 그래프만 판정한다는 docstring 과 실제가 같아야 한다."""
+    (workspace / "graphs" / "broken.yaml").write_text("kind: Graph\n", encoding="utf-8")
+    author = Author(catalog=Catalog.under(workspace))
+
+    assert author.validate(graphs=[graph("draft")], with_saved_graphs=False).ok
+    assert not author.validate(graphs=[graph("draft")], with_saved_graphs=True).ok

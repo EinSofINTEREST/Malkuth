@@ -12,9 +12,10 @@ Resume 은 다르다: 이어갈 state 가 구동 프로세스의 핸들에 있�
 from __future__ import annotations
 
 from dataclasses import asdict
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Annotated, Any
 
-from fastapi import APIRouter, Depends, FastAPI, Request, status
+from fastapi import APIRouter, Body, Depends, FastAPI, Request, status
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, ValidationError
 
@@ -108,6 +109,29 @@ def create_app(
     async def health() -> dict[str, str]:
         """무인증 — 살아 있는지만 답한다. 운영 정보는 싣지 않는다."""
         return {"status": "ok"}
+
+    @app.exception_handler(RequestValidationError)
+    async def _on_bad_body(_request: Request, err: RequestValidationError) -> JSONResponse:
+        """본문이 JSON 도 아니거나 라우트 시그니처에 못 미치면 FastAPI 가 여기 오기 전에
+        422 를 낸다 — 카탈로그·authoring 이 내는 `VAL_002` 와 같은 모양으로 맞춘다.
+        UI 가 한 가지 모양만 다루게 (#242 리뷰)."""
+        problem = MalkuthError(
+            category=ErrorCategory.VALIDATION,
+            code=ErrorCode.VAL_002,
+            message="request failed validation",
+            details={
+                "errors": [
+                    {
+                        "field": ".".join(str(loc) for loc in e.get("loc", ())),
+                        "problem": e.get("msg", ""),
+                    }
+                    for e in err.errors()
+                ]
+            },
+        )
+        return JSONResponse(
+            status_code=status_for(problem), content={"error": problem.payload().model_dump()}
+        )
 
     @app.exception_handler(MalkuthError)
     async def _on_error(_request: Request, err: MalkuthError) -> JSONResponse:
@@ -260,11 +284,12 @@ def _mount_catalog(api: APIRouter, catalog: Catalog) -> None:
         return catalog.module(module_type, name, version)
 
 
-def _parsed[T: BaseModel](body: dict[str, Any], model: type[T]) -> T:
+def _parsed[T: BaseModel](body: Any, model: type[T]) -> T:
     """요청 본문을 모델로 — 스키마 위반은 **어느 필드가 왜** 인지 담아 400 으로.
 
     FastAPI 의 기본 422 는 카탈로그가 깨진 파일에 대해 내는 형식과 다르다 —
-    UI 가 한 가지 모양만 다루게 같은 `VAL_002` details 로 맞춘다.
+    UI 가 한 가지 모양만 다루게 같은 `VAL_002` details 로 맞춘다. 본문을 ``Any`` 로
+    받는 이유도 같다: ``dict`` 로 받으면 배열·문자열 본문이 여기 오기 전에 422 로 샌다.
     """
     try:
         return model.model_validate(body)
@@ -292,6 +317,13 @@ def _report(report: ValidationReport) -> dict[str, Any]:
     }
 
 
+class Declarations(BaseModel):
+    """`/v1/declarations` 본문 — 이름 → 문서. 이름이 곧 경로다."""
+
+    graphs: dict[str, Any] = {}
+    agents: dict[str, Any] = {}
+
+
 class Draft(BaseModel):
     """`/v1/validate` 본문 — 저장하지 않을 초안들.
 
@@ -308,7 +340,8 @@ def _mount_authoring(api: APIRouter, author: Author) -> None:
     """검증 후 저장 — 검증 없이 쓰는 경로는 없다 (01 Contract Validation)."""
 
     @api.post("/v1/validate")
-    async def validate(draft: Draft) -> dict[str, Any]:
+    async def validate(body: Annotated[Any, Body()]) -> dict[str, Any]:
+        draft = _parsed(body, Draft)
         """초안을 저장된 것과 함께 검증만 한다 — 아무것도 쓰지 않는다."""
         return _report(
             author.validate(
@@ -317,8 +350,19 @@ def _mount_authoring(api: APIRouter, author: Author) -> None:
             )
         )
 
+    @api.put("/v1/declarations")
+    async def put_declarations(body: Annotated[Any, Body()]) -> dict[str, Any]:
+        """그래프와 에이전트를 **함께** 검증하고 함께 쓴다 — 에이전트 버전을 올리면서
+        그것을 참조하는 그래프를 같이 올릴 때 따로는 어느 순서로도 통과하지 못한다."""
+        draft = _parsed(body, Declarations)
+        written = author.save_all(
+            graphs={n: _parsed(g, GraphTopology) for n, g in draft.graphs.items()},
+            agents={n: _parsed(a, AgentManifest) for n, a in draft.agents.items()},
+        )
+        return {"written": [str(p) for p in written]}
+
     @api.put("/v1/graphs/{name}")
-    async def put_graph(name: str, body: dict[str, Any]) -> dict[str, Any]:
+    async def put_graph(name: str, body: Annotated[Any, Body()]) -> dict[str, Any]:
         path = author.save_graph(name, _parsed(body, GraphTopology))
         return {"name": name, "path": str(path)}
 
@@ -327,7 +371,7 @@ def _mount_authoring(api: APIRouter, author: Author) -> None:
         author.delete_graph(name)
 
     @api.put("/v1/agents/{name}")
-    async def put_agent(name: str, body: dict[str, Any]) -> dict[str, Any]:
+    async def put_agent(name: str, body: Annotated[Any, Body()]) -> dict[str, Any]:
         path = author.save_agent(name, _parsed(body, AgentManifest))
         return {"name": name, "path": str(path)}
 

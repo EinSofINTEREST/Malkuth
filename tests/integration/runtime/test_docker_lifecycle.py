@@ -95,6 +95,9 @@ class CliDockerClient:
             f"--pids-limit={kwargs['pids_limit']}",
             "--memory",
             str(kwargs["mem_limit"]),
+            # 계약 테스트가 잡았다: CPU 상한을 빼먹어 NanoCpus=0 이었다 (#243).
+            # 참조 구현이 상한을 버리면 그것으로 검증한 E2E 는 CPU 를 한 번도 걸어 본 적이 없다
+            f"--cpus={kwargs['nano_cpus'] / 1_000_000_000}",
             "-P",
         ]
         for capability in kwargs.get("cap_drop", ()):

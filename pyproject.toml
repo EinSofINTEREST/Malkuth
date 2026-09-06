@@ -79,6 +79,11 @@ warn_unused_ignores = true
 module = "malkuth.core.*"
 strict = true
 
+# docker SDK 는 타입 stub 을 싣지 않는다 — 우리 쪽 경계(client.py)에서만 쓴다
+[[tool.mypy.overrides]]
+module = "docker.*"
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]

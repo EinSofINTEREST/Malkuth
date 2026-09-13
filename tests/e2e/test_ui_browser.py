@@ -52,6 +52,60 @@ def port_open(port: int) -> bool:
         return probe.connect_ex(("127.0.0.1", port)) == 0
 
 
+def container_running(name: str) -> bool:
+    return docker("inspect", "-f", "{{.State.Running}}", name, check=False).strip() == "true"
+
+
+def start_browser_server(playwright, attempts: int = 3):
+    """Start the browser server and connect, retrying on a fresh port.
+
+    `--network host` 라 포트는 호스트의 것이다 — 고른 뒤 컨테이너가 잡기까지의 틈에
+    다른 프로세스가 차지할 수 있다. 그때 TCP 는 열려 있으므로 "포트가 열렸다" 는
+    준비 신호가 되지 못한다. **연결이 되는 것**을 준비 신호로 쓰고, 안 되면 컨테이너
+    상태와 로그를 붙여 새 포트로 다시 시도한다.
+    """
+    failures = []
+    for _ in range(attempts):
+        port = free_port()
+        name = f"malkuth-e2e-playwright-{os.getpid()}-{port}"
+        docker("rm", "-f", name, check=False)
+        docker(
+            "run",
+            "-d",
+            "--rm",
+            "--name",
+            name,
+            "--network",
+            "host",
+            "--ipc=host",
+            PLAYWRIGHT_IMAGE,
+            "npx",
+            "-y",
+            f"playwright@{PLAYWRIGHT_VERSION}",
+            "run-server",
+            "--port",
+            str(port),
+            # host 네트워크를 공유하므로 여기서의 loopback 이 곧 호스트의 loopback 이다.
+            # 0.0.0.0 으로 열면 **인증 없는 브라우저 제어 소켓**이 모든 인터페이스에 노출된다
+            "--host",
+            "127.0.0.1",
+            timeout=900,
+        )
+        deadline = time.monotonic() + 120
+        while time.monotonic() < deadline and container_running(name) and not port_open(port):
+            time.sleep(1.0)
+        try:
+            if not container_running(name):
+                raise AssertionError("browser server exited")
+            return playwright.chromium.connect(f"ws://127.0.0.1:{port}/"), name
+        except Exception as err:  # noqa: BLE001 — 다음 포트로 다시 시도한다
+            failures.append(
+                f"port {port}: {type(err).__name__} {err}\n{docker('logs', name, check=False)}"
+            )
+            docker("rm", "-f", name, check=False)
+    raise AssertionError("browser server never became connectable:\n" + "\n".join(failures))
+
+
 @pytest.fixture(scope="module")
 def browser() -> Iterator:
     """A real browser — locally when the host can run one, in a container otherwise.
@@ -73,42 +127,11 @@ def browser() -> Iterator:
                 local.close()
             return
 
-        port = free_port()
-        name = f"malkuth-e2e-playwright-{os.getpid()}"
-        docker("rm", "-f", name, check=False)
-        docker(
-            "run",
-            "-d",
-            "--rm",
-            "--name",
-            name,
-            "--network",
-            "host",
-            "--ipc=host",
-            PLAYWRIGHT_IMAGE,
-            "npx",
-            "-y",
-            f"playwright@{PLAYWRIGHT_VERSION}",
-            "run-server",
-            "--port",
-            str(port),
-            "--host",
-            # host 네트워크를 공유하므로 여기서의 loopback 이 곧 호스트의 loopback 이다.
-            # 0.0.0.0 으로 열면 **인증 없는 브라우저 제어 소켓**이 모든 인터페이스에 노출된다
-            "127.0.0.1",
-            timeout=900,
-        )
+        remote, name = start_browser_server(p)
         try:
-            deadline = time.monotonic() + 120
-            while not port_open(port) and time.monotonic() < deadline:
-                time.sleep(1.0)
-            assert port_open(port), f"browser server never listened on {port}"
-            remote = p.chromium.connect(f"ws://127.0.0.1:{port}/")
-            try:
-                yield remote
-            finally:
-                remote.close()
+            yield remote
         finally:
+            remote.close()
             docker("rm", "-f", name, check=False)
 
 

@@ -26,12 +26,15 @@ wiring, and share nothing except the graph state and declared, scoped memory.
   **global / group / local**, resolved nearest-first
 - **Context memory** — per-scope memory spaces with hybrid (vector + lexical) search
   indexes, token-budgeted recall, and declared retention
+- **Assembled from a browser** — one control plane serves a REST API and a Web UI for
+  composing graphs, deploying them into containers, and running them
+  ([API](docs/en/api.md), [UI](docs/en/ui.md))
 
 ## Status
 
 **Pre-v0.1.0.** The framework layers described above are implemented and covered by the
-test suite; the control plane REST API, remote module registry, and Kubernetes runtime
-backend remain future work.
+test suite, including the control plane REST API and the Web UI it serves. The remote
+module registry and the Kubernetes runtime backend remain future work.
 
 ## Requirements
 
@@ -99,7 +102,8 @@ uv run malkuth <command>          # or `malkuth` inside an activated venv
 | `malkuth status` | summarize declared agents, graphs, groups, and modules |
 | `malkuth config [env]` | print the resolved configuration (`dev` / `staging` / `prod`) |
 | `malkuth check <state.yaml>` | report integrity discrepancies against observed state |
-| `malkuth run <graph.yaml>` | submit a mission or service run |
+| `malkuth run <graph.yaml>` | submit a mission or service run against agents you address yourself |
+| `malkuth run --deployment <id>` | submit a run to a deployment — the control plane resolves the addresses |
 | `malkuth run-list` / `run-drain <id>` / `run-resume <id>` | operate runs through a control plane |
 
 `--json` (before the subcommand) switches to machine-readable output; `--root` points at a
@@ -145,17 +149,29 @@ with the process, so runs on it cannot be resumed.
 `run-list` / `run-drain` / `run-resume` talk to a control plane over `--control-url`, and
 they only see runs that were recorded — set `orchestrator.run_store` so the run and the
 control plane share one store. `run-drain` leaves a request and returns immediately; the
-process driving the run stops at its next iteration boundary. `run-resume` always refuses
-against this control plane: it reads the store but does not drive runs, so it has no
-state to continue from. It says so (`501`, `GRAPH_001`) rather than reporting a resume
-that never happened — resuming is currently done by re-running with the same `--run-id`.
+process driving the run stops at its next iteration boundary.
+
+`--deployment` is the other way to run a graph, and it needs no `--agent` flags at all: the
+control plane already knows where the deployed agents are.
+
+```bash
+uv run malkuth run --deployment dep-2fc94a0b5f24 \
+  --input '{"query": "malkuth architecture"}' \
+  --control-url http://127.0.0.1:8700
+```
+
+It returns once the run finishes (`--no-wait` to return at submission). `run-resume`
+continues a run that a service graph *halted* after repeated failures; a run you drained on
+purpose is submitted again rather than resumed. A control plane without a deployment surface
+drives no runs at all and answers `run-resume` with `501` instead of reporting a resume that
+never happened. See the [Control Plane API](docs/en/api.md) for the full surface.
 
 ### Long-running processes
 
 ```bash
 python -m malkuth.agentd        # in-container agent daemon — Control API on 8080
 python -m malkuth.memory        # Memory Service — HTTP surface plus the async indexing loop
-python -m malkuth.orchestrator  # Control Plane — serves run-list / run-drain / run-resume
+python -m malkuth.orchestrator  # Control Plane — REST API + Web UI on /ui
 ```
 
 `agentd` is what the runtime layer starts inside every agent container; it reads
@@ -168,7 +184,18 @@ but indexing is asynchronous, so without the loop nothing becomes searchable.
 
 The Control Plane reads `orchestrator.run_store`, `control_host`, and `control_port` from
 configuration and refuses to start without a store — serving an empty list would read as
-"there are no runs". It does not drive runs, so it answers `run-resume` with a refusal.
+"there are no runs". Set `orchestrator.control_token` and send it as a bearer token; every
+`/v1/*` route requires it, and binding a non-loopback address without one is refused
+(`CFG_001`). `GET /v1/health` and the UI's static files stay unauthenticated.
+
+Setting `orchestrator.deployment_store` additionally opens the deployment surface: the
+process then starts agent containers itself, drives runs submitted against them, and can
+resume a halted one. Without it those routes stay closed and the process only reports runs
+that other processes drive.
+
+Open `http://127.0.0.1:8700/` for the Web UI — catalog, graph and agent editors, deployment,
+and runs. It is served from the same process and calls only the documented REST API
+([API reference](docs/en/api.md), [UI guide](docs/en/ui.md)).
 
 All three honour `MALKUTH_ENV`, `MALKUTH_CONFIG_DIR`, `MALKUTH_LOG_LEVEL`,
 `MALKUTH_LOG_FORMAT`, and `MALKUTH_METRICS_PORT`.
@@ -202,6 +229,8 @@ For a walkthrough that assembles a solution from scratch, see
 | [Architecture](docs/en/architecture.md) | Layers, interaction model, execution modes, resource scoping |
 | [Getting Started](docs/en/getting-started.md) | Environment setup and first solution |
 | [Module System](docs/en/modules.md) | Skillsets, promptsets, memorysets, graphs, groups |
+| [Control Plane API](docs/en/api.md) | REST reference — catalog, authoring, deployments, runs |
+| [Web UI](docs/en/ui.md) | Assembling, deploying, and running a system in a browser |
 | [Testing](docs/en/testing.md) | Test strategy and quality gates |
 | [CI Conventions](docs/en/ci/conventions.md) | Merge gates, workflow design rules |
 | [Required Status Checks](docs/en/ci/status-checks.md) | Single source of truth for check names |

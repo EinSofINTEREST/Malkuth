@@ -185,7 +185,13 @@ points at:
 ### `DELETE /v1/graphs/{name}`, `DELETE /v1/agents/{name}`
 
 `204` on success. Refused while something references the declaration — an agent still used by
-a saved graph, or anything currently deployed.
+a saved graph, or anything currently deployed (`400`, `VAL_002`, with `referenced_by` listing
+the graphs).
+
+**Only the declaration is removed.** An agent that carries its own `Dockerfile` or `src/`
+keeps them: the file the control plane wrote is the file it deletes, and code you wrote is
+not the control plane's to throw away. The agent disappears from the catalog while that
+directory stays on disk.
 
 ## Deployments
 

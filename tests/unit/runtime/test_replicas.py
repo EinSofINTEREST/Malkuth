@@ -80,7 +80,7 @@ async def test_the_same_replica_twice_is_still_rejected():
     with pytest.raises(MalkuthError) as excinfo:
         await agents.start(manifest(), replica=0)
 
-    assert excinfo.value.code == ErrorCode.RT_001
+    assert excinfo.value.code == ErrorCode.RT_010
     assert len(client.created) == 1
 
 

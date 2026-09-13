@@ -157,7 +157,7 @@ class AgentLauncher:
         if (agent, replica) in self.launched:
             raise MalkuthError(
                 category=ErrorCategory.RUNTIME,
-                code=ErrorCode.RT_001,
+                code=ErrorCode.RT_010,
                 message="agent replica is already launched",
                 agent=agent,
                 details={"replica": replica},

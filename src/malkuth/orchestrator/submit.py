@@ -333,7 +333,7 @@ class RunSubmitter:
             # 놀라운 재시작이므로 halted 만 허용한다
             raise MalkuthError(
                 category=ErrorCategory.GRAPH,
-                code=ErrorCode.GRAPH_001,
+                code=ErrorCode.GRAPH_006,
                 message="only a halted run can be resumed",
                 details={"run_id": run_id, "status": str(previous.status)},
             )

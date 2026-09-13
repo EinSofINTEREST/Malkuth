@@ -30,6 +30,11 @@ if TYPE_CHECKING:
 CODE_STATUS: Mapping[str, int] = {
     # 없는 리소스를 400 으로 답하면 호출자가 "요청이 틀렸나" 를 먼저 의심한다
     ErrorCode.NF_001: HTTPStatus.NOT_FOUND,
+    # 상태 충돌 — 카테고리(graph/runtime)는 5xx 지만 이 둘은 **호출자가 해소한다**:
+    # 정지한 run 은 재개 대신 새로 제출하고, 겹친 배포는 먼저 해체하면 된다.
+    # 5xx 로 답하면 운영자의 조치 가능한 실수가 서버 장애 알림으로 새어 나간다 (#256)
+    ErrorCode.GRAPH_006: HTTPStatus.CONFLICT,
+    ErrorCode.RT_010: HTTPStatus.CONFLICT,
 }
 """코드 하나가 카테고리보다 정확한 경우 — 카테고리보다 먼저 본다."""
 

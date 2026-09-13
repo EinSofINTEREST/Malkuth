@@ -24,6 +24,12 @@ class FakeManager:
             raise MalkuthError(
                 category=ErrorCategory.VALIDATION, code=ErrorCode.VAL_001, message="invalid"
             )
+        if graph == "overlapping":
+            raise MalkuthError(
+                category=ErrorCategory.RUNTIME,
+                code=ErrorCode.RT_010,
+                message="agent replica is already launched",
+            )
         if graph == "nope":
             raise MalkuthError(
                 category=ErrorCategory.NOT_FOUND, code=ErrorCode.NF_001, message="unknown graph"
@@ -165,3 +171,11 @@ async def test_without_a_manager_the_routes_do_not_exist():
         transport=httpx.ASGITransport(app=app), base_url="http://cp"
     ) as api:
         assert (await api.get("/v1/deployments")).status_code in (404, 405)
+
+
+async def test_deploying_over_a_live_agent_is_409(api):
+    """#256 — 겹치는 배포를 먼저 해체하면 되는 일이라 서버 오류가 아니다."""
+    response = await api.post("/v1/deployments", json={"graph": "overlapping"})
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == ErrorCode.RT_010

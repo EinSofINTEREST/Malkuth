@@ -227,7 +227,7 @@ async def test_resuming_a_cleanly_stopped_run_is_rejected():
     with pytest.raises(MalkuthError) as exc_info:
         await sub.resume_service(topology, handle.run_id)
 
-    assert exc_info.value.code == ErrorCode.GRAPH_001
+    assert exc_info.value.code == ErrorCode.GRAPH_006
 
 
 async def test_resuming_a_live_run_is_rejected():
@@ -239,7 +239,7 @@ async def test_resuming_a_live_run_is_rejected():
     with pytest.raises(MalkuthError) as exc_info:
         await sub.resume_service(topology, handle.run_id)
 
-    assert exc_info.value.code == ErrorCode.GRAPH_001
+    assert exc_info.value.code == ErrorCode.GRAPH_006
 
     handle.request_drain()
     await asyncio.wait_for(sub.services[handle.run_id], timeout=10)

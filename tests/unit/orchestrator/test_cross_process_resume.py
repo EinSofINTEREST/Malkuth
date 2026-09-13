@@ -138,4 +138,4 @@ async def test_resume_still_refuses_a_run_that_is_not_halted(store_path):
     with pytest.raises(MalkuthError) as excinfo:
         await restarted(store_path).resume_service(make_service(), "live", max_iterations=1)
 
-    assert excinfo.value.code == ErrorCode.GRAPH_001
+    assert excinfo.value.code == ErrorCode.GRAPH_006

@@ -11,6 +11,7 @@ from malkuth.authoring import Author
 from malkuth.catalog import Catalog
 from malkuth.core.errors import ErrorCode, MalkuthError
 from malkuth.core.manifest import AgentManifest
+from malkuth.materials import InMemoryMaterialStore
 from malkuth.orchestrator.topology import GraphTopology
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -256,16 +257,24 @@ def test_a_deployed_declaration_cannot_be_deleted_or_overwritten(workspace):
 
 
 def test_the_author_has_no_module_writer():
-    """04 Registry 2 — 게시된 모듈은 불변. 쓰는 메서드가 생기면 그것이 위반이다."""
-    writers = [n for n in dir(Author) if n.startswith(("save_", "delete_"))]
+    """04 Registry 2 — 게시된 모듈은 불변. 쓰는 메서드가 생기면 그것이 위반이다.
 
-    assert sorted(writers) == [
+    빌드 재료(#264)는 모듈이 아니라 에이전트의 빌드 입력이라 여기에 속하지 않는다 —
+    다만 같은 불변성 규칙을 따른다 (같은 버전에 다른 내용 금지).
+    """
+    writers = sorted(n for n in dir(Author) if n.startswith(("save_", "delete_")))
+
+    assert writers == [
         "delete_agent",
         "delete_graph",
+        "delete_materials",
         "save_agent",
         "save_all",
         "save_graph",
+        "save_materials",
     ]
+    # 취지는 이름 목록이 아니라 **모듈을 쓰지 않는다** 는 것이다
+    assert not [n for n in writers if any(m in n for m in ("skillset", "promptset", "memoryset"))]
 
 
 # --- 깨진 파일 -----------------------------------------------------------------------
@@ -442,3 +451,106 @@ def test_an_unloadable_promptset_is_a_finding_not_a_silent_skip(author, workspac
     assert any(
         f.check == "node_templates" and "could not be loaded" in f.message for f in report.findings
     ), [f.message for f in report.findings]
+
+
+# --- 빌드 재료 (#264) ----------------------------------------------------------------
+
+
+@pytest.fixture
+def author_with_materials(workspace: Path) -> Author:
+    return Author(catalog=Catalog.under(workspace), materials=InMemoryMaterialStore())
+
+
+def test_materials_are_keyed_to_the_declared_version(author_with_materials):
+    """재료는 선언과 한 몸이다 — 버전이 다르면 다른 재료다."""
+    saved = author_with_materials.save_materials("alpha", {"src/agent.py": "MARK = 1"})
+
+    assert saved.version == "0.1.0"
+    assert author_with_materials.read_materials("alpha").files == {"src/agent.py": "MARK = 1"}
+
+
+def test_an_agent_without_materials_reads_as_empty(author_with_materials):
+    """아직 넣지 않은 것은 오류가 아니다."""
+    found = author_with_materials.read_materials("alpha")
+
+    assert found.files == {} and found.version == "0.1.0"
+
+
+def test_the_same_version_cannot_get_different_materials(author_with_materials):
+    """그 버전으로 구운 이미지와 어긋나면 무엇이 도는지 알 수 없다 (04 Registry 2)."""
+    author_with_materials.save_materials("alpha", {"src/agent.py": "MARK = 1"})
+
+    with pytest.raises(MalkuthError) as exc_info:
+        author_with_materials.save_materials("alpha", {"src/agent.py": "MARK = 2"})
+
+    assert exc_info.value.code == ErrorCode.MOD_002
+
+
+def test_saving_the_same_materials_again_is_idempotent(author_with_materials):
+    author_with_materials.save_materials("alpha", {"src/agent.py": "MARK = 1"})
+
+    again = author_with_materials.save_materials("alpha", {"src/agent.py": "MARK = 1"})
+
+    assert again.files == {"src/agent.py": "MARK = 1"}
+
+
+def test_a_version_bump_carries_its_own_materials(author_with_materials, workspace):
+    author_with_materials.save_materials("alpha", {"src/agent.py": "old"})
+    bumped = agent("alpha", version="0.2.0")
+    write(
+        workspace / "agents" / "alpha" / "manifest.yaml",
+        bumped.model_dump(mode="json", by_alias=True, exclude_none=True),
+    )
+
+    saved = Author(
+        catalog=Catalog.under(workspace), materials=author_with_materials.materials
+    ).save_materials("alpha", {"src/agent.py": "new"})
+
+    assert saved.version == "0.2.0"
+    assert author_with_materials.materials.get("alpha", "0.1.0").files == {"src/agent.py": "old"}
+
+
+def test_materials_of_a_deployed_agent_cannot_change(workspace):
+    """배포 중인 에이전트의 재료가 바뀌면 도는 이미지와 어긋난다."""
+    author = Author(
+        catalog=Catalog.under(workspace),
+        materials=InMemoryMaterialStore(),
+        in_use=lambda kind, name: kind == "agent" and name == "alpha",
+    )
+
+    with pytest.raises(MalkuthError) as exc_info:
+        author.save_materials("alpha", {"src/agent.py": "MARK = 1"})
+
+    assert exc_info.value.code == ErrorCode.VAL_002
+    assert "deployed" in exc_info.value.message
+
+
+def test_deleting_materials_leaves_the_declaration(author_with_materials, workspace):
+    author_with_materials.save_materials("alpha", {"src/agent.py": "MARK = 1"})
+
+    assert author_with_materials.delete_materials("alpha") is True
+    assert author_with_materials.read_materials("alpha").files == {}
+    assert (workspace / "agents" / "alpha" / "manifest.yaml").exists()
+
+
+def test_a_path_outside_the_context_never_reaches_the_store(author_with_materials):
+    with pytest.raises(MalkuthError) as exc_info:
+        author_with_materials.save_materials("alpha", {"../escape.py": "x"})
+
+    assert exc_info.value.code == ErrorCode.VAL_002
+    assert author_with_materials.materials.get("alpha", "0.1.0") is None
+
+
+def test_materials_for_an_unknown_agent_are_not_found(author_with_materials):
+    with pytest.raises(MalkuthError) as exc_info:
+        author_with_materials.save_materials("nobody", {})
+
+    assert exc_info.value.code == ErrorCode.NF_001
+
+
+def test_without_a_store_the_surface_is_refused(author):
+    """재료 표면을 열지 않은 조립에서 조용히 성공하면 빌드가 빈 재료로 돈다."""
+    with pytest.raises(MalkuthError) as exc_info:
+        author.save_materials("alpha", {})
+
+    assert exc_info.value.code == ErrorCode.CFG_001

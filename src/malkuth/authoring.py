@@ -25,6 +25,7 @@ from malkuth.catalog import MODULE_TYPES, Catalog, not_found
 from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
 from malkuth.core.manifest import AgentManifest
 from malkuth.deploy import Finding, ValidationReport, validate_deployment
+from malkuth.materials import Materials, MaterialStore, check_files
 from malkuth.modules.promptset import PromptsetManifest
 from malkuth.orchestrator.topology import GraphTopology
 
@@ -86,11 +87,14 @@ class Author:
         a2a_port_range: The runtime's allocatable range, for the port check.
         in_use: Whether a declaration is currently deployed (#243). 배포 중인
             것을 지우거나 덮어쓰면 실행 중 run 의 계약이 발밑에서 바뀐다.
+        materials: Where build materials live (#264). 없으면 재료 표면을 열지 않는다 —
+            선언만 다루는 조립에서는 커스텀 이미지를 굽지 않기 때문이다.
     """
 
     catalog: Catalog
     a2a_port_range: tuple[int, int] | None = None
     in_use: InUse | None = None
+    materials: MaterialStore | None = None
 
     # --- 검증 ----------------------------------------------------------------
 
@@ -373,6 +377,57 @@ class Author:
     def _require_bump(kind: str, name: str, existing: str, proposed: str) -> None:
         if _version_tuple(proposed) <= _version_tuple(existing):
             raise _version_conflict(kind, name, existing=existing, proposed=proposed)
+
+    # --- 빌드 재료 (#264) ------------------------------------------------------
+
+    def _store(self) -> MaterialStore:
+        if self.materials is None:
+            raise MalkuthError(
+                category=ErrorCategory.CONFIG,
+                code=ErrorCode.CFG_001,
+                message="this control plane has no material store configured",
+            )
+        return self.materials
+
+    def read_materials(self, name: str) -> Materials:
+        """Read the materials declared for an agent's **current** version.
+
+        저장된 매니페스트의 버전을 키로 읽는다 — 재료는 선언과 한 몸이라 버전이 다르면
+        다른 재료다. 없으면 빈 집합을 돌려준다: "아직 넣지 않았다" 는 오류가 아니다.
+        """
+        manifest = self.catalog.agent(name)
+        version = manifest.metadata.version
+        found = self._store().get(name, version)
+        return found or Materials(agent=name, version=version, files={})
+
+    def save_materials(self, name: str, files: Mapping[str, str]) -> Materials:
+        """Validate and store one agent version's build materials.
+
+        선언과 같은 두 규칙을 따른다: **버전이 같으면 내용도 같아야** 하고 (04 Registry 2
+        Immutability), 배포 중인 에이전트의 재료는 바꾸지 못한다. 재료가 바뀌면 그 버전으로
+        구운 이미지와 어긋나므로, 무엇이 도는지 알 수 없게 된다.
+
+        Raises:
+            MalkuthError: VALIDATION/``VAL_002`` 경로·크기 규칙 위반,
+                MODULE/``MOD_002`` 같은 버전에 다른 내용,
+                NOT_FOUND/``NF_001`` 선언되지 않은 에이전트.
+        """
+        manifest = self.catalog.agent(name)
+        version = manifest.metadata.version
+        checked = check_files(files)
+        existing = self._store().get(name, version)
+        if existing is not None and dict(existing.files) != checked:
+            raise _version_conflict("agent materials", name, existing=version, proposed=version)
+        self._refuse_if_in_use("agent", name)
+        materials = Materials(agent=name, version=version, files=checked)
+        self._store().put(materials)
+        return materials
+
+    def delete_materials(self, name: str) -> bool:
+        """Drop the materials for an agent's current version — the declaration stays."""
+        manifest = self.catalog.agent(name)
+        self._refuse_if_in_use("agent", name)
+        return self._store().delete(name, manifest.metadata.version)
 
     def _refuse_if_in_use(self, kind: str, name: str) -> None:
         if self.in_use is not None and self.in_use(kind, name):

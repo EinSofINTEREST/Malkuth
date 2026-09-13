@@ -533,6 +533,50 @@ def test_deleting_materials_leaves_the_declaration(author_with_materials, worksp
     assert (workspace / "agents" / "alpha" / "manifest.yaml").exists()
 
 
+def test_deleting_then_re_adding_cannot_swap_the_contents(author_with_materials):
+    """삭제가 행을 지우면 불변성 검사의 근거가 사라진다 — 같은 버전에 다른 내용이 들어간다.
+
+    그러면 그 버전으로 구운 이미지가 무엇으로 만들어졌는지 알 수 없다.
+    """
+    author_with_materials.save_materials("alpha", {"src/agent.py": "ORIGINAL"})
+    author_with_materials.delete_materials("alpha")
+
+    with pytest.raises(MalkuthError) as exc_info:
+        author_with_materials.save_materials("alpha", {"src/agent.py": "SWAPPED"})
+
+    assert exc_info.value.code == ErrorCode.MOD_002
+
+
+def test_deleting_twice_reports_that_nothing_was_there(author_with_materials):
+    author_with_materials.save_materials("alpha", {"src/agent.py": "MARK = 1"})
+
+    assert author_with_materials.delete_materials("alpha") is True
+    assert author_with_materials.delete_materials("alpha") is False
+
+
+def test_an_unchanged_save_is_allowed_while_deployed(workspace):
+    """바뀌는 것이 없는 저장까지 막으면 같은 PUT 의 재시도가 실패로 보인다."""
+    store = InMemoryMaterialStore()
+    Author(catalog=Catalog.under(workspace), materials=store).save_materials(
+        "alpha", {"src/agent.py": "MARK = 1"}
+    )
+    deployed = Author(
+        catalog=Catalog.under(workspace), materials=store, in_use=lambda kind, name: True
+    )
+
+    again = deployed.save_materials("alpha", {"src/agent.py": "MARK = 1"})
+
+    assert again.files == {"src/agent.py": "MARK = 1"}
+
+
+def test_the_saved_record_carries_its_store_timestamp(author_with_materials):
+    """넣은 것을 그대로 돌려주면 PUT 응답과 이후 GET 이 다르게 보인다."""
+    saved = author_with_materials.save_materials("alpha", {"src/agent.py": "MARK = 1"})
+
+    assert saved.updated_at
+    assert saved.updated_at == author_with_materials.read_materials("alpha").updated_at
+
+
 def test_a_path_outside_the_context_never_reaches_the_store(author_with_materials):
     with pytest.raises(MalkuthError) as exc_info:
         author_with_materials.save_materials("alpha", {"../escape.py": "x"})

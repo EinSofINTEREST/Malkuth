@@ -416,18 +416,38 @@ class Author:
         version = manifest.metadata.version
         checked = check_files(files)
         existing = self._store().get(name, version)
-        if existing is not None and dict(existing.files) != checked:
+        if existing is not None:
+            if dict(existing.files) == checked:
+                # 바뀌는 것이 없는 저장은 배포 중이어도 막을 이유가 없다 — 같은 PUT 을
+                # 다시 보내는 것이 거절되면 재시도가 실패로 보인다
+                return existing
             raise _version_conflict("agent materials", name, existing=version, proposed=version)
         self._refuse_if_in_use("agent", name)
-        materials = Materials(agent=name, version=version, files=checked)
-        self._store().put(materials)
-        return materials
+        self._store().put(Materials(agent=name, version=version, files=checked))
+        stored = self._store().get(name, version)
+        assert stored is not None  # noqa: S101 — 방금 적재했다
+        # 적재 시점이 찍힌 **저장된** 기록을 돌려준다. 넣은 것을 그대로 돌려주면 같은 쓰기가
+        # PUT 응답과 이후 GET 에서 다르게 보인다
+        return stored
 
     def delete_materials(self, name: str) -> bool:
-        """Drop the materials for an agent's current version — the declaration stays."""
+        """Clear the materials for an agent's current version — the declaration stays.
+
+        **행을 지우지 않고 빈 집합으로 덮는다.** 지워 버리면 불변성 검사의 유일한 근거가
+        사라져서, 삭제한 뒤 같은 버전에 다른 내용을 넣을 수 있다 — 그 버전으로 구운 이미지가
+        무엇으로 만들어졌는지 알 수 없게 된다. 내용을 바꾸려면 여전히 버전을 올려야 한다.
+
+        Returns:
+            Whether anything was there to clear.
+        """
         manifest = self.catalog.agent(name)
+        version = manifest.metadata.version
+        existing = self._store().get(name, version)
+        if existing is None or not existing.files:
+            return False
         self._refuse_if_in_use("agent", name)
-        return self._store().delete(name, manifest.metadata.version)
+        self._store().put(Materials(agent=name, version=version, files={}))
+        return True
 
     def _refuse_if_in_use(self, kind: str, name: str) -> None:
         if self.in_use is not None and self.in_use(kind, name):

@@ -39,6 +39,8 @@ export function createClient({ baseUrl = "", token = null, fetchImpl = globalThi
     graph: (name) => call("GET", `/v1/graphs/${encodeURIComponent(name)}`),
     groups: () => call("GET", "/v1/groups"),
     modules: (type) => call("GET", `/v1/modules/${encodeURIComponent(type)}`),
+    module: (type, name, version) =>
+      call("GET", `/v1/modules/${encodeURIComponent(type)}/${encodeURIComponent(name)}/${encodeURIComponent(version)}`),
     // 저작 (#242)
     validate: ({ graphs = [], agents = [] }) => call("POST", "/v1/validate", { graphs, agents }),
     saveGraph: (name, document) => call("PUT", `/v1/graphs/${encodeURIComponent(name)}`, document),
@@ -103,6 +105,35 @@ export function pruneEmpty(value) {
     return out;
   }
   return value;
+}
+
+// 노드 표의 한 칸(`key=source, key2=source2`)과 선언의 매핑 사이를 옮긴다.
+// 편집기가 이 값을 만들지 못하면 노드는 빈 입력을 받고, 템플릿의 필수 변수가
+// 채워지지 않아 run 이 시작된 뒤에야 MOD_004 로 죽는다 (#260).
+export function parsePairs(text) {
+  const pairs = {};
+  for (const chunk of String(text || "").split(",")) {
+    const item = chunk.trim();
+    if (!item) continue;
+    const at = item.indexOf("=");
+    if (at < 0) continue;
+    const key = item.slice(0, at).trim();
+    const value = item.slice(at + 1).trim();
+    if (key && value) pairs[key] = value;
+  }
+  return pairs;
+}
+
+export function formatPairs(pairs) {
+  return Object.entries(pairs || {})
+    .map(([key, value]) => `${key}=${value}`)
+    .join(", ");
+}
+
+// 노드 하나의 기본 input_map — 템플릿의 필수 변수를 같은 이름의 state 필드에서 끌어온다.
+// 대부분의 배선이 이 모양이므로 편집기가 미리 채워 준다.
+export function suggestInputMap(required) {
+  return Object.fromEntries((required || []).map((name) => [name, `state.${name}`]));
 }
 
 export function moduleRef(type, name, version) {

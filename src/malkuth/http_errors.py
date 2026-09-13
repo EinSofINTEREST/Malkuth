@@ -35,6 +35,7 @@ CODE_STATUS: Mapping[str, int] = {
     # 5xx 로 답하면 운영자의 조치 가능한 실수가 서버 장애 알림으로 새어 나간다 (#256)
     ErrorCode.GRAPH_006: HTTPStatus.CONFLICT,
     ErrorCode.RT_010: HTTPStatus.CONFLICT,
+    ErrorCode.RT_011: HTTPStatus.CONFLICT,
 }
 """코드 하나가 카테고리보다 정확한 경우 — 카테고리보다 먼저 본다."""
 

@@ -16,9 +16,11 @@ Open `http://127.0.0.1:8700/` — `/` redirects to `/ui/`.
 
 ## Connecting
 
-The page loads without a token, but it cannot read anything until you paste
-`orchestrator.control_token` into the **토큰** field and press **연결**. The indicator next to
-it reports the result:
+The page loads without a token. Whether it can read anything without one depends on the
+control plane: when `orchestrator.control_token` is set, paste it into the **토큰** field and
+press **연결**; when no token is configured (allowed only on a loopback bind) the API is open
+and the page loads its data straight away. The indicator next to the field reports the
+result:
 
 | Indicator | Meaning |
 |---|---|
@@ -92,7 +94,10 @@ immediately with a `run_id`; the table polls until the run finishes and then sho
 state.
 
 Rows carry the controls that apply to their state: **보기** for the full record, **drain**
-for a running service run (it stops after the current iteration), **재개** for a halted one.
+for a running service run (it stops after the current iteration), and **재개** for a run that
+is `halted` or `failed`. What resuming means depends on the mode — a service run continues
+from its last iteration, a mission run from its last checkpoint. See the
+[API reference](api.md#post-v1runsrun_idresume) for the exact contract.
 
 ## The full loop
 

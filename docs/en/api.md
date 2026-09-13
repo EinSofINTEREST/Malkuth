@@ -26,23 +26,30 @@ Without `orchestrator.deployment_store` the process refuses to start containers 
 
 ## Authentication
 
-Every `/v1/*` route requires `orchestrator.control_token` as a bearer token:
+**Authentication is on only when `orchestrator.control_token` is set.** With a token, every
+`/v1/*` route requires it as a bearer token:
 
 ```bash
 curl -H "Authorization: Bearer $MALKUTH_CONTROL_TOKEN" http://127.0.0.1:8700/v1/graphs
 ```
 
-Two exceptions are deliberate: `GET /v1/health` (Docker healthchecks call it) and the static
-UI under `/ui` (the page is not a secret — it cannot read anything until the operator types a
-token into it). A missing or wrong token is `401`.
+**Without a token the guard is off and every route is open.** That configuration is allowed
+only on a loopback bind: the process refuses to start when it binds any other address without
+a token (`CFG_001`), and it logs a warning when it starts without one. Set a token for
+anything but a single-operator machine.
 
-The process refuses to start when it binds a non-loopback address without a token
-(`CFG_001`), so an unauthenticated surface can never be exposed off-host by accident.
+Two routes are unauthenticated by design even with a token set: `GET /v1/health` (Docker
+healthchecks call it) and the static UI under `/ui` (the page holds no data of its own).
+
+A missing or wrong token is `401` — and that response is **not** the error envelope below.
+It is FastAPI's own `{"detail": "invalid control plane token"}` with a `WWW-Authenticate`
+header, because the check runs as a dependency before any route.
 
 ## Errors
 
-Every failure is the same envelope, and the `code` is the stable part — match on it rather
-than on the message:
+Failures raised by the control plane share one envelope, and the `code` is the stable part —
+match on it rather than on the message. Two responses do **not** use it: `401` (above) and the
+`501` from a control plane that drives no runs, which carries a flatter legacy shape.
 
 ```json
 {
@@ -107,8 +114,10 @@ file to fix.
 ```
 
 Graph summaries carry `mode`, `goal`, and `nodes` instead of `model`; group summaries carry
-`quotas`. A `problem` names the `path`, the `code` (`VAL_002` for a declaration whose name
-does not match its location, `MOD_003` for a schema failure), and the message.
+`quotas`. A `problem` names the `path`, a `code`, and the message. Declarations (agents,
+graphs, groups) report `VAL_002` for both kinds of failure — a schema violation and a name
+that does not match its location. Module listings report what the registry raised instead
+(`MOD_001`, `MOD_003`).
 
 ### `GET /v1/agents/{name}`, `GET /v1/graphs/{name}`, `GET /v1/groups/{name}`
 
@@ -184,9 +193,9 @@ points at:
 
 ### `DELETE /v1/graphs/{name}`, `DELETE /v1/agents/{name}`
 
-`204` on success. Refused while something references the declaration — an agent still used by
-a saved graph, or anything currently deployed (`400`, `VAL_002`, with `referenced_by` listing
-the graphs).
+`204` on success. Refused while something references the declaration (`400`, `VAL_002`), and
+the `details` differ by reason: an agent still used by saved graphs lists them in
+`referenced_by`, while anything currently deployed reports `kind` and `name` instead.
 
 **Only the declaration is removed.** An agent that carries its own `Dockerfile` or `src/`
 keeps them: the file the control plane wrote is the file it deletes, and code you wrote is
@@ -302,13 +311,18 @@ is how a service run is stopped — there is no kill.
 
 ### `POST /v1/runs/{run_id}/resume`
 
-Continues a **halted** run — one that a service graph stopped after too many consecutive
-failures (`GRAPH_005`) — from its last iteration.
+Continues a run from where it stopped. What that means differs by mode:
 
-- `409` (`GRAPH_006`) if the run is in any other state. A run that finished, or that you
-  drained on purpose, is not resumed but submitted again.
-- `501` if this control plane has no deployment surface: it can read runs but does not drive
-  them, and answering `200` would leave an operator believing a resume happened.
+- **Service runs** resume from their last iteration, and only from `halted` — the state a
+  service graph reaches after too many consecutive failures (`GRAPH_005`). Any other state is
+  `409` (`GRAPH_006`): a run you drained on purpose is submitted again, not resumed.
+- **Mission runs** resume from the last checkpoint and carry **no state guard** — the
+  checkpointer decides what continuing means, so resuming one that already finished re-drives
+  it from that checkpoint. Without a durable checkpointer there is nothing to continue from
+  (`STOR_002`).
+
+`501` means this control plane has no deployment surface: it can read runs but does not drive
+them, and answering `200` would leave an operator believing a resume happened.
 
 ## Operational notes
 
@@ -330,7 +344,10 @@ failures (`GRAPH_005`) — from its last iteration.
 | `GET /v1/runs` | `malkuth run-list [--mode service]` |
 | `POST /v1/runs/{id}/drain` | `malkuth run-drain <id>` |
 | `POST /v1/runs/{id}/resume` | `malkuth run-resume <id>` |
-| `POST /v1/validate` | `malkuth validate` (whole repository) |
 
-All of them take `--control-url` and `--control-token` (or `MALKUTH_CONTROL_TOKEN`). See the
+The run commands take `--control-url` and `--control-token` (or `MALKUTH_CONTROL_TOKEN`).
+
+`malkuth validate` is deliberately absent from that table: it is a **local** command that
+reads the repository directly and takes no control-plane flags. `POST /v1/validate` is the
+remote equivalent, and it validates a draft you have not saved. See the
 [root README](../../README.md#commands) for the full command reference.

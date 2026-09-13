@@ -16,8 +16,10 @@ python -m malkuth.orchestrator      # API 와 UI 를 함께 서빙한다
 
 ## 연결
 
-화면은 토큰 없이 열리지만, `orchestrator.control_token` 을 **토큰** 칸에 넣고 **연결** 을
-누르기 전에는 아무것도 읽지 못한다. 옆의 표시가 결과를 알려준다:
+화면은 토큰 없이 열린다. 토큰 없이 무엇을 읽을 수 있는지는 control plane 에 달렸다 —
+`orchestrator.control_token` 이 설정돼 있으면 **토큰** 칸에 넣고 **연결** 을 누르고, 토큰이
+설정되지 않았다면 (loopback 바인드에서만 허용된다) API 가 열려 있어 화면이 바로 데이터를
+불러온다. 옆의 표시가 결과를 알려준다:
 
 | 표시 | 의미 |
 |---|---|
@@ -88,7 +90,9 @@ python -m malkuth.orchestrator      # API 와 UI 를 함께 서빙한다
 돌아오고, 표가 완주까지 폴링한 뒤 최종 state 를 보여준다.
 
 행에는 그 상태에 해당하는 조작만 붙는다 — 전체 기록을 보는 **보기**, 실행 중 service run 의
-**drain** (현재 iteration 후 정지), halted run 의 **재개**.
+**drain** (현재 iteration 후 정지), 그리고 `halted` 또는 `failed` 인 run 의 **재개**.
+재개의 의미는 모드마다 다르다 — service run 은 마지막 iteration 부터, mission run 은 마지막
+checkpoint 부터다. 정확한 계약은 [API 레퍼런스](api.md#post-v1runsrun_idresume) 참조.
 
 ## 전체 흐름
 

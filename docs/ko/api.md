@@ -26,22 +26,29 @@ python -m malkuth.orchestrator
 
 ## 인증
 
-모든 `/v1/*` 라우트는 `orchestrator.control_token` 을 bearer 토큰으로 요구한다:
+**인증은 `orchestrator.control_token` 을 설정했을 때만 켜진다.** 토큰이 있으면 모든
+`/v1/*` 라우트가 그것을 bearer 토큰으로 요구한다:
 
 ```bash
 curl -H "Authorization: Bearer $MALKUTH_CONTROL_TOKEN" http://127.0.0.1:8700/v1/graphs
 ```
 
-두 가지 예외는 의도적이다: `GET /v1/health` (Docker healthcheck 가 직접 부른다) 와
-`/ui` 의 정적 파일 (화면 자체는 비밀이 아니다 — 운영자가 토큰을 입력하기 전에는 아무것도
-읽지 못한다). 토큰이 없거나 틀리면 `401` 이다.
+**토큰이 없으면 검사가 꺼지고 모든 라우트가 열린다.** 이 구성은 loopback 바인드에서만
+허용된다 — 다른 주소에 토큰 없이 바인드하면 기동을 거부하고 (`CFG_001`), 토큰 없이 뜰
+때는 경고를 남긴다. 운영자 한 명의 기계가 아니라면 토큰을 설정한다.
 
-토큰 없이 loopback 이 아닌 주소에 바인드하려 하면 기동을 거부한다 (`CFG_001`) — 무인증
-표면이 실수로 호스트 밖에 열리는 경로를 없앤다.
+토큰을 설정해도 무인증인 라우트가 둘 있다: `GET /v1/health` (Docker healthcheck 가 직접
+부른다) 와 `/ui` 의 정적 파일 (화면 자체는 데이터를 갖고 있지 않다).
+
+토큰이 없거나 틀리면 `401` 이며, 이 응답은 아래의 에러 봉투가 **아니다**. 검사가 라우트보다
+먼저 도는 의존성이라 FastAPI 자체의 `{"detail": "invalid control plane token"}` 과
+`WWW-Authenticate` 헤더로 나간다.
 
 ## 에러
 
-모든 실패는 같은 봉투로 오고, 안정적인 부분은 `code` 다 — 메시지가 아니라 코드로 분기한다:
+control plane 이 내는 실패는 같은 봉투를 쓰고, 안정적인 부분은 `code` 다 — 메시지가 아니라
+코드로 분기한다. 두 응답만 이 봉투가 **아니다**: 위의 `401`, 그리고 run 을 구동하지 않는
+control plane 의 `501` (더 납작한 레거시 모양).
 
 ```json
 {
@@ -105,8 +112,9 @@ curl -H "Authorization: Bearer $MALKUTH_CONTROL_TOKEN" http://127.0.0.1:8700/v1/
 ```
 
 그래프 요약은 `model` 대신 `mode`, `goal`, `nodes` 를 싣고, 그룹 요약은 `quotas` 를 싣는다.
-`problem` 은 `path` 와 `code` (이름이 위치와 다르면 `VAL_002`, 스키마 실패면 `MOD_003`),
-메시지를 담는다.
+`problem` 은 `path` 와 `code`, 메시지를 담는다. 선언(에이전트·그래프·그룹)은 두 종류의
+실패 — 스키마 위반과 이름·위치 불일치 — 를 모두 `VAL_002` 로 보고한다. 모듈 목록은
+레지스트리가 낸 코드를 그대로 싣는다 (`MOD_001`, `MOD_003`).
 
 ### `GET /v1/agents/{name}`, `GET /v1/graphs/{name}`, `GET /v1/groups/{name}`
 
@@ -181,8 +189,9 @@ finding 은 에러 상태가 아니라 `200` 이다 — "아직 유효한가?" �
 
 ### `DELETE /v1/graphs/{name}`, `DELETE /v1/agents/{name}`
 
-성공 시 `204`. 참조가 남아 있으면 거절한다 — 저장된 그래프가 아직 쓰는 에이전트, 또는
-현재 배포 중인 것 (`400`, `VAL_002`, `referenced_by` 에 그래프 목록).
+성공 시 `204`. 참조가 남아 있으면 거절하며 (`400`, `VAL_002`), 사유에 따라 `details` 가
+다르다 — 저장된 그래프가 쓰는 에이전트는 그 목록을 `referenced_by` 에 싣고, 현재 배포 중인
+것은 `kind` 와 `name` 을 싣는다.
 
 **선언만 지운다.** 자체 `Dockerfile` 이나 `src/` 를 가진 에이전트는 그것들을 그대로 유지한다 —
 control plane 이 쓴 파일이 곧 control plane 이 지우는 파일이고, 사람이 쓴 코드는 control
@@ -295,13 +304,17 @@ curl -X POST -H "Authorization: Bearer $TOKEN" -H 'content-type: application/jso
 
 ### `POST /v1/runs/{run_id}/resume`
 
-**halted** 인 run — service 그래프가 연속 실패 임계를 넘어 정지시킨 것 (`GRAPH_005`) — 을
-마지막 iteration 부터 이어간다.
+멈춘 자리에서 이어간다. 그 의미는 모드마다 다르다:
 
-- 그 외의 상태면 `409` (`GRAPH_006`). 완주했거나 의도적으로 drain 한 run 은 재개가 아니라
-  새로 제출하는 것이 맞다.
-- 배포 표면이 없는 control plane 이면 `501` — run 을 읽기만 하고 구동하지 않는데 `200` 을
-  주면 운영자가 재개됐다고 믿는다.
+- **service run** 은 마지막 iteration 부터, 그리고 `halted` 에서만 이어간다 — service
+  그래프가 연속 실패 임계를 넘어 도달하는 상태다 (`GRAPH_005`). 그 외의 상태는 `409`
+  (`GRAPH_006`): 의도적으로 drain 한 run 은 재개가 아니라 새로 제출하는 것이 맞다.
+- **mission run** 은 마지막 checkpoint 에서 이어가며 **상태 가드가 없다** — 무엇을 이어갈지는
+  checkpointer 가 정한다. 이미 완주한 run 을 재개하면 그 checkpoint 부터 다시 구동된다.
+  영속 checkpointer 가 없으면 이어갈 지점 자체가 없다 (`STOR_002`).
+
+`501` 은 이 control plane 에 배포 표면이 없다는 뜻이다 — run 을 읽기만 하고 구동하지 않는데
+`200` 을 주면 운영자가 재개됐다고 믿는다.
 
 ## 운영 시 알아 둘 것
 
@@ -322,7 +335,9 @@ curl -X POST -H "Authorization: Bearer $TOKEN" -H 'content-type: application/jso
 | `GET /v1/runs` | `malkuth run-list [--mode service]` |
 | `POST /v1/runs/{id}/drain` | `malkuth run-drain <id>` |
 | `POST /v1/runs/{id}/resume` | `malkuth run-resume <id>` |
-| `POST /v1/validate` | `malkuth validate` (저장소 전체) |
 
-전부 `--control-url` 과 `--control-token` (또는 `MALKUTH_CONTROL_TOKEN`) 을 받는다. 전체
-명령 레퍼런스는 [루트 README](../../README.md#commands) 참조.
+run 관련 명령은 `--control-url` 과 `--control-token` (또는 `MALKUTH_CONTROL_TOKEN`) 을 받는다.
+
+`malkuth validate` 를 표에서 뺀 것은 의도적이다 — 저장소를 직접 읽는 **로컬** 명령이고
+control plane 플래그를 받지 않는다. 저장하지 않은 초안을 검증하는 원격 대응이
+`POST /v1/validate` 다. 전체 명령 레퍼런스는 [루트 README](../../README.md#commands) 참조.

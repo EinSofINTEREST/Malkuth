@@ -41,4 +41,8 @@ jobs:
         with:
           enable-cache: true
       - run: uv sync --frozen
+      # 브라우저 클릭 E2E (#252). 러너에는 sudo 가 있으므로 시스템 의존성까지 함께 깐다 —
+      # 실패하면 테스트가 공식 Playwright 이미지로 넘어가므로 job 을 멈추지는 않는다
+      - run: uv run playwright install --with-deps chromium
+        continue-on-error: true
       - run: make test-e2e

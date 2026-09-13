@@ -28,6 +28,21 @@ tests/
 - Markers: `@pytest.mark.integration`, `@pytest.mark.e2e`
 - `make test` runs unit only; `make test-integration` and `make test-e2e` are separate
 - E2E runs nightly in CI (`ci-nightly.yml`), not as a PR gate
+- Shared E2E scaffolding (the compose stack and the control plane process) lives in
+  `tests/e2e/conftest.py` — importing a fixture between test modules shadows it silently
+
+### The browser tests
+
+`tests/e2e/test_ui_browser.py` drives the operator UI with a real browser, because a form
+can be miswired while the REST flow behind it stays green. It needs a browser and takes the
+first one available:
+
+1. the host's own chromium (`uv run playwright install --with-deps chromium`), or
+2. the official Playwright image, started as a browser server on the Docker host network.
+
+The second path needs no root and no host packages, so a development machine runs these
+tests without installing anything beyond the dev dependencies. The test prints which path it
+took. CI installs the browser natively and falls back to the image if that fails.
 
 ## What Must Be Covered
 

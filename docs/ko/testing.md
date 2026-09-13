@@ -28,6 +28,21 @@ tests/
 - 마커: `@pytest.mark.integration`, `@pytest.mark.e2e`
 - `make test` 는 unit 만 실행; `make test-integration` / `make test-e2e` 는 분리 실행
 - E2E 는 CI 에서 nightly (`ci-nightly.yml`) — PR gate 아님
+- 공용 E2E 스캐폴딩(compose 스택과 control plane 프로세스)은 `tests/e2e/conftest.py` 에 둔다 —
+  테스트 모듈 사이에서 픽스처를 import 하면 이름이 조용히 가려진다
+
+### 브라우저 테스트
+
+`tests/e2e/test_ui_browser.py` 는 실제 브라우저로 운영자 화면을 조작한다. 폼 하나가 잘못
+배선돼 있어도 그 뒤의 REST 흐름은 초록일 수 있기 때문이다. 브라우저가 필요하며, 먼저
+가능한 쪽을 쓴다:
+
+1. 호스트의 chromium (`uv run playwright install --with-deps chromium`), 또는
+2. 공식 Playwright 이미지를 Docker host 네트워크에서 브라우저 서버로 기동
+
+두 번째 경로는 root 도 호스트 패키지도 필요 없다 — 개발 머신에서는 dev 의존성 외에
+아무것도 설치하지 않고 돌릴 수 있다. 어느 경로를 썼는지는 테스트가 출력한다. CI 는
+브라우저를 네이티브로 깔고, 실패하면 이미지로 넘어간다.
 
 ## 필수 커버 영역
 

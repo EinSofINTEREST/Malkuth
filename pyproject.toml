@@ -37,6 +37,7 @@ dev = [
     "pytest-benchmark>=5.1.0",
     "types-pyyaml>=6.0.12",
     "testcontainers[postgres]>=4.8.0",
+    "playwright>=1.62.0",
 ]
 
 [project.scripts]

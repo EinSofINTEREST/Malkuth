@@ -51,7 +51,17 @@ def test_the_ui_talks_rest_only():
     for name in ("app.js", "client.js"):
         source = (UI_ROOT / name).read_text(encoding="utf-8").lower()
         assert "docker" not in source
-        for marker in (".yaml", "manifest.", "/workspace", "/data/", "fs.", "child_process"):
+        # 파일 경로와 노드 런타임 API 만 막는다 — API 응답의 `manifest.spec` 같은
+        # 필드 접근까지 걸면 오탐이 난다 (경로가 아니라 JSON 이다)
+        for marker in (
+            ".yaml",
+            "manifest.yaml",
+            "/workspace",
+            "/data/",
+            "fs.",
+            "child_process",
+            "require(",
+        ):
             assert marker not in source, (name, marker)
 
 

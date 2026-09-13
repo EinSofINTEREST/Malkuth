@@ -368,3 +368,77 @@ def test_cli_scoped_validation_ignores_unrelated_broken_graphs(workspace):
 
     assert author.validate(graphs=[graph("draft")], with_saved_graphs=False).ok
     assert not author.validate(graphs=[graph("draft")], with_saved_graphs=True).ok
+
+
+# --- 노드 ↔ promptset 계약이 저작에서 걸린다 (#260) ------------------------------------
+
+
+def test_a_node_missing_its_template_is_refused_at_save(author, workspace):
+    """#260 — 화면에서 만든 그래프가 run 에서 죽던 자리. 저장 전에 잡아야 한다."""
+    write(
+        workspace / "modules" / "promptsets" / "solo" / "0.1.0" / "promptset.yaml",
+        {**promptset(), "spec": {"engine": "jinja2", "templates": {"default": {"file": "t.j2"}}}},
+    )
+
+    with pytest.raises(MalkuthError) as exc_info:
+        author.save_graph("pipeline", graph("pipeline"))
+
+    assert exc_info.value.code == ErrorCode.VAL_001
+    assert not (workspace / "graphs" / "pipeline.yaml").exists()
+
+
+def test_a_node_that_does_not_supply_a_required_variable_is_refused(author, workspace):
+    write(
+        workspace / "modules" / "promptsets" / "solo" / "0.1.0" / "promptset.yaml",
+        {
+            **promptset(),
+            "spec": {
+                "engine": "jinja2",
+                "templates": {
+                    "default": {"file": "t.j2"},
+                    "step": {
+                        "file": "s.j2",
+                        "variables": {"query": {"type": "string", "required": True}},
+                    },
+                },
+            },
+        },
+    )
+
+    report = author.validate(graphs=[graph("pipeline")], with_saved_graphs=False)
+
+    assert not report.ok
+    finding = next(f for f in report.findings if f.check == "node_templates")
+    assert finding.details["missing"] == ["query"]
+
+
+def test_the_author_feeds_the_promptsets_to_the_validator(author, workspace):
+    """배선 확인 — `promptsets=` 를 빼면 이 검사는 아무 것도 보지 못한 채 통과한다."""
+    write(
+        workspace / "modules" / "promptsets" / "solo" / "0.1.0" / "promptset.yaml",
+        {**promptset(), "spec": {"engine": "jinja2", "templates": {"default": {"file": "t.j2"}}}},
+    )
+
+    report = author.validate(graphs=[graph("pipeline")], with_saved_graphs=False)
+
+    assert [f.check for f in report.findings] == ["node_templates"]
+
+
+def test_an_unloadable_promptset_is_a_finding_not_a_silent_skip(author, workspace):
+    """읽지 못한 promptset 을 건너뛰면 그 에이전트의 노드 검사가 조용히 꺼진다."""
+    write(
+        workspace / "modules" / "promptsets" / "solo" / "0.1.0" / "promptset.yaml",
+        {
+            "apiVersion": "malkuth/v1",
+            "kind": "Promptset",
+            "metadata": {"name": "solo", "version": "0.1.0"},
+            "spec": {"engine": "jinja2"},  # templates 누락 — 스키마 위반
+        },
+    )
+
+    report = author.validate(graphs=[graph("pipeline")], with_saved_graphs=False)
+
+    assert not report.ok
+    assert any(
+        f.check == "node_templates" and "could not be loaded" in f.message for f in report.findings
+    ), [f.message for f in report.findings]

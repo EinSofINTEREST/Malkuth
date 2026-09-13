@@ -1,5 +1,6 @@
 // 페이지 글루 — DOM 만 다룬다. REST 는 client.js 가, 선언 문서의 모양도 client.js 가 안다.
-import { ApiError, bumpPatch, createClient, emptyAgent, emptyGraph, moduleRef, pruneEmpty } from "./client.js";
+import { ApiError, bumpPatch, createClient, emptyAgent, emptyGraph, formatPairs, moduleRef,
+  parsePairs, pruneEmpty, suggestInputMap } from "./client.js";
 
 const $ = (selector) => document.querySelector(selector);
 const el = (tag, props = {}, children = []) => {
@@ -111,7 +112,12 @@ function syncServiceFields(isService) {
 graphForm.mode.addEventListener("change", () => syncServiceFields(graphForm.mode.value === "service"));
 
 const rowFactories = {
-  node: () => [el("input", { name: "node_id", placeholder: "planner" }), el("select", { name: "node_agent" })],
+  node: () => [
+    el("input", { name: "node_id", placeholder: "planner" }),
+    el("select", { name: "node_agent" }),
+    el("input", { name: "node_input", placeholder: "query=state.query" }),
+    el("input", { name: "node_output", placeholder: "plan=output.plan" }),
+  ],
   edge: () => [el("input", { name: "edge_from", placeholder: "START" }), el("input", { name: "edge_to", placeholder: "END" }),
     el("input", { name: "edge_condition", placeholder: "malkuth.graphs.conditions:needs_research" }), el("input", { name: "edge_max", type: "number", min: 1 })],
   connection: () => [el("input", { name: "conn_caller" }), el("input", { name: "conn_callee" })],
@@ -127,9 +133,57 @@ function addRow(kind, values = []) {
     if (values[i] !== undefined && values[i] !== null) cell.value = values[i];
   });
   const remove = el("button", { type: "button", textContent: "✕", onclick: (e) => e.target.closest("tr").remove() });
-  $(`${tables[kind]} tbody`).append(el("tr", {}, [...cells.map((c) => el("td", {}, [c])), el("td", {}, [remove])]));
+  const row = el("tr", {}, [...cells.map((c) => el("td", {}, [c])), el("td", {}, [remove])]);
+  if (kind === "node") {
+    for (const cell of cells.slice(0, 2)) {
+      cell.addEventListener("change", () => suggestNodeInput(row));
+    }
+  }
+  $(`${tables[kind]} tbody`).append(row);
 }
 for (const button of document.querySelectorAll("[data-add]")) button.addEventListener("click", () => addRow(button.dataset.add));
+
+// 노드가 물린 에이전트의 promptset 에서, 그 노드 id 템플릿의 필수 변수를 찾는다.
+// 검증(#260)이 요구하는 값이므로 편집기가 먼저 알려 준다 — 규칙을 외우게 하지 않는다.
+const promptsetCache = new Map();
+
+async function requiredVariables(agentRef, nodeId) {
+  const agentName = agentRef.split("/")[1]?.split("@")[0];
+  if (!agentName || !nodeId) return [];
+  try {
+    const manifest = await api.agent(agentName);
+    const ref = manifest.spec?.promptset?.ref;
+    if (!ref) return [];
+    if (!promptsetCache.has(ref)) {
+      const [, rest] = ref.split("/");
+      const [name, version] = rest.split("@");
+      promptsetCache.set(ref, await api.module("promptsets", name, version));
+    }
+    const template = promptsetCache.get(ref)?.spec?.templates?.[nodeId];
+    return Object.entries(template?.variables || {})
+      .filter(([, spec]) => spec?.required)
+      .map(([name]) => name);
+  } catch {
+    return []; // 못 알아내면 조용히 비워 둔다 — 검증이 잡는다
+  }
+}
+
+async function suggestNodeInput(row) {
+  const cell = row.querySelector("[name=node_input]");
+  const idCell = row.querySelector("[name=node_id]");
+  const agentCell = row.querySelector("[name=node_agent]");
+  if (cell.value.trim()) return; // 사람이 적은 것을 덮지 않는다
+  const id = idCell.value.trim();
+  const agentRef = agentCell.value;
+  const required = await requiredVariables(agentRef, id);
+  // 조회하는 동안 사람이 타이핑했거나 행이 바뀌었을 수 있다 — 늦게 온 응답이
+  // 그것을 덮으면 쓰던 값이 사라지거나 옛 노드의 변수가 채워진다
+  if (!required.length) return;
+  if (cell.value.trim() || idCell.value.trim() !== id || agentCell.value !== agentRef) return;
+  if (!row.isConnected) return;
+  cell.value = formatPairs(suggestInputMap(required));
+  status(`${id}: 템플릿이 요구하는 ${required.join(", ")} 를 채웠습니다`);
+}
 
 function rows(kind) {
   return [...document.querySelectorAll(`${tables[kind]} tbody tr`)].map((tr) => [...tr.querySelectorAll("input, select")].map((i) => i.value.trim()));
@@ -143,7 +197,14 @@ function graphDocument() {
   doc.spec.mode = f.mode.value;
   doc.spec.goal = f.goal.value.trim();
   doc.spec.state = { schema: f.state_schema.value.trim() };
-  doc.spec.nodes = rows("node").map(([id, agent]) => ({ id, agent }));
+  doc.spec.nodes = rows("node").map(([id, agent, input, output]) => {
+    const node = pruneEmpty({ id, agent });
+    const inputMap = parsePairs(input);
+    const outputMap = parsePairs(output);
+    if (Object.keys(inputMap).length) node.input_map = inputMap;
+    if (Object.keys(outputMap).length) node.output_map = outputMap;
+    return node;
+  });
   doc.spec.edges = rows("edge").map(([from, to, condition, max]) => pruneEmpty({ from, to, condition, max_iterations: max ? Number(max) : "" }));
   doc.spec.connections = rows("connection").map(([caller, callee]) => ({ caller, callee }));
   if (f.mode.value === "service") {
@@ -159,7 +220,8 @@ function showGraph(doc) {
   syncServiceFields(doc.spec.mode === "service");
   if (doc.spec.service) { f.idle_min.value = doc.spec.service.idle.min_delay_s; f.idle_max.value = doc.spec.service.idle.max_delay_s; f.failure_streak.value = doc.spec.service.max_failure_streak ?? 5; }
   for (const kind of Object.keys(tables)) $(`${tables[kind]} tbody`).replaceChildren();
-  (doc.spec.nodes || []).forEach((n) => addRow("node", [n.id, n.agent]));
+  (doc.spec.nodes || []).forEach((n) =>
+    addRow("node", [n.id, n.agent, formatPairs(n.input_map), formatPairs(n.output_map)]));
   (doc.spec.edges || []).forEach((e) => addRow("edge", [e.from, e.to, e.condition || "", e.max_iterations || ""]));
   (doc.spec.connections || []).forEach((c) => addRow("connection", [c.caller, c.callee]));
 }

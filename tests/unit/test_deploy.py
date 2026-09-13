@@ -11,8 +11,9 @@ from pathlib import Path
 
 import pytest
 
-from malkuth.core.errors import MalkuthError
+from malkuth.core.errors import ErrorCode, MalkuthError
 from malkuth.deploy import validate_deployment
+from malkuth.modules.promptset import PromptsetManifest
 from malkuth.orchestrator.topology import GraphTopology
 from tests.fixtures.builders import make_manifest
 from tests.fixtures.topologies import mission_dict
@@ -551,3 +552,95 @@ def test_deploy_validation_agrees_with_runtime_resolution():
 def test_reference_guard_lists_every_file_the_test_reads():
     """가드가 일부만 확인하면 나머지 부재 시 skip 대신 FileNotFoundError 로 실패한다."""
     assert len(REFERENCE_FILES) == 7
+
+
+# --- 9. 노드 ↔ promptset 계약 (#260) ------------------------------------------------
+
+
+def make_promptset(templates: dict) -> PromptsetManifest:
+    return PromptsetManifest.model_validate(
+        {
+            "apiVersion": "malkuth/v1",
+            "kind": "Promptset",
+            "metadata": {"name": "test", "version": "0.1.0"},
+            "spec": {"engine": "jinja2", "templates": templates},
+        }
+    )
+
+
+def node_report(templates: dict, *, input_map: dict | None = None):
+    """노드 하나짜리 그래프를 그 promptset 계약으로 검증한다."""
+    topology = GraphTopology.model_validate(
+        mission_dict(
+            nodes=[{"id": "solo", "agent": "agents/solo@0.1.0", "input_map": input_map or {}}],
+            edges=[{"from": "START", "to": "solo"}, {"from": "solo", "to": "END"}],
+        )
+    )
+    return validate_deployment(
+        [topology],
+        manifests={"solo": make_manifest(name="solo")},
+        resolvable_refs=REFS,
+        promptsets={"promptsets/test@0.1.0": make_promptset(templates)},
+    )
+
+
+def test_a_node_without_a_matching_template_is_reported():
+    """agentd 는 node_id 로 템플릿을 고른다 — 없으면 run 이 시작된 뒤 죽는다."""
+    report = node_report({"default": {"file": "d.j2"}})
+
+    assert not report.ok
+    finding = next(f for f in report.findings if f.check == "node_templates")
+    assert "solo" in finding.message
+
+
+def test_a_node_that_does_not_supply_a_required_variable_is_reported():
+    """#260 — 화면에서 만든 그래프가 여기서 걸린다. run 까지 가면 MOD_004 다."""
+    report = node_report(
+        {"solo": {"file": "s.j2", "variables": {"query": {"type": "string", "required": True}}}}
+    )
+
+    assert not report.ok
+    finding = next(f for f in report.findings if f.check == "node_templates")
+    assert finding.code == ErrorCode.MOD_004
+    assert finding.details["missing"] == ["query"]
+
+
+def test_supplying_the_variable_through_the_input_map_passes():
+    report = node_report(
+        {"solo": {"file": "s.j2", "variables": {"query": {"type": "string", "required": True}}}},
+        input_map={"query": "state.query"},
+    )
+
+    assert report.ok, [f.message for f in report.findings]
+
+
+def test_an_optional_variable_is_not_required():
+    """기본값이 있는 변수까지 요구하면 정상 그래프가 막힌다 — 과잉 거절 방지."""
+    report = node_report(
+        {"solo": {"file": "s.j2", "variables": {"depth": {"type": "integer", "default": 2}}}}
+    )
+
+    assert report.ok, [f.message for f in report.findings]
+
+
+def test_a_missing_default_template_does_not_fail_a_graph():
+    """`default` 는 direct 요청의 계약이다 — 그래프 배선 검증이 그것으로 막지 않는다."""
+    report = node_report({"solo": {"file": "s.j2"}})
+
+    assert report.ok, [f.message for f in report.findings]
+
+
+def test_the_check_is_silent_without_promptsets():
+    """promptset 을 못 받으면 이 검사는 아무 것도 보지 못한다 — Author 가 채운다."""
+    topology = GraphTopology.model_validate(
+        mission_dict(
+            nodes=[{"id": "solo", "agent": "agents/solo@0.1.0"}],
+            edges=[{"from": "START", "to": "solo"}, {"from": "solo", "to": "END"}],
+        )
+    )
+
+    report = validate_deployment(
+        [topology], manifests={"solo": make_manifest(name="solo")}, resolvable_refs=REFS
+    )
+
+    assert report.ok

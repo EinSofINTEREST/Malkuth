@@ -38,7 +38,12 @@ def workspace(tmp_path: Path) -> Path:
                 "apiVersion": "malkuth/v1",
                 "kind": "Promptset",
                 "metadata": {"name": "solo", "version": "0.1.0"},
-                "spec": {"engine": "jinja2", "templates": {"default": {"file": "t.j2"}}},
+                # 노드 id 와 같은 이름의 템플릿이 있어야 agentd 가 고를 수 있다
+                # (04 호환성 규칙 3) — `default` 만 두면 run 에서 MOD_004 로 죽는다
+                "spec": {
+                    "engine": "jinja2",
+                    "templates": {"default": {"file": "t.j2"}, "solo": {"file": "t.j2"}},
+                },
             }
         ),
         encoding="utf-8",

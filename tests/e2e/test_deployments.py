@@ -237,7 +237,14 @@ def test_deploy_reattach_and_teardown(plane):
             "mode": "mission",
             "goal": "ui e2e",
             "state": {"schema": "malkuth.graphs.schemas:ResearchState"},
-            "nodes": [{"id": "planner", "agent": "agents/planner@0.4.0"}],
+            "nodes": [
+                {
+                    "id": "planner",
+                    "agent": "agents/planner@0.4.0",
+                    # 템플릿의 필수 변수는 노드가 공급한다 — 없으면 검증이 거절한다 (#260)
+                    "input_map": {"query": "state.query"},
+                }
+            ],
             "edges": [{"from": "START", "to": "planner"}, {"from": "planner", "to": "END"}],
             "connections": [],
         },
@@ -313,3 +320,79 @@ def test_deploy_reattach_and_teardown(plane):
     until(lambda: not deployed_containers(), what="containers removed", timeout_s=60)
     status, listed = api("GET", "/v1/deployments")
     assert [d["status"] for d in listed["items"]] == ["stopped"]
+
+
+def test_a_graph_made_in_the_ui_can_be_deployed_run_and_destroyed(plane):
+    """#239 완료 조건 — 화면에서 만든 그래프가 컨테이너까지 가서 돌고, 흔적 없이 사라진다.
+
+    다른 테스트는 저장소에 이미 있는 레퍼런스 그래프를 배포한다. 여기서는 **화면이
+    만드는 문서**로 시작한다 — 그 문서가 배포되고 완주하는지가 메인 이슈가 묻는 것이다.
+    편집기가 `input_map` 을 만들지 못하던 동안에는 이 흐름이 run 에서 `MOD_004` 로
+    죽었다 (#260).
+    """
+    made = {
+        "apiVersion": "malkuth/v1",
+        "kind": "Graph",
+        "metadata": {"name": "ui-made", "version": "0.1.0", "description": "made in the ui"},
+        "spec": {
+            "mode": "mission",
+            "goal": "made in the ui",
+            "state": {"schema": "malkuth.graphs.schemas:ResearchState"},
+            "nodes": [
+                {
+                    "id": "planner",
+                    "agent": "agents/planner@0.4.0",
+                    # 편집기의 노드 행이 만드는 매핑 — 없으면 템플릿의 필수 변수가 빈다
+                    "input_map": {"query": "state.query"},
+                    "output_map": {"plan": "output.plan"},
+                }
+            ],
+            "edges": [{"from": "START", "to": "planner"}, {"from": "planner", "to": "END"}],
+        },
+    }
+
+    # --- 매핑이 없으면 저장 전에 걸린다 (run 까지 가지 않는다)
+    bare = json.loads(json.dumps(made))
+    del bare["spec"]["nodes"][0]["input_map"]
+    status, verdict = api("POST", "/v1/validate", {"graphs": [bare]})
+    assert status == 200 and not verdict["ok"], verdict
+    assert [f["check"] for f in verdict["findings"]] == ["node_templates"], verdict
+
+    status, verdict = api("POST", "/v1/validate", {"graphs": [made]})
+    assert status == 200 and verdict["ok"], verdict
+
+    deployment_id = None
+    try:
+        status, saved = api("PUT", "/v1/graphs/ui-made", made)
+        assert status == 200, saved
+
+        # --- 만든 그래프를 그대로 배포한다
+        status, deployment = api("POST", "/v1/deployments", {"graph": "ui-made"})
+        assert status == 201, deployment
+        deployment_id = deployment["deployment_id"]
+        assert deployment["status"] == "ready", deployment
+        assert [a["name"] for a in deployment["agents"]] == ["planner"]
+        assert sorted(deployed_containers()) == ["malkuth-planner-0"]
+
+        # --- 그 배포에 run 을 낸다
+        status, submitted = api(
+            "POST", "/v1/runs", {"deployment_id": deployment_id, "input": {"query": "why"}}
+        )
+        assert status == 202, submitted
+
+        def finished() -> dict | None:
+            _, current = api("GET", f"/v1/runs/{submitted['run_id']}")
+            return current if current["status"] != "running" else None
+
+        done = until(finished, what="the run made in the ui to finish")
+        assert done["status"] == "completed", done
+        assert done["state"].get("plan"), done
+    finally:
+        if deployment_id is not None:
+            api("DELETE", f"/v1/deployments/{deployment_id}")
+        api("DELETE", "/v1/graphs/ui-made")
+
+    # --- 해체하면 컨테이너도 선언도 남지 않는다
+    until(lambda: not deployed_containers(), what="containers removed", timeout_s=60)
+    status, listed = api("GET", "/v1/graphs")
+    assert "ui-made" not in [g["name"] for g in listed["items"]]

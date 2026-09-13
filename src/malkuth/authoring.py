@@ -25,6 +25,7 @@ from malkuth.catalog import MODULE_TYPES, Catalog, not_found
 from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
 from malkuth.core.manifest import AgentManifest
 from malkuth.deploy import Finding, ValidationReport, validate_deployment
+from malkuth.materials import Materials, MaterialStore, check_files
 from malkuth.modules.promptset import PromptsetManifest
 from malkuth.orchestrator.topology import GraphTopology
 
@@ -86,11 +87,14 @@ class Author:
         a2a_port_range: The runtime's allocatable range, for the port check.
         in_use: Whether a declaration is currently deployed (#243). 배포 중인
             것을 지우거나 덮어쓰면 실행 중 run 의 계약이 발밑에서 바뀐다.
+        materials: Where build materials live (#264). 없으면 재료 표면을 열지 않는다 —
+            선언만 다루는 조립에서는 커스텀 이미지를 굽지 않기 때문이다.
     """
 
     catalog: Catalog
     a2a_port_range: tuple[int, int] | None = None
     in_use: InUse | None = None
+    materials: MaterialStore | None = None
 
     # --- 검증 ----------------------------------------------------------------
 
@@ -373,6 +377,77 @@ class Author:
     def _require_bump(kind: str, name: str, existing: str, proposed: str) -> None:
         if _version_tuple(proposed) <= _version_tuple(existing):
             raise _version_conflict(kind, name, existing=existing, proposed=proposed)
+
+    # --- 빌드 재료 (#264) ------------------------------------------------------
+
+    def _store(self) -> MaterialStore:
+        if self.materials is None:
+            raise MalkuthError(
+                category=ErrorCategory.CONFIG,
+                code=ErrorCode.CFG_001,
+                message="this control plane has no material store configured",
+            )
+        return self.materials
+
+    def read_materials(self, name: str) -> Materials:
+        """Read the materials declared for an agent's **current** version.
+
+        저장된 매니페스트의 버전을 키로 읽는다 — 재료는 선언과 한 몸이라 버전이 다르면
+        다른 재료다. 없으면 빈 집합을 돌려준다: "아직 넣지 않았다" 는 오류가 아니다.
+        """
+        manifest = self.catalog.agent(name)
+        version = manifest.metadata.version
+        found = self._store().get(name, version)
+        return found or Materials(agent=name, version=version, files={})
+
+    def save_materials(self, name: str, files: Mapping[str, str]) -> Materials:
+        """Validate and store one agent version's build materials.
+
+        선언과 같은 두 규칙을 따른다: **버전이 같으면 내용도 같아야** 하고 (04 Registry 2
+        Immutability), 배포 중인 에이전트의 재료는 바꾸지 못한다. 재료가 바뀌면 그 버전으로
+        구운 이미지와 어긋나므로, 무엇이 도는지 알 수 없게 된다.
+
+        Raises:
+            MalkuthError: VALIDATION/``VAL_002`` 경로·크기 규칙 위반,
+                MODULE/``MOD_002`` 같은 버전에 다른 내용,
+                NOT_FOUND/``NF_001`` 선언되지 않은 에이전트.
+        """
+        manifest = self.catalog.agent(name)
+        version = manifest.metadata.version
+        checked = check_files(files)
+        existing = self._store().get(name, version)
+        if existing is not None:
+            if dict(existing.files) == checked:
+                # 바뀌는 것이 없는 저장은 배포 중이어도 막을 이유가 없다 — 같은 PUT 을
+                # 다시 보내는 것이 거절되면 재시도가 실패로 보인다
+                return existing
+            raise _version_conflict("agent materials", name, existing=version, proposed=version)
+        self._refuse_if_in_use("agent", name)
+        self._store().put(Materials(agent=name, version=version, files=checked))
+        stored = self._store().get(name, version)
+        assert stored is not None  # noqa: S101 — 방금 적재했다
+        # 적재 시점이 찍힌 **저장된** 기록을 돌려준다. 넣은 것을 그대로 돌려주면 같은 쓰기가
+        # PUT 응답과 이후 GET 에서 다르게 보인다
+        return stored
+
+    def delete_materials(self, name: str) -> bool:
+        """Clear the materials for an agent's current version — the declaration stays.
+
+        **행을 지우지 않고 빈 집합으로 덮는다.** 지워 버리면 불변성 검사의 유일한 근거가
+        사라져서, 삭제한 뒤 같은 버전에 다른 내용을 넣을 수 있다 — 그 버전으로 구운 이미지가
+        무엇으로 만들어졌는지 알 수 없게 된다. 내용을 바꾸려면 여전히 버전을 올려야 한다.
+
+        Returns:
+            Whether anything was there to clear.
+        """
+        manifest = self.catalog.agent(name)
+        version = manifest.metadata.version
+        existing = self._store().get(name, version)
+        if existing is None or not existing.files:
+            return False
+        self._refuse_if_in_use("agent", name)
+        self._store().put(Materials(agent=name, version=version, files={}))
+        return True
 
     def _refuse_if_in_use(self, kind: str, name: str) -> None:
         if self.in_use is not None and self.in_use(kind, name):

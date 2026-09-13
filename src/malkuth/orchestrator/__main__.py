@@ -38,6 +38,7 @@ from malkuth.orchestrator.runstore import SqliteRunStore
 if TYPE_CHECKING:
     from malkuth.authoring import InUse
     from malkuth.catalog import Catalog
+    from malkuth.materials import MaterialStore
     from malkuth.orchestrator.runs import RunService
     from malkuth.runtime.deployments import DeploymentManager
 
@@ -109,6 +110,7 @@ def main() -> None:
         catalog=catalog,
         a2a_port_range=config.protocols.a2a.port_range,
         in_use=any_of(*pins),
+        materials=_material_store(orchestrator),
     )
     if deployments is not None:
         # manager 는 검증에 author 를 쓴다 — 서로를 가리키므로 여기서 잇는다
@@ -199,6 +201,16 @@ def _run_service(
         metrics=Metrics(),
     )
     return RunService(catalog=catalog, deployments=deployments, submitter=submitter, store=store)
+
+
+def _material_store(orchestrator: Any) -> MaterialStore | None:
+    """빌드 재료 저장소 — 설정이 없으면 재료 표면을 열지 않는다 (#264)."""
+    if orchestrator.material_store is None:
+        log.warning("build materials disabled — orchestrator.material_store is not set")
+        return None
+    from malkuth.materials import SqliteMaterialStore
+
+    return SqliteMaterialStore(path=orchestrator.material_store)
 
 
 def is_loopback(host: str) -> bool:

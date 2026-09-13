@@ -158,6 +158,39 @@ def test_a_submitted_run_is_actually_recorded(tmp_path):
 
 
 @pytest.mark.parametrize("value", ["", ":memory:", " :memory: ", "file::memory:?cache=shared"])
+@pytest.mark.parametrize("setting", ["deployment_store", "material_store"])
+def test_a_private_store_is_rejected_for_every_store_setting(tmp_path, setting, value):
+    """run_store 와 같은 이유 — 연결마다 다른 private DB 는 미설정보다 나쁘다.
+
+    배포 기록과 빌드 재료는 **프로세스를 넘겨** 읽혀야 한다: 재부착(#243)도, 저작과 빌드가
+    다른 시점에 일어나는 것(#264/#265)도 그 전제 위에 있다.
+    """
+    from malkuth.config import load_config
+
+    write_config(tmp_path, {"run_store": str(tmp_path / "runs.db"), setting: value})
+
+    with pytest.raises(MalkuthError) as excinfo:
+        load_config("local", config_dir=str(tmp_path))
+
+    assert excinfo.value.code == ErrorCode.CFG_001
+    assert setting in str(excinfo.value.details)
+
+
+@pytest.mark.parametrize("setting", ["deployment_store", "material_store"])
+def test_a_file_path_is_accepted_for_every_store_setting(tmp_path, setting):
+    """과잉 거절 방지 — 정상 경로는 통과해야 한다."""
+    from malkuth.config import load_config
+
+    write_config(
+        tmp_path, {"run_store": str(tmp_path / "runs.db"), setting: str(tmp_path / "x.db")}
+    )
+
+    config = load_config("local", config_dir=str(tmp_path))
+
+    assert getattr(config.orchestrator, setting) == str(tmp_path / "x.db")
+
+
+@pytest.mark.parametrize("value", ["", ":memory:", " :memory: ", "file::memory:?cache=shared"])
 def test_a_private_run_store_is_rejected(tmp_path, value):
     """공유되지 않는 저장소는 미설정보다 나쁘다 — 설정한 줄 알았는데 아무도 같은 것을 안 본다.
 

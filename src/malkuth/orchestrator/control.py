@@ -25,6 +25,7 @@ from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
 from malkuth.core.manifest import AgentManifest
 from malkuth.http_auth import require_token
 from malkuth.http_errors import status_for
+from malkuth.materials import Materials
 from malkuth.orchestrator.topology import GraphTopology
 from malkuth.ui import UI_ROOT
 
@@ -375,6 +376,26 @@ class Declarations(BaseModel):
     agents: dict[str, Any] = {}
 
 
+class MaterialUpload(BaseModel):
+    """`/v1/agents/{name}/materials` 본문 — 컨텍스트 상대 경로 → 내용."""
+
+    files: dict[str, str] = Field(default_factory=dict)
+
+
+def _materials_view(materials: Materials) -> dict[str, Any]:
+    """재료를 응답 표현으로 — 내용까지 싣는다 (화면이 편집한다).
+
+    경로만 돌려주면 편집기가 파일마다 다시 물어야 한다. 재료는 소스이고 상한이 걸려 있어
+    (`MAX_FILE_BYTES`) 한 번에 실어도 된다.
+    """
+    return {
+        "agent": materials.agent,
+        "version": materials.version,
+        "files": dict(materials.files),
+        "updated_at": materials.updated_at,
+    }
+
+
 class Draft(BaseModel):
     """`/v1/validate` 본문 — 저장하지 않을 초안들.
 
@@ -425,6 +446,19 @@ def _mount_authoring(api: APIRouter, author: Author) -> None:
     async def put_agent(name: str, body: Annotated[Any, Body()]) -> dict[str, Any]:
         path = author.save_agent(name, _parsed(body, AgentManifest))
         return {"name": name, "path": str(path)}
+
+    @api.get("/v1/agents/{name}/materials")
+    async def get_materials(name: str) -> dict[str, Any]:
+        return _materials_view(author.read_materials(name))
+
+    @api.put("/v1/agents/{name}/materials")
+    async def put_materials(name: str, body: Annotated[Any, Body()]) -> dict[str, Any]:
+        request = _parsed(body, MaterialUpload)
+        return _materials_view(author.save_materials(name, request.files))
+
+    @api.delete("/v1/agents/{name}/materials", status_code=status.HTTP_204_NO_CONTENT)
+    async def delete_materials(name: str) -> None:
+        author.delete_materials(name)
 
     @api.delete("/v1/agents/{name}", status_code=status.HTTP_204_NO_CONTENT)
     async def delete_agent(name: str) -> None:

@@ -41,6 +41,7 @@ if TYPE_CHECKING:
     from malkuth.materials import MaterialStore
     from malkuth.orchestrator.runs import RunService
     from malkuth.runtime.deployments import DeploymentManager
+    from malkuth.runtime.images import ImageBuilder
 
 log = structlog.get_logger(__name__)
 
@@ -116,6 +117,7 @@ def main() -> None:
         # manager 는 검증에 author 를 쓴다 — 서로를 가리키므로 여기서 잇는다
         deployments.author = author
     runs = None if deployments is None else _run_service(config, catalog, deployments, store=store)
+    builder = _image_builder(orchestrator, catalog, author)
     log.info(
         "control plane starting",
         port=orchestrator.control_port,
@@ -128,6 +130,7 @@ def main() -> None:
             catalog=catalog,
             token=orchestrator.control_token,
             author=author,
+            builder=builder,
             deployments=deployments,
             runs=runs,
         ),
@@ -201,6 +204,28 @@ def _run_service(
         metrics=Metrics(),
     )
     return RunService(catalog=catalog, deployments=deployments, submitter=submitter, store=store)
+
+
+def _image_builder(orchestrator: Any, catalog: Catalog, author: Author) -> ImageBuilder | None:
+    """`Declared → Built` 를 당기는 단계 (#265) — 재료와 결과 저장소가 모두 있어야 연다.
+
+    Docker 는 배포와 같은 데몬을 쓴다. 빌드는 컨테이너를 띄우지 않으므로 배포 표면과는
+    독립이다 — 배포를 열지 않아도 구울 수 있다.
+    """
+    if author.materials is None or orchestrator.build_store is None:
+        log.warning(
+            "image builds disabled — material_store and build_store must both be set",
+        )
+        return None
+    from malkuth.runtime.docker.client import SdkDockerClient
+    from malkuth.runtime.images import ImageBuilder, SqliteBuildStore
+
+    return ImageBuilder(
+        catalog=catalog,
+        materials=author.materials,
+        builds=SqliteBuildStore(path=orchestrator.build_store),
+        client=SdkDockerClient(),
+    )
 
 
 def _material_store(orchestrator: Any) -> MaterialStore | None:

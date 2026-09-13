@@ -16,6 +16,8 @@ import structlog
 
 from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
 from malkuth.core.manifest import RESERVED_GLOBAL_GROUP
+from malkuth.modules.compatibility import check_promptset_templates
+from malkuth.modules.promptset import LoadedPromptset
 from malkuth.orchestrator.topology import GraphMode, validate_topology
 from malkuth.runtime.quota import check_group_quota, check_host_capacity
 
@@ -23,9 +25,20 @@ if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping, Sequence
 
     from malkuth.core.manifest import AgentManifest, GroupManifest
-    from malkuth.orchestrator.topology import GraphTopology
+    from malkuth.modules.promptset import PromptsetManifest
+    from malkuth.orchestrator.topology import GraphTopology, NodeSpec
 
 log = structlog.get_logger(__name__)
+
+
+def _nodes_by_agent(topology: GraphTopology) -> dict[str, list[NodeSpec]]:
+    """에이전트 이름 → 그 에이전트가 맡은 노드들. 한 에이전트가 여러 노드를 맡을 수 있다."""
+    grouped: dict[str, list[NodeSpec]] = {}
+    for node in topology.spec.nodes:
+        if node.agent is None:
+            continue
+        grouped.setdefault(_agent_ref_parts(node.agent)[0], []).append(node)
+    return grouped
 
 
 @dataclass(frozen=True)
@@ -121,6 +134,12 @@ class DeployValidator:
     manifests: Mapping[str, AgentManifest]
     groups: Mapping[str, GroupManifest] = field(default_factory=dict)
     resolvable_refs: frozenset[str] = frozenset()
+    promptsets: Mapping[str, PromptsetManifest] = field(default_factory=dict)
+    """promptset ref → 선언. 노드 id 에 대응하는 템플릿과 그 필수 변수를 보는 데 쓴다.
+
+    비어 있으면 그 검사는 아무 것도 보지 못한다 — 호출자가 반드시 채워야 하며,
+    `Author.validate` 가 그 자리다 (#260).
+    """
     local_secrets: Mapping[str, frozenset[str]] = field(default_factory=dict)
     global_secrets: frozenset[str] = frozenset()
     host_cpu_cores: float | None = None
@@ -144,6 +163,7 @@ class DeployValidator:
             findings.extend(self._check_agent_refs(topology))
             findings.extend(self._check_connections(topology))
             findings.extend(self._check_mode_rules(topology))
+            findings.extend(self._check_node_templates(topology))
 
         findings.extend(self._check_module_refs())
         findings.extend(self._check_groups())
@@ -204,6 +224,91 @@ class DeployValidator:
                             "node_id": node.id,
                             "module_ref": node.agent,
                             "declared_version": declared,
+                        },
+                    )
+                )
+        return findings
+
+    def _check_node_templates(self, topology: GraphTopology) -> list[Finding]:
+        """노드가 promptset 계약을 만족하는지 — 04 호환성 규칙 3 과 입력 계약.
+
+        agentd 는 `task.node_id` 로 템플릿을 고르고 (없으면 `MOD_004`), 그 템플릿의
+        필수 변수는 노드의 `input_map` 이 공급한다. 둘 중 하나라도 어긋나면
+        **컨테이너를 다 띄운 뒤 run 에서** 죽는다 — 그것을 여기로 앞당긴다 (#260).
+        """
+        findings = []
+        for agent_name, nodes in _nodes_by_agent(topology).items():
+            manifest = self.manifests.get(agent_name)
+            if manifest is None:
+                continue  # agent_refs 가 이미 보고했다 — 같은 문제를 두 번 세지 않는다
+            ref = manifest.spec.promptset.ref
+            promptset = self.promptsets.get(ref)
+            if promptset is None:
+                continue  # module_refs 가 해석 실패를, Author 가 로드 실패를 보고한다
+            try:
+                # 규칙 3 의 판정은 이 헬퍼가 이미 구현한다 — 두 벌 두면 갈라진다.
+                # `root` 는 이 규칙이 읽지 않으므로 선언만으로 감싼다. `accepts_direct`
+                # 는 끈다: `default` 템플릿은 direct 요청의 계약이고, 그래프 run 을
+                # 죽이는 것은 node_id 템플릿 쪽이다 (규칙 4 는 별개 문제)
+                check_promptset_templates(
+                    manifest,
+                    LoadedPromptset(ref=ref, manifest=promptset, root=None),
+                    [node.id for node in nodes],
+                    accepts_direct=False,
+                )
+            except MalkuthError as err:
+                findings.append(
+                    Finding(
+                        check="node_templates",
+                        # 헬퍼는 이 부류를 MOD_002 로 낸다 — 코드는 그대로 옮긴다
+                        code=ErrorCode(err.code),
+                        message=err.message,
+                        details={
+                            "graph": topology.metadata.name,
+                            "agent": agent_name,
+                            **err.details,
+                        },
+                    )
+                )
+            # 템플릿이 있는 노드는 변수까지 본다 — 이름 문제 하나로 입력 문제가
+            # 가려지면 고치고 다시 돌릴 때마다 새 문제가 하나씩 나온다
+            findings.extend(self._check_node_inputs(topology, agent_name, ref, promptset, nodes))
+        return findings
+
+    def _check_node_inputs(
+        self,
+        topology: GraphTopology,
+        agent_name: str,
+        ref: str,
+        promptset: PromptsetManifest,
+        nodes: Sequence[NodeSpec],
+    ) -> list[Finding]:
+        """노드의 `input_map` 이 템플릿의 필수 변수를 공급하는지."""
+        findings = []
+        for node in nodes:
+            template = promptset.spec.templates.get(node.id)
+            if template is None:
+                continue  # 위에서 보고했다
+            missing = sorted(
+                variable
+                for variable, spec in template.variables.items()
+                if spec.required and variable not in node.input_map
+            )
+            if missing:
+                findings.append(
+                    Finding(
+                        check="node_templates",
+                        code=ErrorCode.MOD_004,
+                        message=(
+                            f"node {node.id!r} does not supply required template "
+                            f"variables: {', '.join(missing)}"
+                        ),
+                        details={
+                            "graph": topology.metadata.name,
+                            "node_id": node.id,
+                            "agent": agent_name,
+                            "promptset": ref,
+                            "missing": missing,
                         },
                     )
                 )
@@ -429,6 +534,7 @@ def validate_deployment(
     manifests: Mapping[str, AgentManifest],
     groups: Mapping[str, GroupManifest] | None = None,
     resolvable_refs: Iterable[str] = (),
+    promptsets: Mapping[str, PromptsetManifest] | None = None,
     local_secrets: Mapping[str, frozenset[str]] | None = None,
     global_secrets: Iterable[str] = (),
     host_cpu_cores: float | None = None,
@@ -444,6 +550,7 @@ def validate_deployment(
         manifests: Agent name to manifest.
         groups: Group name to manifest.
         resolvable_refs: Module refs the registry resolves.
+        promptsets: Promptset ref to its declaration — 노드 id 템플릿 검사 입력.
         local_secrets: Agent name to its locally available secret keys.
         global_secrets: Globally available secret keys.
         host_cpu_cores: Host CPU ceiling.
@@ -457,6 +564,7 @@ def validate_deployment(
         manifests=manifests,
         groups=dict(groups or {}),
         resolvable_refs=frozenset(resolvable_refs),
+        promptsets=dict(promptsets or {}),
         local_secrets=dict(local_secrets or {}),
         global_secrets=frozenset(global_secrets),
         host_cpu_cores=host_cpu_cores,

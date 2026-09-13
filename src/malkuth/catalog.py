@@ -20,6 +20,7 @@ from pydantic import BaseModel, ValidationError
 
 from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
 from malkuth.core.manifest import AgentManifest, GroupManifest
+from malkuth.modules.promptset import PromptsetManifest
 from malkuth.modules.registry import ModuleRegistry, RegistryRoots
 from malkuth.orchestrator.topology import GraphTopology
 
@@ -281,6 +282,30 @@ class Catalog:
             items={name: tuple(versions) for name, versions in found.items()},
             problems=tuple(problems),
         )
+
+    def promptset(self, ref: str) -> PromptsetManifest:
+        """Parse a promptset declaration by reference.
+
+        promptset 선언을 ref 로 읽어 파싱한다 — 배포 검증이 노드 id 에 대응하는
+        템플릿과 그 필수 변수를 보려면 선언이 필요하다 (#260).
+
+        **선언만 읽는다** — 템플릿 파일의 실재는 `PromptsetLoader` 의 몫이고, 그것은
+        렌더 시점의 관심사다. 여기서 파일까지 요구하면 그래프 배선과 무관한 이유로
+        저장이 막힌다.
+
+        Raises:
+            MalkuthError: MODULE/``MOD_001`` 해석 실패, ``MOD_003`` 스키마 위반.
+        """
+        _path, document = ModuleRegistry(self.roots).load_document(ref)
+        try:
+            return PromptsetManifest.model_validate(document)
+        except ValidationError as err:
+            raise MalkuthError(
+                category=ErrorCategory.MODULE,
+                code=ErrorCode.MOD_003,
+                message=f"promptset failed schema validation: {ref}",
+                details={"module_ref": ref, "errors": err.error_count()},
+            ) from err
 
     def module(self, module_type: str, name: str, version: str) -> dict[str, Any]:
         """모듈 선언 문서 — 무결성 검사(`kind`/`name`/`version` 일치)를 거친다."""

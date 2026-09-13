@@ -13,7 +13,7 @@ from __future__ import annotations
 import contextlib
 import os
 import tempfile
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -25,6 +25,7 @@ from malkuth.catalog import MODULE_TYPES, Catalog, not_found
 from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
 from malkuth.core.manifest import AgentManifest
 from malkuth.deploy import Finding, ValidationReport, validate_deployment
+from malkuth.modules.promptset import PromptsetManifest
 from malkuth.orchestrator.topology import GraphTopology
 
 InUse = Callable[[str, str], bool]
@@ -117,6 +118,7 @@ class Author:
         """
         saved_agents, saved_groups = self.catalog.agents(), self.catalog.groups()
         manifests = {**saved_agents.items, **{m.name: m for m in agents}}
+        promptsets, unloadable = self._promptsets(manifests.values())
         saved_graphs = self.catalog.graphs()
         drafted = {g.metadata.name for g in graphs}
         others = saved_graphs.items.items() if with_saved_graphs else ()
@@ -127,6 +129,7 @@ class Author:
             manifests=manifests,
             groups=saved_groups.items,
             resolvable_refs=self.catalog.module_refs(),
+            promptsets=promptsets,
             global_secrets=(
                 frozenset(saved_groups.items["global"].spec.secrets)
                 if "global" in saved_groups.items
@@ -155,9 +158,41 @@ class Author:
             for p in problems
             if p.path not in targets
         ]
-        return ValidationReport(findings=(*broken, *report.findings))
+        return ValidationReport(findings=(*broken, *unloadable, *report.findings))
 
     # --- 그래프 ---------------------------------------------------------------
+
+    def _promptsets(
+        self, manifests: Iterable[AgentManifest]
+    ) -> tuple[dict[str, PromptsetManifest], list[Finding]]:
+        """검증 대상 에이전트들이 선언한 promptset 을 ref 로 모은다 (#260).
+
+        **읽지 못한 것은 finding 으로 남긴다.** 조용히 건너뛰면 노드↔템플릿 검사가
+        그 에이전트에 대해 아무 것도 보지 못한 채로 통과한다 — 검사가 있다는 사실만
+        남고 실제로는 꺼져 있는 상태가 된다.
+
+        해석 자체가 안 되는 ref(`MOD_001`)만 예외다 — 모듈 ref 검사가 이미 보고한다.
+        """
+        found: dict[str, PromptsetManifest] = {}
+        problems: list[Finding] = []
+        for manifest in manifests:
+            ref = manifest.spec.promptset.ref
+            if ref in found:
+                continue
+            try:
+                found[ref] = self.catalog.promptset(ref)
+            except MalkuthError as err:
+                if err.code == ErrorCode.MOD_001:
+                    continue
+                problems.append(
+                    Finding(
+                        check="node_templates",
+                        code=ErrorCode(err.code),
+                        message=f"promptset could not be loaded: {err.message}",
+                        details={"agent": manifest.name, "module_ref": ref},
+                    )
+                )
+        return found, problems
 
     def save_graph(self, name: str, topology: GraphTopology) -> Path:
         """Validate and write one graph.

@@ -26,6 +26,7 @@ class FakeBuilder:
         self.catalog = self._Catalog()
         self.records: dict[tuple[str, str], BuildRecord] = {}
         self.custom = {"custom"}
+        self.running: set[str] = set()
 
     def needs_build(self, agent: str, version: str) -> bool:
         return agent in self.custom
@@ -33,7 +34,8 @@ class FakeBuilder:
     def record_of(self, agent: str, version: str) -> BuildRecord | None:
         return self.records.get((agent, version))
 
-    async def build(self, agent: str) -> BuildRecord:
+    async def start(self, agent: str) -> BuildRecord:
+        """굽지 않고 접수만 한다 — 라우트가 기다리지 않는지 보려면 끝나지 않아야 한다."""
         self.catalog.agent(agent)
         if agent not in self.custom:
             raise MalkuthError(
@@ -41,12 +43,27 @@ class FakeBuilder:
                 code=ErrorCode.VAL_002,
                 message="agent has no build materials",
             )
+        if agent in self.running:
+            raise MalkuthError(
+                category=ErrorCategory.RUNTIME,
+                code=ErrorCode.RT_011,
+                message="an image build for this version is already running",
+            )
+        self.running.add(agent)
+        return self._record(agent, BuildStatus.BUILDING)
+
+    def finish(self, agent: str) -> None:
+        """빌드가 끝난 척한다 — GET 이 진행을 따라가는지 보기 위한 것."""
+        self.running.discard(agent)
+        self._record(agent, BuildStatus.BUILT)
+
+    def _record(self, agent: str, status: BuildStatus) -> BuildRecord:
         record = BuildRecord(
             agent=agent,
             version="0.1.0",
-            status=BuildStatus.BUILT,
+            status=status,
             image=f"malkuth/agent-{agent}:0.1.0",
-            log="Step 1/3",
+            log="Step 1/3" if status is BuildStatus.BUILT else "",
         )
         self.records[agent, "0.1.0"] = record
         return record
@@ -65,13 +82,27 @@ async def api(builder):
         yield client
 
 
-async def test_a_build_reports_the_image_it_made(api):
+async def test_a_build_is_accepted_without_waiting_for_it(api):
+    """분 단위가 될 수 있는 빌드로 요청을 붙잡지 않는다 — 제출만 하고 202 로 돌아온다."""
     response = await api.post("/v1/agents/custom/image")
 
-    assert response.status_code == 200
+    assert response.status_code == 202
     body = response.json()
-    assert body["status"] == BuildStatus.BUILT
+    assert body["status"] == BuildStatus.BUILDING
     assert body["image"] == "malkuth/agent-custom:0.1.0"
+
+
+async def test_a_second_build_while_one_runs_is_409(api, builder):
+    """같은 태그를 두 번 구우면 결과가 뒤집힌다 — 상태 충돌이므로 409 다."""
+    await api.post("/v1/agents/custom/image")
+
+    response = await api.post("/v1/agents/custom/image")
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == ErrorCode.RT_011
+
+    builder.finish("custom")
+    assert (await api.post("/v1/agents/custom/image")).status_code == 202
 
 
 async def test_an_agent_that_was_never_built_says_so(api):
@@ -82,9 +113,11 @@ async def test_an_agent_that_was_never_built_says_so(api):
     assert body["image"] == "malkuth/agent-custom:0.1.0"
 
 
-async def test_the_status_follows_the_build(api):
+async def test_the_status_follows_the_build(api, builder):
     await api.post("/v1/agents/custom/image")
+    assert (await api.get("/v1/agents/custom/image")).json()["status"] == BuildStatus.BUILDING
 
+    builder.finish("custom")
     body = (await api.get("/v1/agents/custom/image")).json()
 
     assert body["status"] == BuildStatus.BUILT

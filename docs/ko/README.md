@@ -16,6 +16,8 @@ LangGraph 기반 모듈형 멀티 에이전트 오케스트레이션 프레임�
 | [architecture.md](architecture.md) | 시스템 계층, 상호작용 모델, 실행 모드, 리소스 스코프 |
 | [getting-started.md](getting-started.md) | 사전 요구사항, 환경 구성, 첫 솔루션 조립 |
 | [modules.md](modules.md) | 모듈 시스템 — 스킬셋/프롬프트셋/메모리셋/그래프/그룹 |
+| [api.md](api.md) | Control Plane REST API — 카탈로그·저작·배포·run |
+| [ui.md](ui.md) | Web UI — 브라우저에서 조립·배포·구동 |
 | [testing.md](testing.md) | 테스트 전략, 결정성 규칙, 품질 게이트 |
 | [ci/conventions.md](ci/conventions.md) | 저장소 거버넌스 및 CI 설계 규칙 |
 | [ci/status-checks.md](ci/status-checks.md) | Required status check 이름의 단일 소스 |
@@ -86,7 +88,8 @@ uv run malkuth <command>          # venv 를 활성화했다면 그냥 `malkuth`
 | `malkuth status` | 선언된 에이전트/그래프/그룹/모듈 요약 |
 | `malkuth config [env]` | 해석된 설정 출력 (`dev` / `staging` / `prod`) |
 | `malkuth check <state.yaml>` | 관측 상태와 대조해 정합성 불일치 보고 |
-| `malkuth run <graph.yaml>` | mission 또는 service run 제출 |
+| `malkuth run <graph.yaml>` | 주소를 직접 적어 mission/service run 제출 |
+| `malkuth run --deployment <id>` | 배포에 run 제출 — 주소는 control plane 이 해석 |
 | `malkuth run-list` / `run-drain <id>` / `run-resume <id>` | control plane 을 통한 run 조작 |
 
 `--json` (서브커맨드 앞에) 은 기계 판독 출력으로, `--root` 는 작업 디렉토리가 아닌 다른
@@ -131,17 +134,29 @@ MALKUTH_ORCHESTRATOR__CHECKPOINTER_URL=postgresql://user:pass@host:5432/malkuth 
 `run-list` / `run-drain` / `run-resume` 는 `--control-url` 로 control plane 에 붙고,
 **기록된 run 만** 봅니다 — `orchestrator.run_store` 를 설정해 run 과 control plane 이 같은
 저장소를 보게 하세요. `run-drain` 은 요청만 남기고 즉시 반환하며, 실제 정지는 run 을 구동하는
-프로세스가 다음 iteration 경계에서 수행합니다. `run-resume` 은 이 control plane 에서는
-**항상 거절됩니다** — 저장소를 읽을 뿐 run 을 구동하지 않아 이어갈 state 가 없습니다.
-재개된 적 없는 결과를 보고하는 대신 그 사실을 말합니다 (`501`, `GRAPH_001`).
-현재 재개는 같은 `--run-id` 로 다시 실행하는 방식입니다.
+프로세스가 다음 iteration 경계에서 수행합니다.
+
+그래프를 돌리는 다른 방법이 `--deployment` 이며, 여기에는 `--agent` 가 전혀 필요 없습니다 —
+배포된 에이전트의 위치를 control plane 이 이미 알고 있기 때문입니다.
+
+```bash
+uv run malkuth run --deployment dep-2fc94a0b5f24 \
+  --input '{"query": "malkuth architecture"}' \
+  --control-url http://127.0.0.1:8700
+```
+
+완주하면 반환합니다 (`--no-wait` 를 주면 제출 시점에 반환). `run-resume` 은 service 그래프가
+연속 실패로 *halted* 시킨 run 을 이어가는 명령입니다 — 의도적으로 drain 한 run 은 재개가
+아니라 새로 제출합니다. 배포 표면이 없는 control plane 은 run 을 구동하지 않으므로,
+일어나지 않은 재개를 보고하는 대신 `501` 로 답합니다. 전체 표면은
+[Control Plane API](api.md) 를 보세요.
 
 ### 상주 프로세스
 
 ```bash
 python -m malkuth.agentd        # 컨테이너 내부 에이전트 데몬 — Control API 8080
 python -m malkuth.memory        # Memory Service — HTTP 표면 + 비동기 인덱싱 루프
-python -m malkuth.orchestrator  # Control Plane — run-list / run-drain / run-resume 서빙
+python -m malkuth.orchestrator  # Control Plane — REST API + /ui 의 Web UI
 ```
 
 `agentd` 는 runtime layer 가 모든 에이전트 컨테이너 안에서 띄우는 프로세스입니다.
@@ -155,7 +170,17 @@ Memory Service 는 `MALKUTH_REPO_ROOT`, `MALKUTH_MEMORY_PORT`,
 
 Control Plane 은 설정에서 `orchestrator.run_store`, `control_host`, `control_port` 를 읽고,
 저장소가 없으면 **기동을 거부**합니다 — 빈 목록을 돌려주면 "run 이 없다" 로 읽히기 때문입니다.
-run 을 구동하지는 않으므로 `run-resume` 요청은 거절합니다.
+`orchestrator.control_token` 을 설정하고 bearer 토큰으로 보내세요 — 모든 `/v1/*` 라우트가
+요구하며, 토큰 없이 loopback 아닌 주소에 바인드하면 거부됩니다 (`CFG_001`).
+`GET /v1/health` 와 UI 정적 파일은 무인증으로 남습니다.
+
+`orchestrator.deployment_store` 를 함께 설정하면 배포 표면이 열립니다 — 이 프로세스가 직접
+에이전트 컨테이너를 띄우고, 거기에 제출된 run 을 구동하며, halted run 을 재개할 수 있습니다.
+설정하지 않으면 그 라우트들은 닫힌 채로, 다른 프로세스가 구동하는 run 을 보고만 합니다.
+
+Web UI 는 `http://127.0.0.1:8700/` 입니다 — 카탈로그, 그래프/에이전트 편집기, 배포, run.
+같은 프로세스가 서빙하며 문서화된 REST API 만 호출합니다
+([API 레퍼런스](api.md), [UI 가이드](ui.md)).
 
 셋 다 `MALKUTH_ENV`, `MALKUTH_CONFIG_DIR`, `MALKUTH_LOG_LEVEL`, `MALKUTH_LOG_FORMAT`,
 `MALKUTH_METRICS_PORT` 를 따릅니다.
@@ -191,4 +216,5 @@ MALKUTH_ORCHESTRATOR__NODE_TIMEOUT_S=600 uv run malkuth config
 
 - `runbooks/` — 운영 복구 절차 (런타임 구현과 함께 추가,
   [05-error-handling.md](../../.claude/rules/05-error-handling.md) 참조)
-- `api.md` — Control Plane / Agent Control API 레퍼런스 (인터페이스 구현 이후)
+- Agent Control API 레퍼런스 — `agentd` 가 컨테이너 안에서 서빙하는 표면. Control Plane
+  쪽은 [api.md](api.md) 에 있고, 이것은 그 아래 계층입니다

@@ -140,6 +140,9 @@ class OrchestratorConfig(BaseModel):
     """Control Plane bind 주소. 기본은 loopback — 이 표면은 인증이 없으므로
     외부에 열려면 그 앞을 막는 것이 배포하는 쪽의 책임이다."""
     control_port: int = Field(default=8700, gt=0, le=65535)
+    material_store: str | None = Field(default=None, min_length=1)
+    """빌드 재료 저장소 경로 (sqlite). 커스텀 에이전트의 `src/`·`Dockerfile` 이 여기 산다 —
+    없으면 재료 표면을 열지 않는다 (#264). `run_store` 와 같은 파일 경로 규칙."""
     deployment_store: str | None = Field(default=None, min_length=1)
     """배포 기록 저장소 경로 (sqlite). control plane 이 재시작한 뒤 살아 있는
     컨테이너를 다시 찾으려면 프로세스 밖에 기록이 있어야 한다 (#243).
@@ -152,6 +155,19 @@ class OrchestratorConfig(BaseModel):
     max_service_runs: int = Field(default=5, gt=0)
     node_timeout_s: float = Field(default=300.0, gt=0)
     service_defaults: ServiceDefaults = Field(default_factory=ServiceDefaults)
+
+    @model_validator(mode="after")
+    def _material_store_is_a_file(self) -> OrchestratorConfig:
+        """run_store 와 같은 이유 — in-memory 는 연결마다 별개라 재시작을 넘기지 못한다."""
+        if self.material_store is None:
+            return self
+        target = self.material_store.strip()
+        if not target or target == MEMORY_DB or target.startswith(f"file:{MEMORY_DB}"):
+            raise ValueError(
+                "orchestrator.material_store must be a file path — "
+                "an in-memory database is private to each connection"
+            )
+        return self
 
     @model_validator(mode="after")
     def _deployment_store_is_a_file(self) -> OrchestratorConfig:

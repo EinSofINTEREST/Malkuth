@@ -14,13 +14,45 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 import docker
-from docker.errors import ImageNotFound, NotFound
+from docker.errors import BuildError, ImageNotFound, NotFound
 from docker.utils import parse_repository_tag
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable, Mapping
+
     from docker import DockerClient as SdkHandle
 
 BRIDGE = "bridge"
+
+MAX_LOG_CHARS = 8000
+"""빌드 로그의 상한 — 원인은 보통 끝에 있다. 전체를 실으면 응답과 기록이 로그 덤프가 된다."""
+
+
+class ImageBuildError(Exception):
+    """Image build failed — carries the log so the reason survives.
+
+    빌드 실패의 원인은 로그에만 있다. 예외 메시지로는 어느 단계에서 무엇이 없었는지
+    알 수 없어, 운영자가 결국 손으로 다시 굽게 된다.
+    """
+
+    def __init__(self, tag: str, log: str, cause: Exception) -> None:
+        super().__init__(f"image build failed: {tag}")
+        self.tag = tag
+        self.log = log
+        self.cause = cause
+
+
+def _log_of(stream: Iterable[Any]) -> str:
+    """SDK 의 빌드 스트림을 사람이 읽는 로그로 — 끝에서부터 상한만큼 남긴다."""
+    lines = []
+    for chunk in stream or ():
+        if not isinstance(chunk, dict):
+            continue
+        text = chunk.get("stream") or chunk.get("error") or ""
+        if isinstance(text, str) and text.strip():
+            lines.append(text.rstrip())
+    log = "\n".join(lines)
+    return log[-MAX_LOG_CHARS:] if len(log) > MAX_LOG_CHARS else log
 
 
 def image_reference(image: str) -> tuple[str, str]:
@@ -99,6 +131,20 @@ class SdkDockerClient:
             self._sdk.containers.get(container_id).remove(force=True)
         except NotFound:
             return  # 이미 없다 — 정리의 목적은 달성됐다
+
+    def build(self, context: str, tag: str, *, buildargs: Mapping[str, str] | None = None) -> str:
+        """Build an image from a context directory, returning the build log.
+
+        SDK 는 로그를 스트림으로 흘린다 — 성공해도 실패해도 그것을 모아 돌려준다.
+        `BuildError` 에도 로그가 실려 있으므로 같은 형태로 꺼내 예외에 담는다.
+        """
+        try:
+            _image, stream = self._sdk.images.build(
+                path=context, tag=tag, rm=True, forcerm=True, buildargs=dict(buildargs or {})
+            )
+        except BuildError as err:
+            raise ImageBuildError(tag, _log_of(err.build_log), err) from err
+        return _log_of(stream)
 
     def find(self, name: str) -> str | None:
         try:

@@ -130,6 +130,12 @@ class CliDockerClient:
     def remove(self, container_id: str) -> None:
         docker("rm", "-f", container_id, check=False)
 
+    def build(self, context: str, tag: str, *, buildargs: dict[str, str] | None = None) -> str:
+        args = ["build", "-t", tag]
+        for key, value in (buildargs or {}).items():
+            args += ["--build-arg", f"{key}={value}"]
+        return docker(*args, context)
+
     def find(self, name: str) -> str | None:
         found = docker("inspect", "--format", "{{.Id}}", name, check=False)
         return found or None

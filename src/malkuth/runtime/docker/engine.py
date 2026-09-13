@@ -24,7 +24,7 @@ from malkuth.runtime.docker.errors import (
 from malkuth.runtime.spec import ContainerSpec
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
 
 DEFAULT_NETWORK = "malkuth-net"
 DEFAULT_STOP_GRACE_S = 30.0
@@ -99,6 +99,14 @@ class DockerClient(Protocol):
 
     def remove(self, container_id: str) -> None:
         """컨테이너를 제거한다."""
+        ...
+
+    def build(self, context: str, tag: str, *, buildargs: Mapping[str, str] | None = None) -> str:
+        """컨텍스트 디렉토리로 이미지를 굽고 빌드 로그를 돌려준다 (#265).
+
+        로그는 실패 원인이 담기는 유일한 곳이다 — 예외 메시지만으로는 어느 단계에서
+        무엇이 없었는지 알 수 없다.
+        """
         ...
 
     def find(self, name: str) -> str | None:

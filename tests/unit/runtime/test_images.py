@@ -6,20 +6,24 @@
 
 from __future__ import annotations
 
+import asyncio
+import threading
 from pathlib import Path
 
 import pytest
 import yaml
 
 from malkuth.catalog import Catalog
-from malkuth.core.errors import ErrorCode, MalkuthError
+from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
 from malkuth.materials import InMemoryMaterialStore, Materials
 from malkuth.runtime.docker.client import ImageBuildError
 from malkuth.runtime.images import (
     SKELETON_DOCKERFILE,
+    BuildRecord,
     BuildStatus,
     ImageBuilder,
     InMemoryBuildStore,
+    SqliteBuildStore,
     check_dockerfile,
     image_tag,
 )
@@ -203,3 +207,106 @@ async def test_an_unknown_agent_is_not_found(builder):
 def test_needs_build_follows_the_materials(builder):
     assert builder.needs_build("custom", "0.1.0") is True
     assert builder.needs_build("custom", "9.9.9") is False
+
+
+# --- 동시 빌드 (PR #269 리뷰) --------------------------------------------------------
+
+
+class GatedDockerClient(FakeDockerClient):
+    """빌드 도중에 멈춰 서는 대역 — 겹친 요청을 만들려면 첫 빌드가 끝나지 않아야 한다."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def build(self, context: str, tag: str, *, buildargs: dict[str, str] | None = None) -> str:
+        self.entered.set()
+        self.release.wait(timeout=5)
+        return super().build(context, tag, buildargs=buildargs)
+
+
+@pytest.fixture
+def gated(workspace) -> ImageBuilder:
+    materials = InMemoryMaterialStore()
+    materials.put(Materials(agent="custom", version="0.1.0", files={"src/agent.py": "MARK = 1"}))
+    return ImageBuilder(
+        catalog=Catalog.under(workspace),
+        materials=materials,
+        builds=InMemoryBuildStore(),
+        client=GatedDockerClient(),
+        workspace=workspace / "work",
+    )
+
+
+async def test_submitting_a_build_returns_before_it_finishes(gated):
+    """제출은 굽기를 기다리지 않는다 — 진행 중 상태를 곧바로 돌려준다."""
+    record = await gated.start("custom")
+
+    assert record.status == BuildStatus.BUILDING
+    assert gated.record_of("custom", "0.1.0").status == BuildStatus.BUILDING
+
+    gated.client.release.set()
+    assert (await gated.running[("custom", "0.1.0")]).status == BuildStatus.BUILT
+
+
+async def test_a_second_build_of_the_same_version_is_refused(gated):
+    """같은 태그를 두 번 구우면 결과가 늦게 끝난 쪽으로 뒤집힌다 — 겹치면 거절한다."""
+    await gated.start("custom")
+    await asyncio.to_thread(gated.client.entered.wait, 5)
+
+    with pytest.raises(MalkuthError) as exc_info:
+        await gated.start("custom")
+
+    assert exc_info.value.code == ErrorCode.RT_011
+    assert exc_info.value.category == ErrorCategory.RUNTIME
+
+    gated.client.release.set()
+    await gated.running[("custom", "0.1.0")]
+    assert len(gated.client.built) == 1, "거절된 요청은 Docker 까지 가지 않는다"
+
+
+async def test_a_build_can_be_repeated_once_the_previous_one_ends(gated):
+    """거절은 겹칠 때만이다 — 끝난 뒤에는 다시 구울 수 있어야 재빌드가 가능하다."""
+    gated.client.release.set()
+    await gated.build("custom")
+
+    assert (await gated.build("custom")).status == BuildStatus.BUILT
+    assert len(gated.client.built) == 2
+
+
+# --- 재시작 지속성 (PR #269 리뷰) ----------------------------------------------------
+
+
+def test_the_sqlite_store_survives_a_reopen(tmp_path):
+    """기록이 프로세스를 넘지 못하면 재시작 후 모든 에이전트가 '빌드된 적 없음' 이 된다."""
+    record = BuildRecord(
+        agent="custom",
+        version="0.1.0",
+        status=BuildStatus.BUILT,
+        image="malkuth/agent-custom:0.1.0",
+        log="Step 1/2",
+        updated_at="2026-09-13T00:00:00+00:00",
+    )
+    SqliteBuildStore(path=tmp_path / "builds.db").upsert(record)
+
+    reopened = SqliteBuildStore(path=tmp_path / "builds.db")
+
+    assert reopened.get("custom", "0.1.0") == record
+    assert list(reopened.list()) == [record]
+
+
+def test_the_sqlite_store_overwrites_an_earlier_result(tmp_path):
+    """실패한 뒤 성공하면 마지막 결과가 남아야 한다 — 배포 게이트가 이것을 본다 (#266)."""
+    store = SqliteBuildStore(path=tmp_path / "builds.db")
+    store.upsert(
+        BuildRecord(
+            agent="custom", version="0.1.0", status=BuildStatus.FAILED, image="i", error="x"
+        )
+    )
+    store.upsert(BuildRecord(agent="custom", version="0.1.0", status=BuildStatus.BUILT, image="i"))
+
+    found = SqliteBuildStore(path=tmp_path / "builds.db").get("custom", "0.1.0")
+
+    assert found.status == BuildStatus.BUILT
+    assert found.error is None

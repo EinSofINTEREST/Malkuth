@@ -20,7 +20,7 @@ import threading
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 import structlog
@@ -59,13 +59,17 @@ ENV PYTHONPATH=/app/{SOURCE_ROOT} \\
 """
 
 _USER_DIRECTIVE = re.compile(r"^\s*USER\s+(\S+)", re.IGNORECASE | re.MULTILINE)
+_COPY_DIRECTIVE = re.compile(r"^\s*(COPY|ADD)\s+(.+)$", re.IGNORECASE | re.MULTILINE)
+_FLAG = re.compile(r"^--\S+")
+_REMOTE = re.compile(r"^(https?|git|ftp)://", re.IGNORECASE)
 _FROM_DIRECTIVE = re.compile(r"^\s*FROM\s+(\S+)", re.IGNORECASE | re.MULTILINE)
 _ROOT_USERS = frozenset({"root", "0", "0:0"})
 
 
 class BuildStatus(StrEnum):
-    """What the `build` arrow did."""
+    """What the `build` arrow is doing."""
 
+    BUILDING = "building"
     BUILT = "built"
     FAILED = "failed"
 
@@ -133,6 +137,36 @@ def check_dockerfile(text: str) -> None:
     if users and users[-1].strip().strip('"') in _ROOT_USERS:
         # 설치 동안 root 로 올라가는 것은 흔하다 — 되돌리지 않고 끝나는 것이 문제다
         raise _invalid("Dockerfile must not end as root (02 Security)", declared=users[-1])
+    _check_sources(text)
+
+
+def _check_sources(text: str) -> None:
+    """`COPY`/`ADD` 의 소스가 컨텍스트 안의 로컬 경로인지.
+
+    컨텍스트 밖 경로는 Docker 자신도 막지만 **빌드 도중에** 막는다 — 이미지가 절반
+    만들어진 뒤 실패하고, 운영자는 로그를 읽어야 안다. 여기서 잡으면 저장 시점의
+    finding 이 된다.
+
+    원격 `ADD` 는 Docker 가 막지 않는다: 빌드가 임의의 URL 을 당겨 이미지에 넣는다.
+    02 는 이미지를 배포 파이프라인이 굽고 버전을 고정하라고 규정하므로, 굽는 도중의
+    임의 다운로드는 그 계약 밖이다.
+    """
+    for directive, rest in _COPY_DIRECTIVE.findall(text):
+        parts = [token for token in rest.split() if not _FLAG.match(token)]
+        # 마지막 토큰은 목적지다 — 소스만 본다
+        for source in parts[:-1]:
+            cleaned = source.strip().strip('"').strip("'")
+            if _REMOTE.match(cleaned):
+                raise _invalid(
+                    f"{directive.upper()} must not fetch a remote source — "
+                    "pin it in the base image",
+                    source=cleaned,
+                )
+            if cleaned.startswith("/") or PurePosixPath(cleaned).parts[:1] == ("..",):
+                raise _invalid(
+                    f"{directive.upper()} source must stay inside the build context",
+                    source=cleaned,
+                )
 
 
 @dataclass
@@ -257,6 +291,9 @@ class ImageBuilder:
     builds: BuildStore
     client: DockerClient
     workspace: Path | None = None
+    running: dict[tuple[str, str], asyncio.Task[BuildRecord]] = field(default_factory=dict)
+    """진행 중인 빌드 — 소유자를 명시한다 (07 Async 5). 같은 (에이전트, 버전) 을 두 번
+    굽게 두면 두 빌드가 같은 태그를 쓰고 기록이 늦게 끝난 쪽으로 뒤집힌다."""
 
     def needs_build(self, agent: str, version: str) -> bool:
         """재료가 있는 에이전트만 굽는다.
@@ -270,25 +307,65 @@ class ImageBuilder:
     def record_of(self, agent: str, version: str) -> BuildRecord | None:
         return self.builds.get(agent, version)
 
-    async def build(self, agent: str) -> BuildRecord:
-        """Bake the image for an agent's current version.
+    async def start(self, agent: str) -> BuildRecord:
+        """Begin a build and return immediately.
+
+        빌드는 분 단위가 될 수 있다 — HTTP 요청을 붙잡고 있어 봐야 누구에게도 도움이
+        되지 않는다. 상태는 `record_of` 로 본다 (배포 제출과 같은 방식, #244).
+
+        검증(선언·재료·Dockerfile 규약)은 **돌려주기 전에** 한다: 실패를 기록으로만
+        남기면 호출자가 요청이 접수된 줄 안다.
 
         Raises:
             MalkuthError: NOT_FOUND/``NF_001`` 선언되지 않은 에이전트,
-                VALIDATION/``VAL_002`` 재료가 없거나 Dockerfile 이 규약을 어김.
+                VALIDATION/``VAL_002`` 재료가 없거나 Dockerfile 이 규약을 어김,
+                RUNTIME/``RT_011`` 같은 버전의 빌드가 이미 진행 중.
         """
         manifest = self.catalog.agent(agent)
         version = manifest.metadata.version
-        found = self.materials.get(agent, version)
-        if not found or not found.files:
-            raise _invalid(
-                "agent has no build materials — declarative agents run on the base image",
+        key = (agent, version)
+        if key in self.running and not self.running[key].done():
+            raise MalkuthError(
+                category=ErrorCategory.RUNTIME,
+                code=ErrorCode.RT_011,
+                message="an image build for this version is already running",
                 agent=agent,
-                version=version,
+                details={"version": version, "image": image_tag(agent, version)},
             )
-        dockerfile = found.dockerfile or SKELETON_DOCKERFILE
+        found, dockerfile = self._materials_for(agent, version)
         check_dockerfile(dockerfile)
 
+        record = BuildRecord(
+            agent=agent,
+            version=version,
+            status=BuildStatus.BUILDING,
+            image=image_tag(agent, version),
+            updated_at=_now(),
+        )
+        self.builds.upsert(record)
+
+        async def run() -> BuildRecord:
+            try:
+                return await self._bake(agent, manifest, version, found, dockerfile)
+            finally:
+                self.running.pop(key, None)
+
+        self.running[key] = asyncio.create_task(run(), name=f"build-{agent}-{version}")
+        return record
+
+    async def build(self, agent: str) -> BuildRecord:
+        """Build and wait — the same path `start` drives, for callers that want the result.
+
+        테스트와 CLI 처럼 결과가 필요한 호출자를 위한 것이다. HTTP 표면은 `start` 를 쓴다.
+        """
+        started = await self.start(agent)
+        task = self.running.get((started.agent, started.version))
+        return await task if task is not None else started
+
+    async def _bake(
+        self, agent: str, manifest: Any, version: str, found: Materials, dockerfile: str
+    ) -> BuildRecord:
+        """조립 → 굽기 → 임시 디렉토리 삭제. 실패도 기록으로 남는다."""
         tag = image_tag(agent, version)
         bound = log.bind(agent=agent, agent_version=version, image=tag)
         if self.workspace is not None:
@@ -326,6 +403,17 @@ class ImageBuilder:
         self.builds.upsert(record)
         bound.info("agent image built")
         return record
+
+    def _materials_for(self, agent: str, version: str) -> tuple[Materials, str]:
+        """재료와 쓸 Dockerfile — 재료가 없으면 굽지 않는다."""
+        found = self.materials.get(agent, version)
+        if not found or not found.files:
+            raise _invalid(
+                "agent has no build materials — declarative agents run on the base image",
+                agent=agent,
+                version=version,
+            )
+        return found, found.dockerfile or SKELETON_DOCKERFILE
 
     def _assemble(
         self, context: Path, manifest: Any, materials: Materials, dockerfile: str

@@ -558,9 +558,14 @@ def _mount_images(api: APIRouter, builder: ImageBuilder) -> None:
     안 되기 때문이다 (02 Lifecycle 1).
     """
 
-    @api.post("/v1/agents/{name}/image")
+    @api.post("/v1/agents/{name}/image", status_code=status.HTTP_202_ACCEPTED)
     async def build_image(name: str) -> dict[str, Any]:
-        return _build_view(await builder.build(name))
+        """제출만 하고 돌아온다 — 빌드는 분 단위이고, 진행은 GET 으로 본다 (#244 와 같은 결).
+
+        같은 버전을 두 번 굽는 요청은 `RT_011` → 409 로 거절한다: 두 빌드가 같은 태그를
+        쓰므로 결과가 늦게 끝난 쪽으로 뒤집힌다.
+        """
+        return _build_view(await builder.start(name))
 
     @api.get("/v1/agents/{name}/image")
     async def get_image(name: str) -> dict[str, Any]:

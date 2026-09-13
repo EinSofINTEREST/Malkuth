@@ -6,8 +6,15 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
+import time
+import urllib.error
+import urllib.request
+import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -21,6 +28,7 @@ from malkuth.runtime.images import BuildStatus, ImageBuilder, InMemoryBuildStore
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DOCKER_BIN = shutil.which("docker")
 BASE_IMAGE = "malkuth/agent-base:0.1.0"
+READY_TIMEOUT_S = 90.0
 
 pytestmark = pytest.mark.integration
 
@@ -46,6 +54,53 @@ def base_image_present() -> bool:
 requires_base = pytest.mark.skipif(
     not base_image_present(), reason=f"{BASE_IMAGE} is not built (make build-base)"
 )
+
+
+@contextmanager
+def serve(image: str) -> Iterator[int]:
+    """구운 이미지를 **기본 엔트리포인트로** 띄운다 — agentd 가 뜨는지는 이렇게만 보인다.
+
+    배포가 거는 것과 같은 격리 플래그를 건다 (02 Security 3): read-only rootfs,
+    cap-drop, non-root. 여기서 뜨지 않으면 배포에서도 뜨지 않는다.
+    """
+    name = f"malkuth-baked-{uuid.uuid4().hex[:8]}"
+    container = docker(
+        "run",
+        "-d",
+        "--name",
+        name,
+        "--read-only",
+        "--cap-drop=ALL",
+        "--pids-limit=256",
+        "--tmpfs=/tmp",
+        "--tmpfs=/workspace",
+        "-e",
+        "ANTHROPIC_API_KEY=test-key",
+        "-P",
+        image,
+    )
+    try:
+        yield int(docker("port", container, "8080/tcp").rsplit(":", 1)[-1])
+    finally:
+        docker("logs", container, check=False)
+        docker("rm", "-f", container, check=False)
+
+
+def wait_for_health(port: int) -> dict:
+    """`/v1/health` 가 응답할 때까지. 무인증이다 — Docker healthcheck 가 직접 부른다."""
+    deadline = time.monotonic() + READY_TIMEOUT_S
+    last: Exception | None = None
+    while time.monotonic() < deadline:
+        try:
+            with urllib.request.urlopen(  # noqa: S310 — 루프백 고정 URL
+                f"http://127.0.0.1:{port}/v1/health", timeout=5
+            ) as response:
+                body: dict = json.loads(response.read())
+                return body
+        except (urllib.error.URLError, OSError, json.JSONDecodeError) as err:
+            last = err
+            time.sleep(1)
+    raise AssertionError(f"/v1/health never answered within {READY_TIMEOUT_S}s: {last}")
 
 
 @pytest.fixture
@@ -121,6 +176,25 @@ async def test_a_stored_agent_bakes_into_a_running_image(builder, workspace):
             "/app/manifest.yaml",
         )
         assert yaml.safe_load(manifest_in_image)["metadata"]["name"] == "custom"
+    finally:
+        docker("rmi", "-f", record.image, check=False)
+
+
+@requires_base
+async def test_the_baked_image_starts_agentd_and_answers_health(builder):
+    """이슈 #265 완료 조건 — 구운 이미지가 **기동해** `/v1/health` 를 응답한다.
+
+    재료가 제자리에 들어갔는지만 보면 agentd 가 뜨지 않는 조합도 초록이다. 스켈레톤이
+    엔트리포인트나 `PYTHONPATH` 를 망가뜨리면 여기서만 드러난다.
+    """
+    record = await builder.build("custom")
+    assert record.status == BuildStatus.BUILT, record.error
+    try:
+        with serve(record.image) as port:
+            health = wait_for_health(port)
+
+            assert health["status"] in {"healthy", "degraded", "unhealthy"}, health
+            assert "checked_at" in health
     finally:
         docker("rmi", "-f", record.image, check=False)
 

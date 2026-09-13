@@ -150,6 +150,10 @@ class AgentLauncher:
 
         Returns:
             The launched agent — its client already carries the token.
+
+        Raises:
+            MalkuthError: RUNTIME/``RT_010`` if this replica is already launched —
+                호출자가 겹치는 배포를 해체하면 되는 상태 충돌입니다 (HTTP 409).
         """
         agent = manifest.name
         # 같은 **레플리카**를 두 번 띄우면 첫 핸들을 덮어 컨테이너가 미아가 된다.

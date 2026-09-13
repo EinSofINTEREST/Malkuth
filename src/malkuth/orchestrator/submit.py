@@ -316,7 +316,8 @@ class RunSubmitter:
                 이어갈 지점이 없는데 재개하면 처음부터 다시 돌아 부수효과가
                 두 번 일어납니다.
             MalkuthError: NOT_FOUND/``NF_001`` if the run is unknown.
-            MalkuthError: GRAPH/``GRAPH_001`` if the run is still active.
+            MalkuthError: GRAPH/``GRAPH_006`` if the run is not halted — 살아있는
+                run 도, drain 으로 정상 정지한 run 도 재개 대상이 아닙니다 (HTTP 409).
         """
         if self.checkpointer is None:
             raise MalkuthError(

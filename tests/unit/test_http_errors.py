@@ -49,6 +49,34 @@ def test_caller_fixable_failures_are_4xx(category, code, expected):
     assert status_for(error(category, code)) == expected
 
 
+@pytest.mark.parametrize(
+    ("category", "code"),
+    [
+        (ErrorCategory.GRAPH, ErrorCode.GRAPH_006),
+        (ErrorCategory.RUNTIME, ErrorCode.RT_010),
+    ],
+)
+def test_a_state_conflict_is_409_even_though_its_category_is_5xx(category, code):
+    """#256 — 정지한 run 재개, 이미 배포된 에이전트 겹쳐 배포. 둘 다 운영자가 해소한다.
+
+    5xx 로 답하면 조치 가능한 실수가 서버 장애 알림 버킷으로 새어 나간다.
+    """
+    assert status_for(error(category, code)) == HTTPStatus.CONFLICT
+
+
+@pytest.mark.parametrize(
+    ("category", "code"),
+    [
+        # 같은 카테고리의 **진짜** 서버 실패는 500 그대로여야 한다 — 과잉 4xx 화 방지
+        (ErrorCategory.GRAPH, ErrorCode.GRAPH_002),
+        (ErrorCategory.RUNTIME, ErrorCode.RT_001),
+        (ErrorCategory.RUNTIME, ErrorCode.RT_004),
+    ],
+)
+def test_the_conflict_mapping_does_not_leak_to_sibling_codes(category, code):
+    assert status_for(error(category, code)) == HTTPStatus.INTERNAL_SERVER_ERROR
+
+
 def test_a_missing_resource_is_404_regardless_of_category():
     """`NF_001` 은 어느 앱에서든 404 다 — control plane 에서만 그랬다."""
     assert status_for(error(ErrorCategory.STORAGE, ErrorCode.NF_001)) == HTTPStatus.NOT_FOUND

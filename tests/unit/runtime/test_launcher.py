@@ -140,7 +140,7 @@ async def test_launching_the_same_replica_twice_is_rejected():
     with pytest.raises(MalkuthError) as exc_info:
         await launch.start(manifest(), replica=0)
 
-    assert exc_info.value.code == ErrorCode.RT_001
+    assert exc_info.value.code == ErrorCode.RT_010
     # 거부는 기동 전에 — 컨테이너를 만들어놓고 버리면 안 된다
     assert len(client.created) == 1
 

@@ -33,6 +33,12 @@ class FakeRuns:
         return record
 
     async def resume(self, run_id) -> RunRecord:
+        if run_id == "stopped":
+            raise MalkuthError(
+                category=ErrorCategory.GRAPH,
+                code=ErrorCode.GRAPH_006,
+                message="only a halted run can be resumed",
+            )
         record = RunRecord(run_id=run_id, graph="g", mode="service", status="running")
         self.store.upsert(record)
         return record
@@ -125,3 +131,13 @@ async def test_shutdown_closes_the_run_service(store, runs):
         pass
 
     assert runs.closed
+
+
+async def test_resuming_a_run_that_is_not_halted_is_409(api, store):
+    """#256 — 서버 잘못이 아니다. 운영자는 재개 대신 새로 제출하면 된다."""
+    store.upsert(RunRecord(run_id="stopped", graph="g", mode="service", status="stopped"))
+
+    response = await api.post("/v1/runs/stopped/resume")
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == ErrorCode.GRAPH_006

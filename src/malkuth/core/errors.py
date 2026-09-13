@@ -95,6 +95,7 @@ class ErrorCode(StrEnum):
     RT_007 = "RT_007"  # 불법 lifecycle 상태 전이 (프로그래밍 오류)
     RT_008 = "RT_008"  # 재시작 상한 초과 — Failed 전환
     RT_009 = "RT_009"  # 라우팅 가능한 레플리카 없음
+    RT_010 = "RT_010"  # 이미 기동된 레플리카 — 중복 기동 거부 (상태 충돌)
 
     # Graph
     GRAPH_001 = "GRAPH_001"  # 토폴로지 검증 실패
@@ -102,6 +103,7 @@ class ErrorCode(StrEnum):
     GRAPH_003 = "GRAPH_003"  # State schema 불일치 / 병합 실패
     GRAPH_004 = "GRAPH_004"  # Max iterations 초과 (mission)
     GRAPH_005 = "GRAPH_005"  # Service iteration 연속 실패 임계 초과 — run 정지
+    GRAPH_006 = "GRAPH_006"  # Run 상태가 요청한 조작과 맞지 않음 (상태 충돌)
 
     # Module
     MOD_001 = "MOD_001"  # 모듈 ref 해석 실패

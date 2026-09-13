@@ -36,6 +36,8 @@ PLAYWRIGHT_VERSION = version("playwright")
 PLAYWRIGHT_IMAGE = f"mcr.microsoft.com/playwright:v{PLAYWRIGHT_VERSION}-noble"
 GRAPH_NAME = "ui-clicked"
 UI_TIMEOUT_MS = 20_000
+DEPLOY_TIMEOUT_MS = 90_000
+"""배포는 `DeploymentManager.ready_timeout_s`(기본 60s) 까지 걸릴 수 있다."""
 
 
 def free_port() -> int:
@@ -91,8 +93,9 @@ def browser() -> Iterator:
             "--port",
             str(port),
             "--host",
-            # 컨테이너 안에서의 bind 다 — host 네트워크로 붙어 있어 이것이 유일한 경로다
-            "0.0.0.0",  # noqa: S104
+            # host 네트워크를 공유하므로 여기서의 loopback 이 곧 호스트의 loopback 이다.
+            # 0.0.0.0 으로 열면 **인증 없는 브라우저 제어 소켓**이 모든 인터페이스에 노출된다
+            "127.0.0.1",
             timeout=900,
         )
         try:
@@ -213,7 +216,9 @@ def _deploy(page) -> None:
     page.click("#deploy-form button[type=submit]")
 
     row = page.locator("#deployments tbody tr", has_text=GRAPH_NAME).first
-    row.locator("td.status-ready").wait_for()
+    # 배포는 에이전트가 healthy 가 될 때까지 기다린다 — manager 의 상한(기본 60s)보다
+    # 짧게 잡으면 느린 기동에서 화면이 아니라 테스트가 먼저 포기한다
+    row.locator("td.status-ready").wait_for(timeout=DEPLOY_TIMEOUT_MS)
     assert "malkuth-planner-0" in deployed_containers()
 
 

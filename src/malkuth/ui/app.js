@@ -170,14 +170,19 @@ async function requiredVariables(agentRef, nodeId) {
 
 async function suggestNodeInput(row) {
   const cell = row.querySelector("[name=node_input]");
+  const idCell = row.querySelector("[name=node_id]");
+  const agentCell = row.querySelector("[name=node_agent]");
   if (cell.value.trim()) return; // 사람이 적은 것을 덮지 않는다
-  const id = row.querySelector("[name=node_id]").value.trim();
-  const agentRef = row.querySelector("[name=node_agent]").value;
+  const id = idCell.value.trim();
+  const agentRef = agentCell.value;
   const required = await requiredVariables(agentRef, id);
-  if (required.length) {
-    cell.value = formatPairs(suggestInputMap(required));
-    status(`${id}: 템플릿이 요구하는 ${required.join(", ")} 를 채웠습니다`);
-  }
+  // 조회하는 동안 사람이 타이핑했거나 행이 바뀌었을 수 있다 — 늦게 온 응답이
+  // 그것을 덮으면 쓰던 값이 사라지거나 옛 노드의 변수가 채워진다
+  if (!required.length) return;
+  if (cell.value.trim() || idCell.value.trim() !== id || agentCell.value !== agentRef) return;
+  if (!row.isConnected) return;
+  cell.value = formatPairs(suggestInputMap(required));
+  status(`${id}: 템플릿이 요구하는 ${required.join(", ")} 를 채웠습니다`);
 }
 
 function rows(kind) {

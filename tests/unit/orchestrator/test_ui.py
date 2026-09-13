@@ -58,6 +58,7 @@ def test_the_ui_talks_rest_only():
             "manifest.yaml",
             "/workspace",
             "/data/",
+            "fs.",
             "child_process",
             "require(",
         ):

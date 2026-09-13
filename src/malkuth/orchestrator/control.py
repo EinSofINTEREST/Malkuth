@@ -27,6 +27,7 @@ from malkuth.http_auth import require_token
 from malkuth.http_errors import status_for
 from malkuth.materials import Materials
 from malkuth.orchestrator.topology import GraphTopology
+from malkuth.runtime.images import BuildRecord, image_tag
 from malkuth.ui import UI_ROOT
 
 if TYPE_CHECKING:
@@ -38,6 +39,7 @@ if TYPE_CHECKING:
     from malkuth.orchestrator.runs import RunService
     from malkuth.orchestrator.runstore import RunRecord, RunStore
     from malkuth.runtime.deployments import DeploymentManager, DeploymentRecord
+    from malkuth.runtime.images import ImageBuilder
 
 
 def unknown_run(run_id: str) -> MalkuthError:
@@ -86,6 +88,7 @@ def create_app(
     catalog: Catalog | None = None,
     token: str | None = None,
     author: Author | None = None,
+    builder: ImageBuilder | None = None,
     deployments: DeploymentManager | None = None,
     runs: RunService | None = None,
 ) -> FastAPI:
@@ -235,6 +238,8 @@ def create_app(
         _mount_catalog(api, catalog)
     if author is not None:
         _mount_authoring(api, author)
+    if builder is not None:
+        _mount_images(api, builder)
     if deployments is not None:
         _mount_deployments(api, deployments)
     if runs is not None:
@@ -532,6 +537,53 @@ def _mount_runs(api: APIRouter, runs: RunService) -> None:
             request.deployment_id, request.input, mode=request.mode, run_id=request.run_id
         )
         return view_of(record).model_dump()
+
+
+def _build_view(record: BuildRecord) -> dict[str, Any]:
+    return {
+        "agent": record.agent,
+        "version": record.version,
+        "status": record.status,
+        "image": record.image,
+        "error": record.error,
+        "log": record.log,
+        "updated_at": record.updated_at,
+    }
+
+
+def _mount_images(api: APIRouter, builder: ImageBuilder) -> None:
+    """`Declared → Built` 를 당기는 표면 (#265).
+
+    저장도 배포도 굽지 않는다 — 저장이 분 단위가 되어서도, 배포가 런타임 빌드가 되어서도
+    안 되기 때문이다 (02 Lifecycle 1).
+    """
+
+    @api.post("/v1/agents/{name}/image", status_code=status.HTTP_202_ACCEPTED)
+    async def build_image(name: str) -> dict[str, Any]:
+        """제출만 하고 돌아온다 — 빌드는 분 단위이고, 진행은 GET 으로 본다 (#244 와 같은 결).
+
+        같은 버전을 두 번 굽는 요청은 `RT_011` → 409 로 거절한다: 두 빌드가 같은 태그를
+        쓰므로 결과가 늦게 끝난 쪽으로 뒤집힌다.
+        """
+        return _build_view(await builder.start(name))
+
+    @api.get("/v1/agents/{name}/image")
+    async def get_image(name: str) -> dict[str, Any]:
+        manifest = builder.catalog.agent(name)
+        version = manifest.metadata.version
+        record = builder.record_of(name, version)
+        if record is None:
+            return {
+                "agent": name,
+                "version": version,
+                "status": None,
+                "image": image_tag(name, version),
+                "needs_build": builder.needs_build(name, version),
+                "error": None,
+                "log": "",
+                "updated_at": "",
+            }
+        return {**_build_view(record), "needs_build": builder.needs_build(name, version)}
 
 
 __all__ = ["RunView", "create_app", "unknown_run", "view_of"]

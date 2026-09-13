@@ -54,10 +54,11 @@ def test_caller_fixable_failures_are_4xx(category, code, expected):
     [
         (ErrorCategory.GRAPH, ErrorCode.GRAPH_006),
         (ErrorCategory.RUNTIME, ErrorCode.RT_010),
+        (ErrorCategory.RUNTIME, ErrorCode.RT_011),
     ],
 )
 def test_a_state_conflict_is_409_even_though_its_category_is_5xx(category, code):
-    """#256 — 정지한 run 재개, 이미 배포된 에이전트 겹쳐 배포. 둘 다 운영자가 해소한다.
+    """#256 — 정지한 run 재개, 겹쳐 배포, 그리고 겹친 이미지 빌드(#265). 운영자가 해소한다.
 
     5xx 로 답하면 조치 가능한 실수가 서버 장애 알림 버킷으로 새어 나간다.
     """

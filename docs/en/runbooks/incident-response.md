@@ -80,8 +80,8 @@ An enforcement point (Memory Service, egress proxy, or an A2A server) cannot rea
 registry in the control plane.
 
 1. While this fires, decisions that are not already cached are **denied** and permissions
-   that were already allowed keep working. A revocation made now is **not applied** until the
-   registry is reachable again.
+   that were already allowed keep working until their grant's `valid_until`. A revocation made
+   now is **not applied** until the registry is reachable again.
 2. Check the control plane process and the network between it and the `component` in the
    alert.
 3. If a revocation is urgent, stop the affected agent's deployment — that does not depend on

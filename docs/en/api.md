@@ -478,9 +478,10 @@ orchestrator:
 Binding a non-loopback address with `access_store` but no `access_enforcer_token` refuses to
 start (`CFG_001`), for the same reason the control token is required there.
 
-**Enforcement is being rolled out point by point.** The registry, identities and records
-below are in place; the enforcement points start consulting it in later releases. Until an
-enforcement point does, a decision here changes nothing that agent can reach.
+**Enforcement is being rolled out point by point.** Memory is enforced today: the Memory
+Service in registry mode asks for every request (see [Memory enforcement](#memory-enforcement)).
+Egress, remote MCP tools and A2A calls are recorded here but not yet enforced, so a decision for
+those kinds changes nothing the agent can reach.
 
 ### Three callers, three credentials
 
@@ -512,10 +513,15 @@ In order, first match wins:
 A revocation therefore beats both the declaration and any grant. For memory, revoking with
 `mode: "rw"` removes writing only — reading stays.
 
-Step 2 counts only for a resource kind whose enforcement point is in place. Each kind's
-declaration check is wired together with the enforcement point that uses it, so the
+Step 2 counts only for a resource kind whose enforcement point is in place — today, `memory`.
+Each kind's declaration check is wired together with the enforcement point that uses it, so the
 declaration and its enforcement cannot drift apart. Until then, a declaration contributes
 nothing for that kind, and a request with no grant is `deny` with `decided_by: "default"`.
+
+Declarations are read on every decision, so a change takes effect without a restart. The
+registry watches the agent manifests and group files and moves its version when one changes,
+which makes enforcement points drop cached decisions. It also moves the version once when it
+starts, because it cannot know what changed while it was down.
 
 ### Expansion ceilings
 
@@ -593,6 +599,20 @@ An unknown or revoked identity is not an error: it is answered `200` with
 `{"agent": null, "decision": "deny", "decided_by": "unknown-identity"}`, so the enforcement
 point can cache the refusal like any other answer.
 
+### `POST /v1/access/identities` — enforcement point
+
+```json
+{"credential": "<the identity presented to the enforcement point>"}
+```
+
+```json
+{"agent": "researcher", "version": 42}
+```
+
+An enforcement point that must resolve a name before it can ask for a decision — the Memory
+Service turns an alias into a space id through the agent's declarations — first learns who is
+asking. An unknown or revoked identity is `200` with `"agent": null`, cacheable like a denial.
+
 ### `GET /v1/access/changes?after=<version>&wait_s=<seconds>` — enforcement point
 
 Long-poll. Answers `{"version": N}` as soon as the registry version moves past `after`, or when
@@ -618,6 +638,35 @@ without it the revocation lasts until lifted.
 
 Lifts a revocation or ends a grant early. The record stays, with `lifted_at` set. `404`
 (`NF_001`) for an unknown id.
+
+### Memory enforcement
+
+The Memory Service switches to **registry mode** when both of these are set in its environment
+(one without the other refuses to start, `CFG_001`):
+
+| Variable | Value |
+|---|---|
+| `MALKUTH_ACCESS_URL` | the control plane, reachable from the Memory Service |
+| `MALKUTH_ACCESS_ENFORCER_TOKEN` | the control plane's `access_enforcer_token` |
+
+In registry mode:
+
+- **No memory tokens are issued.** An agent presents the identity its deployment injected;
+  the control plane passes it as `MALKUTH_MEMORY_TOKEN` when a registry is configured, and never
+  falls back to a static token.
+- **Every request is decided.** The service resolves the alias through the agent's current
+  declarations, then asks for `ro` (read, search, latest) or `rw` (append) on that space id.
+  A denial is the usual `401` with `MEM_001`, and the audit log records it.
+- **A revocation applies to the next request** of a running agent, and so does a `rw`→`ro`
+  demotion — reads keep working, writes stop. Nothing restarts.
+- **Searching without naming spaces skips spaces that are not allowed now**, rather than failing
+  the whole search. `GET /v1/spaces` lists what is allowed, with the mode actually permitted.
+- **The identity outlives a Memory Service restart.** It lives in the control plane.
+- **While the registry is unreachable**, decisions already cached keep working and anything not
+  yet decided is denied. A cached decision is still dropped at its `valid_until`.
+
+The service follows the change feed while it runs. When the feed is lost but the registry still
+answers, cached decisions older than two seconds are asked again.
 
 ## Operational notes
 

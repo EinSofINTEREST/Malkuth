@@ -105,7 +105,9 @@ def test_an_atomically_replaced_manifest_is_visible_in_the_running_container(wor
     before = yaml.safe_load(docker("exec", container, "cat", MANIFEST_MOUNT_PATH))
 
     # 실제 저작 경로 — 임시 파일에 쓰고 rename 으로 교체한다
-    document = catalog.agent("claude-code").model_dump(mode="json", by_alias=True, exclude_none=True)
+    document = catalog.agent("claude-code").model_dump(
+        mode="json", by_alias=True, exclude_none=True
+    )
     document["metadata"]["version"] = "9.9.9"
     document["metadata"]["description"] = "replaced while the container runs"
     Author(catalog=catalog).save_agent("claude-code", AgentManifest.model_validate(document))

@@ -55,6 +55,7 @@ def test_caller_fixable_failures_are_4xx(category, code, expected):
         (ErrorCategory.GRAPH, ErrorCode.GRAPH_006),
         (ErrorCategory.RUNTIME, ErrorCode.RT_010),
         (ErrorCategory.RUNTIME, ErrorCode.RT_011),
+        (ErrorCategory.RUNTIME, ErrorCode.RT_012),
     ],
 )
 def test_a_state_conflict_is_409_even_though_its_category_is_5xx(category, code):

@@ -541,6 +541,57 @@ class GroupQuotas(BaseModel):
         return ResourceSpec(memory=self.memory).memory_bytes
 
 
+class CeilingMemory(BaseModel):
+    """One memory space the permission agent may grant."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    space: str = Field(pattern=r"^(local|group|global):[^:\s*]+:[^:\s*]+$")
+    """레지스트리 대상 이름 — Memory Service 의 space id (``scope:owner:alias``).
+
+    형식을 강제한다: 와일드카드나 빈 조각을 받으면 상한이 "어느 space 든" 이 된다. run scope 는
+    run 이 끝나면 사라지므로 상한에 두지 않는다."""
+    mode: MemoryMode = MemoryMode.RO
+
+
+class AccessCeiling(BaseModel):
+    """The most a permission agent may grant a group's members at run time.
+
+    실행 중 권한 확장의 상한 (01 Access Control). 상한은 **레지스트리가 결정적으로** 강제한다 —
+    확장 요청은 신뢰할 수 없는 입력이므로 한계를 권한 에이전트의 판단에 맡기지 않는다.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    max_ttl_s: int = Field(gt=0, le=7 * 24 * 3600)
+    """부여 만료의 상한 — 만료 없는 부여는 없다."""
+    memory: tuple[CeilingMemory, ...] = ()
+    egress: tuple[str, ...] = ()
+    """목적지 ``host`` 또는 ``host:port``."""
+    mcp_tool: tuple[str, ...] = ()
+    """``server/tool`` — 원격 MCP 만."""
+    a2a: tuple[str, ...] = ()
+    """피호출자 에이전트 이름."""
+
+    @field_validator("egress", "mcp_tool", "a2a")
+    @classmethod
+    def _no_blank_targets(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        # 빈 문자열이나 와일드카드를 허용하면 상한이 "무엇이든" 이 된다
+        for value in values:
+            if not value.strip() or "*" in value:
+                raise ValueError("ceiling targets must be explicit — no blanks or wildcards")
+        return values
+
+
+class GroupAccess(BaseModel):
+    """Access-control declarations scoped to a group."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    ceiling: AccessCeiling | None = None
+    """없으면 이 그룹의 멤버에게 실행 중 확장은 없다."""
+
+
 class GroupSpec(BaseModel):
     """Group-scoped resources.
 
@@ -553,6 +604,7 @@ class GroupSpec(BaseModel):
     secrets: tuple[str, ...] = ()
     memory: MemorySpec = Field(default_factory=MemorySpec)
     artifacts: ArtifactSpec = Field(default_factory=ArtifactSpec)
+    access: GroupAccess = Field(default_factory=GroupAccess)
 
 
 class GroupManifest(BaseModel):

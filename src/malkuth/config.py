@@ -154,6 +154,14 @@ class OrchestratorConfig(BaseModel):
     """Control Plane 의 Bearer 토큰. 이 표면은 파일을 쓰고 컨테이너를 띄우므로
     (#242~) 무인증으로 두지 않는다. loopback 밖으로 bind 하면서 토큰이 없으면
     진입점이 기동을 거부한다 — `MALKUTH_ORCHESTRATOR__CONTROL_TOKEN` 으로 준다."""
+    access_store: str | None = Field(default=None, min_length=1)
+    """권한 레지스트리 저장소 경로 (sqlite) — 에이전트 신원과 부여·회수 기록 (#277). 없으면 권한
+    표면을 열지 않는다. 신원이 재시작을 넘어야 하므로 `run_store` 와 같은 파일 경로 규칙."""
+    access_enforcer_token: str | None = Field(default=None, min_length=1)
+    """강제 지점(Memory Service, 이그레스 프록시, A2A 서버)이 판정 라우트에 내미는 토큰. control
+    plane 토큰과 **달라야** 한다 — 같으면 강제 지점이 운영자 권한을 덤으로 갖는다."""
+    access_stewards: tuple[str, ...] = ()
+    """권한 에이전트로 지정된 에이전트 이름 — 운영자 설정이다. 에이전트가 스스로 지정할 수 없다."""
     max_concurrent_runs: int = Field(default=10, gt=0)
     max_service_runs: int = Field(default=5, gt=0)
     node_timeout_s: float = Field(default=300.0, gt=0)
@@ -182,6 +190,30 @@ class OrchestratorConfig(BaseModel):
             raise ValueError(
                 "orchestrator.material_store must be a file path — "
                 "an in-memory database is private to each connection"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _access_store_is_a_file(self) -> OrchestratorConfig:
+        """신원이 재시작을 넘어야 한다 — in-memory 는 연결마다 별개다."""
+        if self.access_store is None:
+            return self
+        target = self.access_store.strip()
+        if not target or target == MEMORY_DB or target.startswith(f"file:{MEMORY_DB}"):
+            raise ValueError(
+                "orchestrator.access_store must be a file path — "
+                "an in-memory database is private to each connection"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _enforcer_token_is_not_the_control_token(self) -> OrchestratorConfig:
+        """강제 지점의 토큰으로 운영자 라우트를 부를 수 있으면 두 토큰을 나눈 의미가 없다."""
+        if self.access_enforcer_token is not None and (
+            self.access_enforcer_token == self.control_token
+        ):
+            raise ValueError(
+                "orchestrator.access_enforcer_token must differ from orchestrator.control_token"
             )
         return self
 

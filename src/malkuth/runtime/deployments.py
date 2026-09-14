@@ -18,7 +18,7 @@ import threading
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 import structlog
 
+from malkuth.access.registry import ACCESS_CREDENTIAL_ENV
 from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
 from malkuth.runtime.images import image_tag
 from malkuth.runtime.launcher import LaunchedAgent, MemoryEndpoint
@@ -39,6 +40,7 @@ from malkuth.runtime.spec import (
 )
 
 if TYPE_CHECKING:
+    from malkuth.access.registry import AccessRegistry
     from malkuth.authoring import Author
     from malkuth.catalog import Catalog
     from malkuth.core.manifest import AgentManifest
@@ -80,6 +82,9 @@ class DeployedAgent:
     control_port: int
     token: str
     a2a_port: int | None = None
+    access_credential: str = ""
+    """레지스트리가 발급한 에이전트 신원 (#277). 해체 후 재부착이 컨테이너를 다시 세울 때 같은
+    값을 다시 주입해야 해서 `token` 과 같은 이유로 기록에 둔다. 레지스트리는 해시만 갖는다."""
 
 
 @dataclass(frozen=True)
@@ -346,6 +351,9 @@ class DeploymentManager:
     memory_url: str | None = None
     memory_tokens: Mapping[str, str] = field(default_factory=dict)
     images: BuiltImages | None = None
+    access: AccessRegistry | None = None
+    """권한 레지스트리 (#277) — 있으면 에이전트마다 신원을 발급해 주입하고,
+    해체·되감기 때 폐기한다."""
     ready_timeout_s: float = DEFAULT_READY_TIMEOUT_S
     ready_poll_s: float = DEFAULT_READY_POLL_S
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
@@ -418,13 +426,18 @@ class DeploymentManager:
         provisions: dict[str, Provision] = {}
         launched: list[LaunchedAgent] = []
         try:
-            provisions = self._provision(topology, manifests, a2a_secret=record.a2a_secret)
+            credentials = self._issue_identities(manifests, deployment_id)
+            provisions = self._provision(
+                topology, manifests, a2a_secret=record.a2a_secret, credentials=credentials
+            )
             for manifest in manifests:
                 launched.append(await self._launch(manifest, provisions[manifest.name]))
             await self._wait_ready(launched)
         except BaseException as err:
             await self._rollback(launched)
             self._release_ports(provisions)
+            # 되감긴 배포의 신원이 살아 있으면 존재하지 않는 컨테이너 이름으로 강제 지점을 통과한다
+            self._revoke_identities(deployment_id)
             failed = DeploymentRecord(
                 **{
                     **record.__dict__,
@@ -444,7 +457,12 @@ class DeploymentManager:
                 **record.__dict__,
                 "status": DeploymentStatus.READY,
                 "agents": tuple(
-                    _deployed(a, self.launcher.issuer.known(a.agent) or "") for a in launched
+                    _deployed(
+                        a,
+                        self.launcher.issuer.known(a.agent) or "",
+                        provisions[a.agent].env.get(ACCESS_CREDENTIAL_ENV, ""),
+                    )
+                    for a in launched
                 ),
                 "updated_at": _now(),
             }
@@ -458,8 +476,13 @@ class DeploymentManager:
         record = self.get(deployment_id)
         if record.status in (DeploymentStatus.STOPPED, DeploymentStatus.FAILED):
             return record
-        for agent in record.agents:
-            await self.launcher.stop(agent.name)
+        try:
+            for agent in record.agents:
+                await self.launcher.stop(agent.name)
+        finally:
+            # 해체를 요청한 이상 신원은 죽인다 — 정지 하나가 실패했다고 모든 신원이 살아 남으면
+            # 운영자가 끝냈다고 믿는 배포가 강제 지점을 계속 통과한다
+            self._revoke_identities(deployment_id)
         stopped = DeploymentRecord(
             **{**record.__dict__, "status": DeploymentStatus.STOPPED, "updated_at": _now()}
         )
@@ -475,6 +498,9 @@ class DeploymentManager:
         """
         touched: list[DeploymentRecord] = []
         for record in self.store.list():
+            if record.status == DeploymentStatus.STARTING:
+                # 기동 도중 죽은 배포다 — 붙일 기록(신원 포함)이 없으니 발급된 신원만 남는다
+                self._revoke_orphaned_identities(record)
             if record.status != DeploymentStatus.READY:
                 continue
             try:
@@ -527,7 +553,7 @@ class DeploymentManager:
         agents = []
         for agent in record.agents:
             launched = self.launcher.launched.get((agent.name, agent.replica))
-            agents.append(_deployed(launched, agent.token) if launched is not None else agent)
+            agents.append(_relaunched(agent, launched) if launched is not None else agent)
         if tuple(agents) == record.agents:
             return record
         refreshed = DeploymentRecord(
@@ -571,6 +597,7 @@ class DeploymentManager:
         *,
         a2a_secret: str,
         ports: Mapping[str, int] | None = None,
+        credentials: Mapping[str, str] | None = None,
     ) -> dict[str, Provision]:
         """그래프 하나의 에이전트 전부에 대한 선언 마운트와 A2A 배선.
 
@@ -602,6 +629,10 @@ class DeploymentManager:
         for manifest in manifests:
             # base 이미지 기본값(/app/manifest.yaml)이 아니라 디렉토리 마운트 안을 읽게 한다
             env: dict[str, str] = {MANIFEST_ENV: MANIFEST_MOUNT_PATH}
+            credential = (credentials or {}).get(manifest.name)
+            if credential:
+                # 강제 지점에 내미는 에이전트 신원 (01 Access Control 6) — 배선이라 provision 에
+                env[ACCESS_CREDENTIAL_ENV] = credential
             if edges:
                 env[A2A_EDGES_ENV] = ",".join(f"{caller}>{callee}" for caller, callee in edges)
                 env[A2A_SECRET_ENV] = a2a_secret
@@ -619,6 +650,22 @@ class DeploymentManager:
                 image=self._baked_image(manifest),
             )
         return provisions
+
+    def _issue_identities(
+        self, manifests: Sequence[AgentManifest], deployment_id: str
+    ) -> dict[str, str]:
+        """배포할 에이전트마다 신원 하나 — 레지스트리가 없으면 발급하지 않는다."""
+        if self.access is None:
+            return {}
+        return {m.name: self.access.issue_identity(m.name, deployment_id) for m in manifests}
+
+    def _revoke_identities(self, deployment_id: str) -> None:
+        if self.access is not None:
+            self.access.revoke_deployment(deployment_id)
+
+    def _revoke_orphaned_identities(self, record: DeploymentRecord) -> None:
+        if self.access is not None and self.access.revoke_deployment(record.deployment_id):
+            self._bind_log(record).warning("identities of an interrupted deployment revoked")
 
     def _baked_image(self, manifest: AgentManifest) -> str | None:
         """재료가 있으면 프레임워크가 소유한 태그, 없으면 None (declarative agent)."""
@@ -672,7 +719,10 @@ class DeploymentManager:
         topology = self.catalog.graph(record.graph)
         manifests = self._agents_of(topology)
         ports = {a.name: a.a2a_port for a in record.agents if a.a2a_port is not None}
-        provisions = self._provision(topology, manifests, a2a_secret=record.a2a_secret, ports=ports)
+        credentials = {a.name: a.access_credential for a in record.agents if a.access_credential}
+        provisions = self._provision(
+            topology, manifests, a2a_secret=record.a2a_secret, ports=ports, credentials=credentials
+        )
         # 이미지는 **기록에서** 가져온다 — 지금 스토어로 다시 유도하면, 재료·빌드 스토어 없이
         # 재시작한 control plane 에서는 None 이 되어 다음 재시작이 base 이미지로 떨어진다
         deployed = {a.name: a.image for a in record.agents}
@@ -782,7 +832,7 @@ class DeploymentManager:
         return log.bind(deployment_id=record.deployment_id, graph=record.graph)
 
 
-def _deployed(launched: LaunchedAgent, token: str) -> DeployedAgent:
+def _deployed(launched: LaunchedAgent, token: str, access_credential: str = "") -> DeployedAgent:
     return DeployedAgent(
         name=launched.agent,
         replica=launched.replica,
@@ -790,6 +840,22 @@ def _deployed(launched: LaunchedAgent, token: str) -> DeployedAgent:
         image=launched.handle.image,
         control_port=launched.handle.control_port,
         token=token,
+        a2a_port=launched.a2a_port,
+        access_credential=access_credential,
+    )
+
+
+def _relaunched(agent: DeployedAgent, launched: LaunchedAgent) -> DeployedAgent:
+    """컨테이너가 바뀐 자리 — 바뀌는 것은 컨테이너뿐이다.
+
+    나머지는 **기록에서** 잇는다: 새로 만들면 기록에만 있는 값(토큰, 신원)이 조용히 빈 값이 되고,
+    다음 재시작이 신원 없는 컨테이너를 세운다.
+    """
+    return replace(
+        agent,
+        container_id=launched.handle.container_id,
+        image=launched.handle.image,
+        control_port=launched.handle.control_port,
         a2a_port=launched.a2a_port,
     )
 

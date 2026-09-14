@@ -349,3 +349,27 @@ def test_merge_does_not_mutate_the_base():
 
 def test_merge_replaces_a_mapping_with_a_scalar():
     assert merge({"a": {"b": 1}}, {"a": 5}) == {"a": 5}
+
+
+# --- 권한 레지스트리 설정 (#277) ----------------------------------------------------
+
+
+@pytest.mark.parametrize("target", [":memory:", "file::memory:?cache=shared"])
+def test_the_access_store_must_be_a_file(target):
+    from malkuth.config import OrchestratorConfig
+
+    with pytest.raises(ValueError, match="access_store must be a file path"):
+        OrchestratorConfig(access_store=target)
+
+
+def test_the_enforcer_token_must_differ_from_the_control_token():
+    """같으면 강제 지점이 운영자 권한을 덤으로 갖는다."""
+    from malkuth.config import OrchestratorConfig
+
+    with pytest.raises(ValueError, match="must differ"):
+        OrchestratorConfig(control_token="same-token", access_enforcer_token="same-token")
+
+    assert (
+        OrchestratorConfig(control_token="a", access_enforcer_token="b").access_enforcer_token
+        == "b"
+    )

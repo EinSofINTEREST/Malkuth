@@ -19,13 +19,14 @@ from fastapi import APIRouter, Body, Depends, FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field
 
 from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
 from malkuth.core.manifest import AgentManifest
 from malkuth.http_auth import require_token
 from malkuth.http_errors import status_for
 from malkuth.materials import Materials
+from malkuth.orchestrator.bodies import parsed as _parsed
 from malkuth.orchestrator.topology import GraphTopology
 from malkuth.runtime.images import BuildRecord, image_tag
 from malkuth.ui import UI_ROOT
@@ -33,6 +34,7 @@ from malkuth.ui import UI_ROOT
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
 
+    from malkuth.access.registry import AccessRegistry
     from malkuth.authoring import Author
     from malkuth.catalog import Catalog, Listing
     from malkuth.deploy import ValidationReport
@@ -91,6 +93,8 @@ def create_app(
     builder: ImageBuilder | None = None,
     deployments: DeploymentManager | None = None,
     runs: RunService | None = None,
+    access: AccessRegistry | None = None,
+    enforcer_token: str | None = None,
 ) -> FastAPI:
     """Build the Control Plane app.
 
@@ -109,6 +113,9 @@ def create_app(
             ``resume`` 콜백보다 우선한다 — 이 프로세스가 구동 프로세스다.
         author: Validates and writes graphs and manifests (#242). 없으면 쓰기
             라우트를 열지 않는다 — 읽기 전용 배포가 있을 수 있다.
+        access: The access registry (#277). 없으면 권한 라우트를 열지 않는다.
+        enforcer_token: 강제 지점이 판정·변경 알림 라우트에 내미는 토큰 — control plane 토큰과
+            따로 둔다. 강제 지점이 운영자 권한을 덤으로 갖지 않게.
         token: Bearer token every request must present (#241). None 이면 검사하지
             않는다 — 그것이 안전한지(loopback 인지)는 진입점이 판단한다.
             ``/v1/health`` 만 예외다 (02 API Rules 4 와 같은 이유).
@@ -244,6 +251,10 @@ def create_app(
         _mount_deployments(api, deployments)
     if runs is not None:
         _mount_runs(api, runs)
+    if access is not None:
+        from malkuth.orchestrator.access_api import mount_access
+
+        mount_access(app, api, access, enforcer_token=enforcer_token)
 
     app.include_router(api)
     _mount_ui(app)
@@ -339,29 +350,6 @@ def _mount_catalog(api: APIRouter, catalog: Catalog) -> None:
     @api.get("/v1/modules/{module_type}/{name}/{version}")
     async def get_module(module_type: str, name: str, version: str) -> dict[str, Any]:
         return catalog.module(module_type, name, version)
-
-
-def _parsed[T: BaseModel](body: Any, model: type[T]) -> T:
-    """요청 본문을 모델로 — 스키마 위반은 **어느 필드가 왜** 인지 담아 400 으로.
-
-    FastAPI 의 기본 422 는 카탈로그가 깨진 파일에 대해 내는 형식과 다르다 —
-    UI 가 한 가지 모양만 다루게 같은 `VAL_002` details 로 맞춘다. 본문을 ``Any`` 로
-    받는 이유도 같다: ``dict`` 로 받으면 배열·문자열 본문이 여기 오기 전에 422 로 샌다.
-    """
-    try:
-        return model.model_validate(body)
-    except ValidationError as err:
-        raise MalkuthError(
-            category=ErrorCategory.VALIDATION,
-            code=ErrorCode.VAL_002,
-            message="request body failed schema validation",
-            details={
-                "errors": [
-                    {"field": ".".join(str(loc) for loc in e["loc"]), "problem": e["msg"]}
-                    for e in err.errors()
-                ]
-            },
-        ) from err
 
 
 def _report(report: ValidationReport) -> dict[str, Any]:

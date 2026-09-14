@@ -211,7 +211,7 @@ STOR_003: Registry 저장소 오류
 CFG_001: 설정 파싱/검증 실패
 CFG_002: 그룹 정의 오류 / 스코프 해석 실패 (secrets 미해석 포함)
 
-ACC_001: 권한 판정 거부 — 이그레스 목적지·원격 MCP 도구·부여 API 호출 (category: forbidden, HTTP 403).
+ACC_001: 권한 판정 거부 — 이그레스 목적지·원격 MCP 도구 (category: forbidden, HTTP 403).
          메모리와 A2A 거부는 각 도메인 코드(MEM_001, A2A_004)를 쓴다
 ACC_002: 권한 판정 불가 — 레지스트리 도달 불가 + 캐시 없음 → 거부 (category: network, retryable, HTTP 503)
 ACC_003: 부여 거절 — 확장 상한 초과, 권한 에이전트의 자기 부여·자기 상한 변경, 작업 에이전트의
@@ -568,7 +568,7 @@ groups:
           summary: "{{ $labels.component }} cannot reach the access registry — new decisions are denied, revocations are not applied"
 
       - alert: AccessGrantRefusalsSpike
-        expr: increase(malkuth_access_grants_total{op="refuse"}[10m]) > 20
+        expr: sum without (op) (increase(malkuth_access_grants_total{op="refuse"}[10m])) > 20
         labels: {severity: warning}
         annotations:
           summary: "Many refused grants — a worker agent may be trying to talk the permission agent past its ceiling"

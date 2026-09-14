@@ -159,12 +159,47 @@ async def test_an_enforcer_gets_a_decision_for_a_credential(api, registry):
         headers=bearer(ENFORCER),
     )
 
-    assert response.json() | {"version": 0} == {
+    body = response.json()
+    assert body | {"version": 0, "valid_until": 0} == {
         "agent": "worker",
         "decision": "allow",
         "decided_by": STEWARD,
         "version": 0,
+        "valid_until": 0,
     }
+    assert body["valid_until"] is not None, (
+        "부여의 만료가 판정에 실리지 않으면 캐시가 만료를 넘긴다"
+    )
+
+
+@pytest.mark.parametrize(
+    ("path", "body", "token"),
+    [
+        ("/v1/access/revocations", REVOCATION | {"mode": "rw"}, CONTROL),
+        ("/v1/access/grants", GRANT | {"kind": "egress", "target": "api.x"}, "steward"),
+        ("/v1/access/grants", {k: v for k, v in GRANT.items() if k != "mode"}, "steward"),
+        (
+            "/v1/access/decisions",
+            {"credential": "c", "kind": "egress", "target": "api.x", "mode": "ro"},
+            ENFORCER,
+        ),
+        (
+            "/v1/access/decisions",
+            {"credential": "c", "kind": "memory", "target": KNOWLEDGE},
+            ENFORCER,
+        ),
+    ],
+)
+async def test_a_mode_that_does_not_fit_the_kind_is_rejected(api, registry, path, body, token):
+    """``egress, rw`` 를 받아 주면 요청자가 뜻하지 않은 "자원 전체" 기록이 남는다."""
+    if token == "steward":
+        token = registry.issue_identity(STEWARD, "dep-1")
+
+    response = await api.post(path, json=body, headers=bearer(token))
+
+    assert response.status_code == 400, response.text
+    assert response.json()["error"]["code"] == "VAL_002"
+    assert not registry.rules("worker")
 
 
 async def test_an_unknown_credential_is_a_cacheable_deny(api):

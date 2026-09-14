@@ -39,6 +39,19 @@ class Outcome(StrEnum):
     DENY = "deny"
 
 
+def mode_problem(kind: ResourceKind, mode: Mode | None, *, memory_needs_mode: bool) -> str | None:
+    """What is wrong with this (kind, mode) pair, or None.
+
+    모드는 메모리에만 있다. 다른 종류에 모드를 받아 주면 ``egress, rw`` 가 "자원 전체" 기록으로
+    조용히 저장되어, 요청자가 뜻한 것과 다른 권한이 남는다.
+    """
+    if kind is not ResourceKind.MEMORY:
+        return None if mode is None else "mode applies to memory only"
+    if mode is None and memory_needs_mode:
+        return "a memory request must name its mode (ro or rw)"
+    return None
+
+
 OPERATOR = "operator"
 """운영자가 결정한 기록의 ``decided_by``."""
 
@@ -104,6 +117,9 @@ class Decision:
     """판정을 만든 것 — ``declaration`` / ``operator`` / 권한 에이전트 이름 / ``default``."""
     version: int
     """판정 시점의 레지스트리 버전 — 강제 지점이 캐시를 이 번호로 무효화한다."""
+    valid_until: float | None = None
+    """이 판정을 바꿀 수 있는 가장 이른 만료 (epoch 초). 만료는 버전을 올리지 않으므로, 강제 지점은
+    이 시각을 넘겨 판정을 캐시하지 않는다 — 레지스트리에 닿지 않는 동안에도 (자기 시계로 안다)."""
 
     @property
     def allowed(self) -> bool:
@@ -112,6 +128,7 @@ class Decision:
 
 __all__ = [
     "DECLARATION",
+    "mode_problem",
     "OPERATOR",
     "Decision",
     "Effect",

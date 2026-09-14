@@ -34,6 +34,7 @@ from malkuth.access.model import (
     Outcome,
     ResourceKind,
     Rule,
+    mode_problem,
 )
 from malkuth.access.store import Identity
 from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
@@ -76,6 +77,17 @@ def _refused(message: str, **details: Any) -> MalkuthError:
         message=message,
         details=details,
     )
+
+
+def _check_mode(kind: ResourceKind, mode: Mode | None, *, memory_needs_mode: bool) -> None:
+    problem = mode_problem(kind, mode, memory_needs_mode=memory_needs_mode)
+    if problem is not None:
+        raise MalkuthError(
+            category=ErrorCategory.VALIDATION,
+            code=ErrorCode.VAL_002,
+            message=problem,
+            details={"resource": kind.value, "mode": mode.value if mode else None},
+        )
 
 
 def _unknown_identity() -> MalkuthError:
@@ -150,16 +162,22 @@ class AccessRegistry:
     def decide(
         self, agent: str, kind: ResourceKind, target: str, mode: Mode | None = None
     ) -> Decision:
-        """Decide one request — revocation, then declaration, then grant."""
+        """Decide one request — revocation, then declaration, then grant.
+
+        Raises:
+            MalkuthError: VALIDATION/``VAL_002`` if the mode does not fit the kind.
+        """
+        _check_mode(kind, mode, memory_needs_mode=True)
         now = self.clock()
         active = [
             r for r in self.store.rules(agent) if r.active(now) and r.covers(kind, target, mode)
         ]
         version = self.store.version()
+        valid_until = min((r.expires_at for r in active if r.expires_at is not None), default=None)
 
         def answer(outcome: Outcome, decided_by: str) -> Decision:
             self._count_decision(kind, outcome)
-            return Decision(agent, kind, target, mode, outcome, decided_by, version)
+            return Decision(agent, kind, target, mode, outcome, decided_by, version, valid_until)
 
         denial = next((r for r in active if r.effect is Effect.DENY), None)
         if denial is not None:
@@ -188,6 +206,7 @@ class AccessRegistry:
 
         ``mode=rw`` 로 memory 를 회수하면 쓰기만 막고 읽기는 남긴다 (rw → ro 강등).
         """
+        _check_mode(kind, mode, memory_needs_mode=False)
         self.catalog.agent(agent)  # 없는 에이전트에 대한 기록은 만들지 않는다
         now = self.clock()
         rule = Rule(
@@ -245,6 +264,7 @@ class AccessRegistry:
                 NOT_FOUND/``NF_001`` unknown agent.
         """
         steward = self.identify(steward_credential)
+        _check_mode(kind, mode, memory_needs_mode=True)
         try:
             self._check_grant(steward, agent, kind, target, mode, ttl_s)
         except MalkuthError as err:
@@ -290,22 +310,23 @@ class AccessRegistry:
         if steward == agent:
             raise _refused("a permission agent may not grant to itself", agent=agent)
         self.catalog.agent(agent)
-        if kind is ResourceKind.MEMORY and mode is None:
-            raise _refused("a memory grant must name its mode", agent=agent)
-        ceiling = self._ceiling_for(agent, kind, target, mode)
-        if ceiling is None:
+        ceilings = self._ceilings_for(agent, kind, target, mode)
+        if not ceilings:
             raise _refused(
                 "grant exceeds the expansion ceiling",
                 agent=agent,
                 resource=kind.value,
                 target=target,
             )
-        if not 0 < ttl_s <= ceiling.max_ttl_s:
+        # 여러 상한이 같은 대상을 덮으면 가장 엄한 만료가 이긴다 — 먼저 찾은 것을 쓰면 global 의
+        # 넉넉한 TTL 이 그룹이 좁혀 둔 TTL 을 건너뛴다
+        max_ttl_s = min(ceiling.max_ttl_s for ceiling in ceilings)
+        if not 0 < ttl_s <= max_ttl_s:
             raise _refused(
                 "grant lifetime exceeds the ceiling",
                 agent=agent,
                 ttl_s=ttl_s,
-                max_ttl_s=ceiling.max_ttl_s,
+                max_ttl_s=max_ttl_s,
             )
         now = self.clock()
         if any(
@@ -315,12 +336,13 @@ class AccessRegistry:
             # 운영자가 회수한 것을 권한 에이전트가 되살리지 못한다 — 되돌리는 것은 운영자다
             raise _refused("permission is revoked by an operator", agent=agent, target=target)
 
-    def _ceiling_for(
+    def _ceilings_for(
         self, agent: str, kind: ResourceKind, target: str, mode: Mode | None
-    ) -> AccessCeiling | None:
-        """요청을 덮는 상한 — 소속 그룹과 global 의 선언에서 찾는다. 없으면 None."""
+    ) -> list[AccessCeiling]:
+        """요청을 덮는 상한 **전부** — 소속 그룹과 global 의 선언에서 찾는다."""
         group = self.catalog.agent(agent).metadata.group
         names = [RESERVED_GLOBAL_GROUP] + ([group] if group else [])
+        covering: list[AccessCeiling] = []
         for name in names:
             try:
                 ceiling = self.catalog.group(name).spec.access.ceiling
@@ -329,8 +351,8 @@ class AccessRegistry:
                     continue
                 raise
             if ceiling is not None and _ceiling_covers(ceiling, kind, target, mode):
-                return ceiling
-        return None
+                covering.append(ceiling)
+        return covering
 
     # --- 조회와 변경 알림 --------------------------------------------------------
 

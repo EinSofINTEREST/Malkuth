@@ -12,12 +12,12 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar
 
 from fastapi import APIRouter, Body, Depends, FastAPI, Query, Request, status
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from malkuth.access.model import Mode, ResourceKind, Rule
+from malkuth.access.model import Mode, ResourceKind, Rule, mode_problem
 from malkuth.core.errors import ErrorCode, MalkuthError
 from malkuth.http_auth import presented_token, require_token
 from malkuth.orchestrator.bodies import parsed
@@ -34,21 +34,30 @@ _TARGET = Field(min_length=1, max_length=512, pattern=r"^[^\s\x00-\x1f]+$")
 class _Request(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
+    kind: ResourceKind
+    mode: Mode | None = None
+    memory_needs_mode: ClassVar[bool] = True
+
+    @model_validator(mode="after")
+    def _mode_fits_the_kind(self) -> _Request:
+        problem = mode_problem(self.kind, self.mode, memory_needs_mode=self.memory_needs_mode)
+        if problem is not None:
+            raise ValueError(problem)
+        return self
+
 
 class RevocationRequest(_Request):
+    memory_needs_mode: ClassVar[bool] = False  # 모드 없는 메모리 회수 = 읽기·쓰기 모두 회수
+
     agent: str
-    kind: ResourceKind
     target: str = _TARGET
-    mode: Mode | None = None
     reason: str = Field(min_length=1, max_length=1000)
     expires_in_s: float | None = Field(default=None, gt=0)
 
 
 class GrantRequest(_Request):
     agent: str
-    kind: ResourceKind
     target: str = _TARGET
-    mode: Mode | None = None
     ttl_s: float = Field(gt=0)
     reason: str = Field(min_length=1, max_length=1000)
     requested_by: str = Field(min_length=1, max_length=200)
@@ -56,9 +65,7 @@ class GrantRequest(_Request):
 
 class DecisionRequest(_Request):
     credential: str = Field(min_length=1, max_length=512)
-    kind: ResourceKind
     target: str = _TARGET
-    mode: Mode | None = None
 
 
 def rule_view(rule: Rule) -> dict[str, Any]:
@@ -124,6 +131,7 @@ def mount_access(
                 "decision": "deny",
                 "decided_by": "unknown-identity",
                 "version": registry.version(),
+                "valid_until": None,
             }
         decision = registry.decide(agent, asked.kind, asked.target, asked.mode)
         return {
@@ -131,6 +139,7 @@ def mount_access(
             "decision": decision.outcome.value,
             "decided_by": decision.decided_by,
             "version": decision.version,
+            "valid_until": decision.valid_until,
         }
 
     @enforcer.get("/v1/access/changes")

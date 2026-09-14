@@ -21,7 +21,7 @@ from malkuth.access.registry import AccessRegistry, credential_hash
 from malkuth.access.store import InMemoryAccessStore, SqliteAccessStore
 from malkuth.catalog import Catalog
 from malkuth.core.errors import ErrorCode, MalkuthError
-from tests.fixtures.access import KNOWLEDGE, STEWARD, access_workspace
+from tests.fixtures.access import KNOWLEDGE, STEWARD, access_workspace, group, write
 
 
 @pytest.fixture
@@ -184,7 +184,6 @@ def test_a_read_grant_does_not_open_writes(registry, steward):
             {"kind": ResourceKind.EGRESS, "target": "api.search.example.com", "ttl_s": 601},
             "TTL 초과",
         ),
-        ({"kind": ResourceKind.MEMORY, "target": KNOWLEDGE}, "memory 부여에 모드 없음"),
     ],
 )
 def test_grants_beyond_the_ceiling_are_refused(registry, steward, kwargs, why):
@@ -205,6 +204,76 @@ def test_grants_beyond_the_ceiling_are_refused(registry, steward, kwargs, why):
 
     assert err.code == ErrorCode.ACC_003, why
     assert not registry.rules("worker"), "거절된 부여가 기록으로 남았다"
+
+
+@pytest.mark.parametrize(
+    ("kind", "target", "mode"),
+    [
+        (ResourceKind.MEMORY, KNOWLEDGE, None),
+        (ResourceKind.EGRESS, "api.search.example.com", Mode.RW),
+    ],
+)
+def test_a_grant_whose_mode_does_not_fit_the_kind_is_invalid(registry, steward, kind, target, mode):
+    err = refused(
+        lambda: registry.grant(
+            steward, "worker", kind, target, mode=mode, ttl_s=60, reason="r", requested_by="w"
+        )
+    )
+
+    assert err.code == ErrorCode.VAL_002
+    assert not registry.rules("worker")
+
+
+def test_revoking_and_deciding_check_the_mode_too(registry):
+    for call in (
+        lambda: registry.revoke("worker", ResourceKind.A2A, "loner", mode=Mode.RO, reason="r"),
+        lambda: registry.decide("worker", ResourceKind.MEMORY, KNOWLEDGE, None),
+        lambda: registry.decide("worker", ResourceKind.EGRESS, "api.x", Mode.RW),
+    ):
+        assert refused(call).code == ErrorCode.VAL_002
+
+
+@pytest.mark.parametrize(("global_ttl", "strictest"), [(3600, 600), (60, 60)])
+def test_the_strictest_covering_ceiling_bounds_the_lifetime(
+    registry, steward, workspace, global_ttl, strictest
+):
+    """global 과 그룹이 같은 대상을 덮으면 어느 쪽이 먼저든 더 엄한 TTL 이 이긴다 (그룹은 600)."""
+    ceiling = {"max_ttl_s": global_ttl, "egress": ["api.search.example.com"]}
+    write(workspace / "groups" / "global.yaml", group("global", {"access": {"ceiling": ceiling}}))
+
+    err = refused(
+        lambda: registry.grant(
+            steward,
+            "worker",
+            ResourceKind.EGRESS,
+            "api.search.example.com",
+            ttl_s=strictest + 1,
+            reason="r",
+            requested_by="worker",
+        )  # fmt: skip
+    )
+
+    assert err.code == ErrorCode.ACC_003
+    assert err.details["max_ttl_s"] == strictest
+
+
+def test_a_decision_carries_the_earliest_expiry_that_could_change_it(registry, steward, clock):
+    """만료는 버전을 올리지 않는다 — 강제 지점은 이 시각을 넘겨 캐시하면 안 된다."""
+    assert (
+        registry.decide("worker", ResourceKind.EGRESS, "api.search.example.com").valid_until is None
+    )
+
+    registry.grant(
+        steward, "worker", ResourceKind.EGRESS, "api.search.example.com",
+        ttl_s=300, reason="r", requested_by="worker",
+    )  # fmt: skip
+    registry.revoke(
+        "worker", ResourceKind.EGRESS, "api.search.example.com", reason="r", expires_in_s=120
+    )
+
+    assert registry.decide("worker", ResourceKind.EGRESS, "api.search.example.com").valid_until == (
+        clock.now + 120
+    )
 
 
 def test_the_global_ceiling_applies_to_everyone_with_its_own_ttl(registry, steward):

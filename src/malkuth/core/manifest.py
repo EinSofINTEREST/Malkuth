@@ -546,8 +546,11 @@ class CeilingMemory(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    space: str = Field(min_length=1)
-    """레지스트리 대상 이름 — Memory Service 의 space id (``scope:owner:alias``)."""
+    space: str = Field(pattern=r"^(local|group|global):[^:\s*]+:[^:\s*]+$")
+    """레지스트리 대상 이름 — Memory Service 의 space id (``scope:owner:alias``).
+
+    형식을 강제한다: 와일드카드나 빈 조각을 받으면 상한이 "어느 space 든" 이 된다. run scope 는
+    run 이 끝나면 사라지므로 상한에 두지 않는다."""
     mode: MemoryMode = MemoryMode.RO
 
 

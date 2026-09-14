@@ -367,3 +367,89 @@ async def test_the_served_app_drives_runs_when_deployments_are_configured(tmp_pa
 
     assert resumed.status_code == 404, resumed.text
     assert submitted.status_code == 404, submitted.text
+
+
+# --- 권한 레지스트리 조립 (#277) -----------------------------------------------------
+
+
+def _serve_with(tmp_path, monkeypatch, orchestrator: dict):
+    """진입점을 데몬 없이 돌려 조립된 앱과 배포 관리자, 노출되는 계측기를 돌려준다."""
+    from malkuth.observability.metrics import Metrics
+
+    write_config(
+        tmp_path, {"run_store": str(tmp_path / "runs.db"), "control_port": 18999, **orchestrator}
+    )
+    monkeypatch.setenv("MALKUTH_ENV", "local")
+    monkeypatch.setenv("MALKUTH_CONFIG_DIR", str(tmp_path))
+    served_metrics = Metrics()
+    monkeypatch.setattr(entrypoint, "_setup_observability", lambda: served_metrics)
+
+    class Deployments:
+        author = None
+        images = None
+        access = None
+        launcher = None
+
+        def in_use(self, kind: str, name: str) -> bool:
+            return False
+
+    deployments = Deployments()
+    monkeypatch.setattr(entrypoint, "_deployment_manager", lambda *a, **k: deployments)
+    captured: dict = {}
+    monkeypatch.setattr(
+        entrypoint, "_run_service", lambda *a, **k: captured.update(run_metrics=k.get("metrics"))
+    )
+    monkeypatch.setattr(entrypoint.uvicorn, "run", lambda app, **_kwargs: captured.update(app=app))
+
+    entrypoint.main()
+    return captured, deployments, served_metrics
+
+
+async def test_the_registry_reaches_deployments_and_the_served_app(tmp_path, monkeypatch):
+    """배포에 물리지 않으면 신원이 발급되지 않고, 앱에 없으면 강제 지점이 물을 곳이 없다."""
+    import httpx
+
+    from malkuth.access.registry import AccessRegistry
+
+    captured, deployments, served_metrics = _serve_with(
+        tmp_path,
+        monkeypatch,
+        {
+            "access_store": str(tmp_path / "access.db"),
+            "access_enforcer_token": "enforcer",
+            "access_stewards": ["permission-agent"],
+        },
+    )
+
+    assert isinstance(deployments.access, AccessRegistry)
+    assert deployments.access.stewards == frozenset({"permission-agent"})
+    # 계측기는 노출되는 것 하나 — 따로 만들면 기록은 되는데 아무도 못 본다
+    assert deployments.access.metrics is served_metrics
+    assert captured["run_metrics"] is served_metrics
+    transport = httpx.ASGITransport(app=captured["app"])
+    async with httpx.AsyncClient(transport=transport, base_url="http://cp") as api:
+        response = await api.get(
+            "/v1/access/changes?wait_s=0", headers={"Authorization": "Bearer enforcer"}
+        )
+    assert response.status_code == 200
+
+
+def test_an_exposed_registry_without_an_enforcer_token_is_refused(tmp_path, monkeypatch):
+    write_config(
+        tmp_path,
+        {
+            "run_store": str(tmp_path / "runs.db"),
+            "control_host": "0.0.0.0",  # noqa: S104 — 거절되는지 보려는 설정
+            "control_token": "control",
+            "access_store": str(tmp_path / "access.db"),
+        },
+    )
+    monkeypatch.setenv("MALKUTH_ENV", "local")
+    monkeypatch.setenv("MALKUTH_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr(entrypoint, "_setup_observability", lambda: None)
+
+    with pytest.raises(MalkuthError) as exc_info:
+        entrypoint.main()
+
+    assert exc_info.value.code == ErrorCode.CFG_001
+    assert exc_info.value.details["setting"] == "orchestrator.access_enforcer_token"

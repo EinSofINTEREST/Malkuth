@@ -77,7 +77,8 @@ def _setup_observability() -> Metrics:
 
 def main() -> None:
     """Serve the Control Plane over the configured run store."""
-    _setup_observability()
+    # 계측기는 **노출되는 것 하나**를 모두가 쓴다 — 저마다 새로 만들면 기록은 되는데 아무도 못 본다
+    metrics = _setup_observability()
     config = load_config(
         resolve_environment(),
         config_dir=os.environ.get(CONFIG_DIR_ENV, DEFAULT_CONFIG_DIR),
@@ -98,11 +99,23 @@ def main() -> None:
             host=orchestrator.control_host,
         )
 
+    if (
+        orchestrator.access_store is not None
+        and orchestrator.access_enforcer_token is None
+        and not is_loopback(orchestrator.control_host)
+    ):
+        # 판정 라우트를 무인증으로 밖에 열면 누구나 자격의 유효성을 떠볼 수 있다
+        raise config_missing_enforcer_token(orchestrator.control_host)
+
     store = SqliteRunStore(path=orchestrator.run_store)
     # 설정의 registry.roots 는 상대 경로다 — 작업 디렉토리가 아니라 레포 루트 기준
     root = Path(os.environ.get(ROOT_ENV, ".")).resolve()
     catalog = Catalog.from_config(config.registry.roots, base=root)
     deployments = _deployment_manager(config, catalog, store_root=root, orchestrator=orchestrator)
+    access = _access_registry(orchestrator, catalog, metrics=metrics)
+    if deployments is not None:
+        # 배포가 에이전트마다 신원을 발급해 주입한다 (#277)
+        deployments.access = access
     # 실행 중 run 과 배포가 참조하는 선언은 지우거나 덮어쓰지 못한다 (#242 리뷰 / #243)
     pins: list[InUse] = [run_backed(store, catalog)]
     if deployments is not None:
@@ -116,7 +129,11 @@ def main() -> None:
     if deployments is not None:
         # manager 는 검증에 author 를 쓴다 — 서로를 가리키므로 여기서 잇는다
         deployments.author = author
-    runs = None if deployments is None else _run_service(config, catalog, deployments, store=store)
+    runs = (
+        None
+        if deployments is None
+        else _run_service(config, catalog, deployments, store=store, metrics=metrics)
+    )
     builder = _image_builder(orchestrator, catalog, author)
     if deployments is not None:
         # 배포는 굽지 않는다 — 굽혔는지 **묻기만** 한다 (#266). 빌더가 없으면 빌드 표면이
@@ -137,6 +154,8 @@ def main() -> None:
             builder=builder,
             deployments=deployments,
             runs=runs,
+            access=access,
+            enforcer_token=orchestrator.access_enforcer_token,
         ),
         host=orchestrator.control_host,
         port=orchestrator.control_port,
@@ -183,10 +202,14 @@ def _deployment_manager(
 
 
 def _run_service(
-    config: Any, catalog: Catalog, deployments: DeploymentManager, *, store: SqliteRunStore
+    config: Any,
+    catalog: Catalog,
+    deployments: DeploymentManager,
+    *,
+    store: SqliteRunStore,
+    metrics: Any = None,
 ) -> RunService:
     """이 프로세스가 run 을 구동한다 — 노드 호출은 배포된 컨테이너로 라우팅된다 (#244)."""
-    from malkuth.observability.metrics import Metrics
     from malkuth.orchestrator.checkpoint import build_checkpointer
     from malkuth.orchestrator.run import RunManager
     from malkuth.orchestrator.runs import RoutedClients, RunService
@@ -205,7 +228,7 @@ def _run_service(
             orchestrator.checkpointer, url=orchestrator.checkpointer_url
         ),
         node_timeout_s=orchestrator.node_timeout_s,
-        metrics=Metrics(),
+        metrics=metrics,
     )
     return RunService(catalog=catalog, deployments=deployments, submitter=submitter, store=store)
 
@@ -240,6 +263,36 @@ def _material_store(orchestrator: Any) -> MaterialStore | None:
     from malkuth.materials import SqliteMaterialStore
 
     return SqliteMaterialStore(path=orchestrator.material_store)
+
+
+def _access_registry(orchestrator: Any, catalog: Catalog, *, metrics: Any = None) -> Any:
+    """권한 레지스트리 (#277) — `access_store` 가 없으면 권한 표면을 열지 않는다."""
+    if orchestrator.access_store is None:
+        log.warning("access control disabled — orchestrator.access_store is not set")
+        return None
+    from malkuth.access.registry import AccessRegistry
+    from malkuth.access.store import SqliteAccessStore
+
+    return AccessRegistry(
+        store=SqliteAccessStore(path=orchestrator.access_store),
+        catalog=catalog,
+        stewards=frozenset(orchestrator.access_stewards),
+        metrics=metrics,
+    )
+
+
+def config_missing_enforcer_token(host: str) -> Exception:
+    """판정 라우트를 무인증으로 loopback 밖에 열지 않는다."""
+    from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
+
+    return MalkuthError(
+        category=ErrorCategory.CONFIG,
+        code=ErrorCode.CFG_001,
+        message=(
+            "access registry bound outside loopback requires orchestrator.access_enforcer_token"
+        ),
+        details={"setting": "orchestrator.access_enforcer_token", "host": host},
+    )
 
 
 def is_loopback(host: str) -> bool:

@@ -356,10 +356,11 @@ class Author:
     # --- 내부 ---------------------------------------------------------------
 
     def _graph_path(self, name: str) -> Path:
-        return self.catalog.roots.graphs / f"{name}.yaml"
+        # 경로 규칙은 카탈로그 한 곳에 있다 — 읽기와 쓰기·삭제가 같은 검사를 지난다 (#273)
+        return self.catalog.graph_path(name)
 
     def _agent_path(self, name: str) -> Path:
-        return self.catalog.roots.agents / name / "manifest.yaml"
+        return self.catalog.agent_path(name)
 
     def _existing[T: BaseModel](self, name: str, read: Callable[[str], T]) -> T | None:
         """저장된 같은 이름 — 없으면 None.

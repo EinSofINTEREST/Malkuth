@@ -17,6 +17,9 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 RESERVED_GLOBAL_GROUP = "global"
 
 _NAME_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+NAME_PATTERN = _NAME_PATTERN
+"""선언 이름 규칙 — 소문자·숫자·하이픈. 이름이 곧 파일 경로가 되므로 경로 구분자와 점 구간이
+들어갈 수 없다는 것이 이 규칙의 보안상 의미다 (#273)."""
 _SEMVER_PATTERN = re.compile(r"^\d+\.\d+\.\d+$")
 _MODULE_REF_PATTERN = re.compile(
     r"^(?P<type>skillsets|promptsets|memorysets|agents|graphs)/"

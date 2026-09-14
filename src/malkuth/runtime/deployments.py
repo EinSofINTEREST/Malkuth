@@ -687,7 +687,7 @@ class DeploymentManager:
         roots = self.catalog.roots
         mounts: list[Mapping[str, Any]] = [
             {
-                "name": str((roots.agents / agent / "manifest.yaml").resolve()),
+                "name": str(self.catalog.agent_path(agent).resolve()),
                 "mount_path": MANIFEST_MOUNT_PATH,
                 "read_only": True,
             }

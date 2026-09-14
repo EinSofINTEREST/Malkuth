@@ -19,7 +19,7 @@ import yaml
 from pydantic import BaseModel, ValidationError
 
 from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
-from malkuth.core.manifest import AgentManifest, GroupManifest
+from malkuth.core.manifest import NAME_PATTERN, AgentManifest, GroupManifest
 from malkuth.modules.promptset import PromptsetManifest
 from malkuth.modules.registry import ModuleRegistry, RegistryRoots
 from malkuth.orchestrator.topology import GraphTopology
@@ -80,6 +80,35 @@ def not_found(kind: str, name: str) -> MalkuthError:
         message=f"unknown {kind}: {name}",
         details={"kind": kind, "name": name},
     )
+
+
+def invalid_name(kind: str, name: str) -> MalkuthError:
+    """이름이 선언 이름 규칙을 어김 — 경로가 되기 전에 막는다 (#273)."""
+    return MalkuthError(
+        category=ErrorCategory.VALIDATION,
+        code=ErrorCode.VAL_002,
+        message=f"invalid {kind} name — lowercase letters, digits and single hyphens only",
+        details={"kind": kind, "name": name},
+    )
+
+
+def contained(root: Path, kind: str, name: str, *parts: str) -> Path:
+    """선언 파일의 경로 — 이름을 검증하고, 해석한 경로가 루트 안에 머무는지 확인한다.
+
+    이름이 URL 에서 곧장 파일 경로가 된다. 검증 없이 이으면 ``..`` 가 루트 밖을 가리켜,
+    읽기는 루트 밖 파일을 파싱해 오류 세부로 흘리고 삭제는 루트 밖 파일을 지웠다 (#273).
+    규칙 검사가 1차 방어이고, 해석한 경로의 포함 여부는 규칙이 느슨해져도 남는 2차 방어다.
+
+    Raises:
+        MalkuthError: VALIDATION/``VAL_002`` if the name breaks the rule or escapes the root.
+    """
+    if not isinstance(name, str) or not NAME_PATTERN.fullmatch(name):
+        raise invalid_name(kind, str(name))
+    path = root.joinpath(*parts) if parts else root / name
+    base = root.resolve()
+    if not path.resolve().is_relative_to(base):
+        raise invalid_name(kind, name)
+    return path
 
 
 def _invalid(path: Path, err: ValidationError) -> MalkuthError:
@@ -201,8 +230,12 @@ class Catalog:
             located=lambda path: path.parent.name,
         )
 
+    def agent_path(self, name: str) -> Path:
+        """에이전트 매니페스트 경로 — 이름 검증과 루트 포함 확인을 거친다."""
+        return contained(self.roots.agents, "agent", name, name, "manifest.yaml")
+
     def agent(self, name: str) -> AgentManifest:
-        path = self.roots.agents / name / "manifest.yaml"
+        path = self.agent_path(name)
         if not path.is_file():
             raise not_found("agent", name)
         return _checked(path, AgentManifest, lambda m: m.name, located=name)
@@ -217,8 +250,12 @@ class Catalog:
             located=lambda path: path.stem,
         )
 
+    def graph_path(self, name: str) -> Path:
+        """그래프 선언 경로 — 이름 검증과 루트 포함 확인을 거친다."""
+        return contained(self.roots.graphs, "graph", name, f"{name}.yaml")
+
     def graph(self, name: str) -> GraphTopology:
-        path = self.roots.graphs / f"{name}.yaml"
+        path = self.graph_path(name)
         if not path.is_file():
             raise not_found("graph", name)
         return _checked(path, GraphTopology, lambda g: g.metadata.name, located=name)
@@ -233,8 +270,12 @@ class Catalog:
             located=lambda path: path.stem,
         )
 
+    def group_path(self, name: str) -> Path:
+        """그룹 선언 경로 — 이름 검증과 루트 포함 확인을 거친다."""
+        return contained(self.roots.groups, "group", name, f"{name}.yaml")
+
     def group(self, name: str) -> GroupManifest:
-        path = self.roots.groups / f"{name}.yaml"
+        path = self.group_path(name)
         if not path.is_file():
             raise not_found("group", name)
         return _checked(path, GroupManifest, lambda g: g.metadata.name, located=name)

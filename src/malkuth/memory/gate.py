@@ -134,7 +134,7 @@ def _log_decision(
         "resource": ResourceKind.MEMORY.value,
         "target": space.space_id,
         "memory_space": space.alias,
-        "mode": mode.value,
+        "access_mode": mode.value,
         "decision": "allow" if allowed else "deny",
         "decision_source": source.value,
     }

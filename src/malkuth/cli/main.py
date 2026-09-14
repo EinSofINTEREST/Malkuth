@@ -568,7 +568,18 @@ def read_materials(directory: Path) -> dict[str, str]:
     files: dict[str, str] = {}
     for path in sorted(directory.rglob("*")):
         relative = path.relative_to(directory)
-        if not path.is_file() or _SKIPPED_MATERIAL_PARTS & set(relative.parts):
+        if _SKIPPED_MATERIAL_PARTS & set(relative.parts):
+            continue
+        if path.is_symlink():
+            # 링크를 따라가면 디렉토리 밖의 파일(자격증명 등)을 재료로 올린다 — 따라가지 않고
+            # 거절한다. 조용히 건너뛰면 올라간 재료에 무엇이 빠졌는지 모른다
+            raise MalkuthError(
+                category=ErrorCategory.VALIDATION,
+                code=ErrorCode.VAL_002,
+                message="materials must not contain symbolic links",
+                details={"path": relative.as_posix()},
+            )
+        if not path.is_file():
             continue
         try:
             files[relative.as_posix()] = path.read_text(encoding="utf-8")

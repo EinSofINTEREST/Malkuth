@@ -130,6 +130,22 @@ def test_a_binary_file_is_refused_with_its_path(materials):
     assert exc_info.value.details == {"path": "src/blob.bin"}
 
 
+@pytest.mark.parametrize("target_kind", ["file", "directory"])
+def test_a_symbolic_link_is_refused_instead_of_followed(materials, tmp_path, target_kind):
+    """링크를 따라가면 디렉토리 밖의 자격증명이 재료로 올라간다 (CWE-59)."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "credentials").write_text("SECRET=1\n", encoding="utf-8")
+    target = outside / "credentials" if target_kind == "file" else outside
+    (materials / "src" / "linked").symlink_to(target)
+
+    with pytest.raises(MalkuthError) as exc_info:
+        read_materials(materials)
+
+    assert exc_info.value.code == ErrorCode.VAL_002
+    assert exc_info.value.details == {"path": "src/linked"}
+
+
 # --- CLI 표면 -------------------------------------------------------------------
 
 

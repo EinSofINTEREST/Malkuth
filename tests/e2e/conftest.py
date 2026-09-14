@@ -99,7 +99,9 @@ def write_config(
     return directory
 
 
-def start_plane(config_dir: Path, tokens_path: Path) -> subprocess.Popen[str]:
+def start_plane(
+    config_dir: Path, tokens_path: Path, *, env: dict[str, str] | None = None
+) -> subprocess.Popen[str]:
     return subprocess.Popen(  # noqa: S603
         [sys.executable, "-m", "malkuth.orchestrator"],
         cwd=REPO_ROOT,
@@ -117,6 +119,7 @@ def start_plane(config_dir: Path, tokens_path: Path) -> subprocess.Popen[str]:
             # secrets 의 값 원천은 control plane 의 환경이다 (02 Secrets Injection)
             "ANTHROPIC_API_KEY": "e2e-fake-key",
             "SEARCH_API_KEY": "e2e-search-key",
+            **(env or {}),
         },
     )
 

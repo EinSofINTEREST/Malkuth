@@ -175,7 +175,8 @@ spec:
         writers: [librarian]     # write 가능 에이전트 명시 — 미지정 시 read-only
 ```
 
-1. 미선언/비소속 space 접근은 `MEM_001` 로 거부 — 배포 검증에서 writers/그룹 멤버십 확인
+1. 미선언/비소속 space 접근은 `MEM_001` 로 거부 — 배포 검증에서 writers/그룹 멤버십 확인.
+   실행 중 회수·강등·확장은 Access Enforcement 절을 따른다
 2. Space 의 실체는 `(scope, 이름)` 으로 식별 — 여러 그래프가 같은 group/global space 를
    쓰면 같은 지식 베이스를 공유한다
 3. `as` 별칭은 에이전트 관점의 논리 이름 — promptset/skill 코드는 별칭만 사용.
@@ -250,15 +251,23 @@ await ctx.memory.append(
 ### Access Enforcement
 
 ```
-Agent 컨테이너 (agentd) ──HTTP──▶ Memory Service (framework)
-        └── runtime 발급 per-agent memory token — 선언된 space/mode 만 허용
+Agent 컨테이너 (agentd) ──HTTP──▶ Memory Service (강제 지점) ──판정──▶ 권한 레지스트리 (control plane)
+        └── control plane 발급 에이전트 신원
 ```
 
 1. Memory Service 는 프레임워크 컴포넌트 (`src/malkuth/memory/`) — 저장소 자격증명은
    서비스만 보유, 에이전트 컨테이너에 DB 자격증명 주입 금지
-2. Token 은 에이전트가 접근 가능한 space 목록 + mode(ro/rw) 를 인코딩 —
-   그룹 이동 / group.yaml·global.yaml 의 mode·writers 변경 시 재발급
-3. 모든 접근 감사 로그: `agent`, `group`, `memory_space`, `op`, `status`
+2. **토큰은 권한이 아니라 신원이다**: 에이전트가 내미는 것은 control plane 이 발급한 에이전트
+   신원이다. 어떤 space 에 어떤 mode 로 닿는지는 Memory Service 가 **요청마다** 레지스트리에
+   `memory` 판정으로 묻는다 ([01-architecture.md](01-architecture.md) Access Control)
+3. **선언이 기본 권한**: 매니페스트(local)·group.yaml(group)·global.yaml(global, `writers`)
+   선언이 배포 시점의 권한이다. 운영자는 space 회수와 `rw`→`ro` 강등을 재배포 없이 한다.
+   선언 밖의 space 는 권한 에이전트가 확장 상한 안에서만 부여한다
+4. **신원은 재시작을 넘는다**: Memory Service 를 재시작해도 떠 있는 에이전트의 신원이 무효가
+   되지 않는다
+5. 판정 캐시·변경 알림·레지스트리 장애 시 동작은 01 Access Control 을 따른다 — 캐시에 없는
+   판정은 `MEM_001` 로 거부, 이미 허용된 캐시는 유지
+6. 모든 접근 감사 로그: `agent`, `group`, `memory_space`, `op`, `status`, `decision_source`
 
 ### Context Assembly — 프롬프트 주입 규칙
 

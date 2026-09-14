@@ -146,6 +146,31 @@ METRIC_SPECS: Final[tuple[MetricSpec, ...]] = (
         ("target",),
         "Circuit state: 0 closed, 1 open, 2 half-open",
     ),
+    # Access control — 01 Access Control
+    MetricSpec(
+        "malkuth_access_decisions_total",
+        "counter",
+        ("resource", "decision", "source"),
+        "Access decisions by resource, outcome, and where the answer came from",
+    ),
+    MetricSpec(
+        "malkuth_access_grants_total",
+        "counter",
+        ("resource", "op", "decided_by"),
+        "Grant, revoke, and refused-grant operations",
+    ),
+    MetricSpec(
+        "malkuth_access_registry_reachable",
+        "gauge",
+        ("component",),
+        "Whether an enforcement point can reach the access registry: 1 or 0",
+    ),
+    MetricSpec(
+        "malkuth_access_cache_invalidations_total",
+        "counter",
+        ("component",),
+        "Decision cache invalidations triggered by registry change notifications",
+    ),
 )
 """표준 메트릭 계약 — 05 의 Metrics Collection 과 1:1 대응."""
 

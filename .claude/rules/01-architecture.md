@@ -46,6 +46,8 @@
    - Graph deployment / start / stop / status API
    - Agent registration and module registry management
    - Run submission and result retrieval
+   - **Access registry** — agent identity, declared permissions, grants, expansion ceilings,
+     change notification (Access Control 절)
 
 2. **Orchestration Layer**
    - Build LangGraph `StateGraph` from graph topology config (YAML)
@@ -58,6 +60,8 @@
    - Build, start, health-check, drain, stop containers
    - Expose each agent through a standard **Agent Control API**
    - Enforce resource limits and network policy
+   - Attach agents to an internal network with no external route; run the **egress proxy**
+     as the only path out
 
 4. **Protocol Layer** (per-agent isolated)
    - Each agent owns its A2A server endpoint and its MCP client sessions
@@ -231,16 +235,104 @@ spec:
 
   artifacts:
     quota: 50Gi
+
+  access:                        # 실행 중 권한 확장의 상한 — Access Control 절
+    ceiling:                     # 권한 에이전트가 이 그룹 멤버에게 줄 수 있는 최대 범위
+      max_ttl_s: 3600            # 부여 만료 상한 — 만료 없는 부여 금지
+      memory:
+        - {space: knowledge, mode: ro}
+      egress:
+        - api.search.example.com
+      mcp_tool: []
+      a2a: []
 ```
 
 ### Group Rules
 
 1. 예약 그룹 `global` (`groups/global.yaml`) 은 전역 스코프 리소스 선언 전용 —
    에이전트가 `metadata.group: global` 로 직접 소속을 선언하는 것은 금지 (검증 차단)
-2. 그룹 이동 = manifest 변경 (version bump + 재배포) — 이전 그룹 리소스 접근은
-   즉시 상실 (토큰 재발급), local 리소스는 유지
-3. Quota 는 배포 검증 + 기동 시 재검증 — 그룹 합계 초과 시 기동 거부 (`RT_006`)
-4. 그룹 정의 삭제는 소속 에이전트가 0이 될 때만 허용
+2. 그룹 이동 = manifest 변경 (version bump + 재배포) — 레지스트리 판정이 새 소속을 따르므로
+   이전 그룹 리소스 접근은 즉시 상실, local 리소스는 유지
+3. **확장 상한 없는 그룹은 확장이 없다**: `spec.access.ceiling` 을 선언하지 않은 그룹의 멤버에게
+   권한 에이전트는 아무것도 줄 수 없다. 상한 변경은 그룹 선언 변경이다 (권한 에이전트 자신은
+   바꾸지 못한다)
+4. Quota 는 배포 검증 + 기동 시 재검증 — 그룹 합계 초과 시 기동 거부 (`RT_006`)
+5. 그룹 정의 삭제는 소속 에이전트가 0이 될 때만 허용
+
+## Access Control — 판정은 컨테이너 밖에서, 요청마다
+
+에이전트 컨테이너 안에는 모든 권한을 줄 수 있다 (컨테이너 안 Claude Code 등). 그래서
+**통제받는 주체의 컨테이너 안에서 하는 검사는 강제 수단이 아니다** — 자기 도구 목록, 호출자
+쪽 allowlist, 자기 env 는 편의이자 기본값일 뿐이다. 실시간으로 부여·회수할 수 있는 권한은
+반드시 **통제받는 주체의 컨테이너 밖에서**, 요청마다 판정한다.
+
+강제 지점이 누구의 밖이어야 하는지는 **누구를 통제하느냐**로 정한다:
+
+| 통제받는 주체 | 강제 지점 | 주체의 밖인가 |
+|---|---|---|
+| 에이전트의 메모리 접근 | Memory Service | 예 |
+| 에이전트의 외부 호출 | Egress Proxy | 예 |
+| **호출자** 에이전트의 A2A 호출 | **피호출자** 의 A2A 서버 | 예 — 호출자 컨테이너 밖 |
+
+A2A 에서 피호출자는 통제받는 쪽이 아니라 **보호받는 쪽**이다. 피호출자가 자기 검사를
+건너뛰는 것은 피호출자가 침해된 경우와 같고, 침해된 에이전트는 어차피 자기 권한 안의 일은
+무엇이든 할 수 있다 — 권한 모델이 막을 수 있는 대상이 아니다. 호출자는 피호출자의 A2A 포트에
+직접 닿더라도 피호출자의 판정을 우회할 수 없다.
+
+```
+            ┌────────────────────── Control Plane ──────────────────────┐
+            │  권한 레지스트리 (판정 지점)                                 │
+            │  에이전트 신원 · 선언 권한 · 부여 기록 · 확장 상한 · 변경 알림   │
+            └──────▲────────────────────▲────────────────────▲──────────┘
+                   │ 판정 조회 + 캐시      │                    │
+        ┌──────────┴───────┐  ┌─────────┴────────┐  ┌────────┴─────────┐
+        │  Memory Service  │  │  Egress Proxy    │  │  A2A 피호출자 검증 │   ← 강제 지점
+        └──────────▲───────┘  └─────────▲────────┘  └────────▲─────────┘
+                   │                    │                    │
+        ┌──────────┴────────────────────┴────────────────────┴─────────┐
+        │  에이전트 컨테이너 — 외부 경로 없는 내부 네트워크에만 연결       │
+        └──────────────────────────────────────────────────────────────┘
+```
+
+### 권한 모델
+
+| 자원 종류 | 대상 | 모드 | 강제 지점 |
+|---|---|---|---|
+| `memory` | space (별칭이 해석된 space id) | `ro` / `rw` | Memory Service |
+| `egress` | 목적지 `host[:port]` | — | Egress Proxy |
+| `mcp_tool` | `server/tool` (원격 MCP 만) | — | Egress Proxy (base URL 종단) |
+| `a2a` | 피호출자 에이전트 | — | 피호출자 A2A 서버 |
+
+1. **선언이 기본 권한이다**: 매니페스트·그룹·그래프(`connections`)가 선언한 권한이 배포 시점의
+   기본값이다. 선언되지 않은 자원 사용 금지(02 No Hidden Dependencies)는 그대로 유지된다
+2. **좁히기는 운영자가 언제든**: 회수, `rw`→`ro` 강등은 선언된 권한에도 적용된다.
+   재배포 없이 다음 요청부터 반영된다
+3. **넓히기는 권한 에이전트만**: 실행 중 확장은 작업 에이전트 밖의 전용 **권한 에이전트**가
+   맡는다. 작업 에이전트는 A2A 로 요청만 하고, 부여 API 를 직접 부를 수 없다
+4. **확장 상한은 결정적이다**: 권한 에이전트가 줄 수 있는 범위는 운영자가 선언한 **확장 상한**
+   (group.yaml / groups/global.yaml 의 `spec.access.ceiling`) 안으로 **레지스트리가** 제한한다.
+   요청 내용은 untrusted input 이므로 한계를 에이전트의 판단에 맡기지 않는다
+5. **부여에는 만료와 출처가 있다**: 모든 부여는 만료 시각, 요청자, 사유, 결정 주체
+   (`operator` / 권한 에이전트 이름)를 남긴다. 권한 에이전트는 자기 자신에게 부여하거나
+   자기 상한을 바꾸지 못한다
+6. **에이전트 신원은 control plane 이 발급한다**: 강제 지점은 요청의 에이전트 신원으로
+   판정한다. 신원은 control plane·Memory Service 재시작을 넘어 유지된다
+
+### 판정 캐시와 장애 시 동작
+
+1. **캐시 + 변경 알림**: 강제 지점은 판정을 짧게 캐시하고, 레지스트리의 변경 알림을 받으면
+   즉시 버린다. 알림이 끊겼지만 레지스트리에 닿는 동안에는 짧은 주기(기본 2초)로 재확인한다
+2. **레지스트리에 닿지 않으면**: 캐시에 없는 판정은 **거부**한다. 이미 허용되어 캐시된 판정은
+   만료나 무효화를 강제하지 않고 그대로 쓴다 — 그것을 제어하는 비용이 이득보다 크다.
+   결과적으로 레지스트리 장애 중에는 회수가 반영되지 않을 수 있고, 이는 감수한다
+3. **지연 예산**: 캐시 적중 판정은 Control API 오버헤드 목표(50ms 미만) 안에 들어와야 한다
+
+### 실시간 통제가 닿지 않는 것
+
+- 로컬 효과만 있는 도구 (컨테이너 안 파일시스템 조작, stdio MCP 의 로컬 동작)
+- 이미 받은 것 (읽어 둔 기억, 열린 파일 핸들, 받은 응답)
+- env 로 주입된 비밀값 — 회수하려면 재배포한다. 프록시가 종단하는 서비스의 자격증명은
+  env 가 아니라 프록시에서 주입한다 (02 Secrets Injection)
 
 ## Current Implementation Status
 
@@ -272,7 +364,10 @@ spec:
 ### 🔭 Future
 - Control plane REST API + Web dashboard
 - Remote module registry
-- Kubernetes runtime backend (alternative to local Docker)
+- Kubernetes runtime backend (alternative to local Docker) — 권한 통제는 Docker 로 먼저 도입한다.
+  **규모가 커지면 검토한다.** 계기 예: 여러 호스트로 에이전트를 분산할 때, 네트워크 규칙을
+  선언형 정책(NetworkPolicy)으로 관리할 만큼 연결이 많아질 때, Pod 신원(ServiceAccount 토큰)이
+  자체 신원 발급보다 유리해질 때. 강제 지점은 런타임과 무관한 서비스로 두어 그대로 옮긴다
 - Multi-host agent distribution
 - 전용 vector DB backend (Qdrant 등 — MemoryStore 구현 추가)
 
@@ -316,6 +411,13 @@ malkuth/
 │       │   ├── store.py         # MemoryStore 추상 + sqlite/postgres 구현
 │       │   ├── index.py         # 하이브리드 인덱스 (vector + lexical + filter)
 │       │   └── recall.py        # 검색/병합(RRF) + 컨텍스트 주입 예산
+│       │
+│       ├── access/              # 권한 레지스트리 — 신원, 부여, 판정, 변경 알림 (판정 지점)
+│       │   ├── registry.py      # 선언 권한 + 부여 기록 + 확장 상한 → 판정
+│       │   ├── store.py         # 부여 기록 저장소 (SQLite)
+│       │   └── client.py        # 강제 지점용 판정 클라이언트 (캐시 + 무효화 + 장애 시 동작)
+│       │
+│       ├── egress/              # 이그레스 프록시 (강제 지점) — 전달 전용, 도구를 호스팅하지 않음
 │       │
 │       ├── agentd/              # 에이전트 컨테이너 내부 실행 데몬
 │       │   ├── server.py        # Agent Control API 서버 (FastAPI)
@@ -467,6 +569,7 @@ Client → Control Plane → Orchestrator(StateGraph)
 | **A2A peer call** | 실행 중 peer 에이전트에게 위임/질의 (대등) | A2A protocol | 그래프 config 의 `connections` allowlist 에 선언된 방향만 허용 |
 | **Direct request** | 클라이언트 → 특정 에이전트 직접 요청 (인터랙티브 포함) | Control Plane → Agent Control API | 그래프 run 과 독립된 단독 태스크 — graph state 를 건드리지 않음 |
 | **Scoped memory** | group/global space 를 통한 지식 축적/공유 | Memory Service | memoryset 선언 + 소속 기반 접근 ([09-memory-context.md](09-memory-context.md)) |
+| **Egress** | 모델 API · 외부 HTTP · 원격 MCP 호출 | Egress Proxy | 에이전트는 외부 경로가 없다 — 모든 외부 호출은 프록시가 요청마다 판정 (Access Control) |
 
 Graph state 를 우회하는 사이드채널 (공유 파일, 공유 DB 테이블, 전역 큐) 은 금지.
 유일한 예외는 **선언된 group/global memory space** — 소속과 스코프로 접근이 검증되는
@@ -559,7 +662,8 @@ observability:
 
 3. **Runtime Backend**
    - v0.1: 단일 호스트 Docker
-   - 향후: runtime 인터페이스 뒤에 Kubernetes backend 교체 (계약 변경 없음)
+   - 향후: runtime 인터페이스 뒤에 Kubernetes backend 교체 (계약 변경 없음) —
+     검토 계기는 Future 절 참조
 
 ### Performance Targets (v0.1 기준)
 

@@ -33,6 +33,8 @@ Covers:
 - Overall system architecture and layers
 - Interaction model (orchestrated / direct / peer) and execution modes (mission / service)
 - Resource scoping — global / group / local, and the Group specification
+- Access control — decisions outside the controlled container, per request; permission model,
+  expansion ceilings, the permission agent, decision caching and registry outages
 - Technology stack requirements
 - Directory structure and organization
 - Control flow: graph invocation → agent runtime → protocol layer
@@ -51,7 +53,7 @@ Read this first to understand:
 Covers:
 - Core agent interface design
 - Agent manifest specification
-- Docker isolation rules (image, resources, network, secrets)
+- Docker isolation rules (image, resources, internal network + egress proxy, volumes, secrets)
 - Agent lifecycle and the Agent Control API
 - Health checks and graceful shutdown
 
@@ -66,7 +68,8 @@ Essential for:
 Covers:
 - Per-agent protocol isolation principles
 - A2A server/client rules, AgentCard, task lifecycle
-- Inter-agent call authorization (connection allowlist)
+- Inter-agent call authorization (connection allowlist, callee-side per-request decisions)
+- Egress — what the proxy terminates, host-level CONNECT decisions, when to move to sidecars
 - MCP server declaration, transports, tool namespacing
 - Protocol error mapping and version pinning
 
@@ -97,8 +100,8 @@ Covers:
 - Error taxonomy and the `MalkuthError` type
 - Layer rules — where typed errors are required
 - Retry policies and circuit breakers
-- Structured logging standards (structlog)
-- Metrics collection with Prometheus
+- Structured logging standards (structlog), access-control log fields
+- Metrics collection with Prometheus, access decision and grant metrics
 - Health checks, alerting, incident response
 
 Critical for:
@@ -114,6 +117,7 @@ Covers:
 - Mocking LLMs, MCP servers, and A2A peers
 - Container-based integration tests (testcontainers)
 - Graph-level tests with in-memory checkpointers
+- Access control tests — no restart, next request, bypass, registry outage, expansion ceiling
 - Coverage requirements, linting, CI workflows
 
 Important for:
@@ -159,6 +163,7 @@ Covers:
 - Memoryset modules — versioned policies for index, retention, recall
 - Hybrid index design (vector + lexical + metadata, RRF merge)
 - Retrieval API, context assembly budgets, provenance rules
+- Access enforcement — identity tokens, per-request space decisions
 - Compaction, retention, and storage backends
 
 Key for:
@@ -215,6 +220,8 @@ Key for:
 - No shared mutable state between agents outside the graph state and declared
   scoped memory
 - Resource access is bounded by scope: global / group / local (nearest wins)
+- Permissions that must change at runtime are decided **outside** the agent container, per
+  request — checks inside the container are conveniences, not enforcement
 
 ### 2. Composability
 - Agents connect only through declared graph edges and A2A connections

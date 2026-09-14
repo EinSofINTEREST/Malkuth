@@ -28,15 +28,11 @@ REGISTERED = {spec.name for spec in METRIC_SPECS}
 # histogram 은 _bucket/_count/_sum 파생 시계열로 조회된다
 _HISTOGRAM_SUFFIXES = ("_bucket", "_count", "_sum")
 
-DOCUMENTED_ALERTS = {
-    "AgentHighFailureRate",
-    "AgentDown",
-    "ContainerRestartLoop",
-    "ModelRateLimited",
-    "CheckpointFailures",
-    "ServiceRunStalled",
-    "ServiceRunHalted",
-}
+
+def documented_alerts() -> set[str]:
+    """05 의 Alerting Rules 블록에 선언된 알림 이름 — 손으로 옮긴 목록은 룰셋과 어긋난다."""
+    text = (RULES / "05-error-handling.md").read_text(encoding="utf-8")
+    return set(re.findall(r"^\s*- alert:\s*(\w+)", text, re.MULTILINE))
 
 
 def base_metric(name: str) -> str:
@@ -65,10 +61,12 @@ def test_alert_file_parses(alert_rules):
 
 
 def test_all_documented_alerts_are_defined(alert_rules):
-    """05 에 선언된 7개 알림이 전부 있어야 한다."""
+    """05 에 선언된 알림이 전부, 그리고 그것만 있어야 한다."""
     defined = {r["alert"] for r in alert_rules["groups"][0]["rules"]}
+    documented = documented_alerts()
 
-    assert defined == DOCUMENTED_ALERTS
+    assert len(documented) >= 7, "05 의 알림 블록을 찾지 못했다"
+    assert defined == documented
 
 
 def test_alert_expressions_reference_registered_metrics(alert_rules):

@@ -269,6 +269,21 @@ async def test_research_pipeline_full_stack(compose_stack):
 - E2E 에서도 실제 LLM 금지 — OpenAI/Anthropic 호환 fake provider 컨테이너 사용
 - CI 에서는 nightly 로만 실행 (PR gate 는 unit + integration)
 
+## Testing Access Control
+
+권한 통제 기능([01-architecture.md](01-architecture.md) Access Control)은 "막혔다" 만으로는
+증명되지 않는다 — 실시간이라는 것까지 증명해야 한다.
+
+1. **재시작 없이 반영**: 권한 변경 전후로 대상 컨테이너의 시작 시각이 같아야 한다
+   (`docker inspect -f '{{.State.StartedAt}}'`). 실 스택 E2E 필수
+2. **다음 요청부터**: 회수 직후의 다음 요청이 거부되고, 되돌리면 재배포 없이 성공한다
+3. **컨테이너 안 우회**: 호출자 쪽 검사를 우회해도(직접 요청) 강제 지점에서 거부되는지 본다
+4. **장애 시 동작**: 레지스트리를 멈춘 상태에서 캐시에 없는 판정은 거부, 이미 허용된 판정은
+   유지되는지 둘 다 본다
+5. **확장 상한**: 상한 초과 요청, 요청 본문에 상한을 무시하라는 지시를 넣은 요청이 모두 거절되고
+   기록되는지 본다
+6. 판정 로직 단위 테스트는 fake clock 과 fake 레지스트리로 — 캐시 만료를 실제로 기다리지 않는다
+
 ## Testing Async / Concurrent Code
 
 1. `pytest-asyncio` auto mode — `async def test_*` 그대로 작성

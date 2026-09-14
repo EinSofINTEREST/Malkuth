@@ -211,6 +211,12 @@ STOR_003: Registry 저장소 오류
 CFG_001: 설정 파싱/검증 실패
 CFG_002: 그룹 정의 오류 / 스코프 해석 실패 (secrets 미해석 포함)
 
+ACC_001: 권한 판정 거부 — 이그레스 목적지·원격 MCP 도구 (category: forbidden, HTTP 403).
+         메모리와 A2A 거부는 각 도메인 코드(MEM_001, A2A_004)를 쓴다
+ACC_002: 권한 판정 불가 — 레지스트리 도달 불가 + 캐시 없음 → 거부 (category: network, retryable, HTTP 503)
+ACC_003: 부여 거절 — 확장 상한 초과, 권한 에이전트의 자기 부여·자기 상한 변경, 작업 에이전트의
+         부여 API 호출 (category: forbidden, HTTP 403)
+
 INTERNAL_001: 예상치 못한 내부 오류 — 최상위 boundary 가 변환
 ```
 
@@ -366,6 +372,12 @@ log.info(f"task {task_id} done in {elapsed}ms")
 | `iteration`     | int    | Service run 의 iteration 회차 |
 | `mode`          | str    | Run 모드 (`mission`/`service`/`direct`) |
 | `port`          | int    | 포트 |
+| `resource`      | str    | 권한 자원 종류 (`memory`/`egress`/`mcp_tool`/`a2a`) |
+| `target`        | str    | 권한 대상 (space id, 목적지 host, `server/tool`, 피호출자) |
+| `decision`      | str    | 판정 결과 (`allow`/`deny`) |
+| `decision_source` | str  | 판정 출처 (`fresh`/`cache`/`unreachable`) |
+| `grant_id`      | str    | 부여 기록 id |
+| `decided_by`    | str    | 결정 주체 (`declaration`/`operator`/권한 에이전트 이름) |
 
 **규칙:**
 - 표에 없는 컴포넌트 특화 키는 snake_case 로 추가 가능 (예: `checkpoint_id`, `edge`)
@@ -384,6 +396,7 @@ log.info(f"task {task_id} done in {elapsed}ms")
 | `protocols/mcp/` | `agent`, `mcp_server` (+tool 로그는 `tool`, `duration_ms`) |
 | `agentd/` | `agent`, `task_id` (+모델 호출은 `model`, `input_tokens`, `output_tokens`) |
 | `modules/` | `module_ref` |
+| `access/`, `egress/` | `agent`, `resource`, `target` (+판정 로그는 `decision`, `decision_source` / 부여 로그는 `grant_id`, `decided_by`) |
 
 ### Log Context Binding
 
@@ -468,6 +481,12 @@ malkuth_memory_index_lag_seconds{space}
 
 # Circuit breaker
 malkuth_circuit_state{target}                            # Gauge: 0 closed / 1 open / 2 half
+
+# Access control ([01-architecture.md](01-architecture.md) Access Control)
+malkuth_access_decisions_total{resource, decision, source}  # decision: allow|deny, source: fresh|cache|unreachable
+malkuth_access_grants_total{resource, op, decided_by}       # op: grant|revoke|refuse
+malkuth_access_registry_reachable{component}                # Gauge: 1 / 0 — 강제 지점별
+malkuth_access_cache_invalidations_total{component}
 ```
 
 ### Health Checks
@@ -540,6 +559,19 @@ groups:
         labels: {severity: critical}
         annotations:
           summary: "Service graph {{ $labels.graph }} halted (GRAPH_005 failure streak)"
+
+      - alert: AccessRegistryUnreachable
+        expr: malkuth_access_registry_reachable == 0
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: "{{ $labels.component }} cannot reach the access registry — new decisions are denied, revocations are not applied"
+
+      - alert: AccessGrantRefusalsSpike
+        expr: sum without (op) (increase(malkuth_access_grants_total{op="refuse"}[10m])) > 20
+        labels: {severity: warning}
+        annotations:
+          summary: "Many refused grants — a worker agent may be trying to talk the permission agent past its ceiling"
 ```
 
 ### Dashboards

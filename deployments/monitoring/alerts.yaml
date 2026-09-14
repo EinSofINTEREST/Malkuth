@@ -80,3 +80,19 @@ groups:
         annotations:
           summary: "Service graph {{ $labels.graph }} halted (GRAPH_005 failure streak)"
           runbook: "docs/en/runbooks/recovery.md#service-run-halted"
+
+      - alert: AccessRegistryUnreachable
+        expr: malkuth_access_registry_reachable == 0
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: "{{ $labels.component }} cannot reach the access registry — new decisions are denied, revocations are not applied"
+          runbook: "docs/en/runbooks/incident-response.md#accessregistryunreachable"
+
+      - alert: AccessGrantRefusalsSpike
+        expr: |
+          sum without (op) (increase(malkuth_access_grants_total{op="refuse"}[10m])) > 20
+        labels: {severity: warning}
+        annotations:
+          summary: "Many refused grants — a worker agent may be trying to talk the permission agent past its ceiling"
+          runbook: "docs/en/runbooks/incident-response.md#accessgrantrefusalsspike"

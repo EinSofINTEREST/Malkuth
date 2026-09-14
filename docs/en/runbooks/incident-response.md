@@ -74,6 +74,30 @@ A service run is active but has made no progress for 30 minutes.
 2. If input exists, the watcher node is likely failing silently. Read the iteration logs
    (`iteration` field) and confirm the `is_idle` predicate is not always true.
 
+### AccessRegistryUnreachable
+
+An enforcement point (Memory Service, egress proxy, or an A2A server) cannot reach the access
+registry in the control plane.
+
+1. While this fires, decisions that are not already cached are **denied** and permissions
+   that were already allowed keep working. A revocation made now is **not applied** until the
+   registry is reachable again.
+2. Check the control plane process and the network between it and the `component` in the
+   alert.
+3. If a revocation is urgent, stop the affected agent's deployment — that does not depend on
+   the registry.
+
+### AccessGrantRefusalsSpike
+
+The registry refused many grants in ten minutes: requests above an expansion ceiling, a
+permission agent granting to itself, or a worker agent calling the grant API directly.
+
+1. Group the refusals by requester in the logs (`decided_by`, `resource`, `target`).
+2. A single worker agent behind most refusals is likely being steered by untrusted input.
+   Revoke its outstanding grants and inspect the run that triggered the requests.
+3. Refusals are the ceiling doing its job. Raise a ceiling only by changing the group
+   declaration, never to silence this alert.
+
 ## Escalation
 
 Page for P0/P1. For P2/P3, file an issue with the `run_id` and the error-code

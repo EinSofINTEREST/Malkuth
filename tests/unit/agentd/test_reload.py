@@ -107,17 +107,38 @@ def planner() -> AgentManifest:
 DIRECT = {"node_id": None, "input": {"query": "q"}}
 
 
-async def test_reload_rereads_the_template_on_disk(root):
+def declare_fresh_template(root: Path) -> None:
+    """promptset 선언에 새 템플릿을 더한다.
+
+    템플릿 **본문**은 렌더할 때마다 디스크에서 읽으므로 리로드 없이도 바뀐다. 기동 시 한 번만
+    읽히는 것은 선언(템플릿 목록·변수·출력 키)과 스킬셋 코드다 — 리로드가 증명해야 하는 것은
+    이쪽이다.
+    """
+    promptset = root / "modules" / "promptsets" / "planner" / "0.3.0"
+    (promptset / "templates" / "fresh.j2").write_text("FRESH {{ query }}\n", encoding="utf-8")
+    document = yaml.safe_load((promptset / "promptset.yaml").read_text(encoding="utf-8"))
+    document["spec"]["templates"]["fresh"] = {
+        "file": "templates/fresh.j2",
+        "variables": {"query": {"type": "string", "required": True}},
+    }
+    (promptset / "promptset.yaml").write_text(yaml.safe_dump(document), encoding="utf-8")
+
+
+FRESH = {"node_id": "fresh", "input": {"query": "q"}}
+
+
+async def test_reload_picks_up_a_changed_declaration(root):
     manifest = planner()
     executor = await agentd.build_executor(manifest)
     reload = agentd.build_reload(manifest, executor)
-    template = root / "modules" / "promptsets" / "planner" / "0.3.0" / "templates" / "default.j2"
-    assert "CHANGED" not in executor.binding.render(make_task(**DIRECT))
+    declare_fresh_template(root)
 
-    template.write_text("CHANGED {{ query }}\n", encoding="utf-8")
+    with pytest.raises(MalkuthError):
+        executor.binding.render(make_task(**FRESH))  # 리로드 전: 기동 때의 선언에 없다
+
     card = await reload()
 
-    assert executor.binding.render(make_task(**DIRECT)).startswith("CHANGED q")
+    assert executor.binding.render(make_task(**FRESH)).startswith("FRESH q")
     assert card["name"] == "planner"
 
 
@@ -169,13 +190,16 @@ def test_the_served_app_reloads_the_standard_executor(root, tmp_path, monkeypatc
     monkeypatch.setenv(agentd.TOKEN_ENV, "agent-token")
     monkeypatch.setattr(agentd, "_setup_observability", Metrics)
     served = {}
-    monkeypatch.setattr(agentd, "_serve", lambda app, manifest, executor: served.update(app=app))
+    monkeypatch.setattr(
+        agentd, "_serve", lambda app, manifest, executor: served.update(app=app, executor=executor)
+    )
 
     agentd.main()
 
-    client = TestClient(served["app"])
-    template = root / "modules" / "promptsets" / "planner" / "0.3.0" / "templates" / "default.j2"
-    template.write_text("CHANGED {{ query }}\n", encoding="utf-8")
-    response = client.post("/v1/reload", headers={"Authorization": "Bearer agent-token"})
+    declare_fresh_template(root)
+    response = TestClient(served["app"]).post(
+        "/v1/reload", headers={"Authorization": "Bearer agent-token"}
+    )
 
     assert response.json()["status"] == "reloaded"
+    assert served["executor"].binding.render(make_task(**FRESH)).startswith("FRESH q")

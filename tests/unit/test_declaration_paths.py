@@ -10,6 +10,7 @@ HTTP 테스트는 ASGI scope 를 직접 만든다 — httpx 는 ``..`` 구간을
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -53,8 +54,6 @@ def workspace(tmp_path: Path) -> Path:
 
 
 def _copy(source: Path, target: Path) -> None:
-    import shutil
-
     shutil.copytree(source, target, ignore=shutil.ignore_patterns("__pycache__"))
 
 
@@ -174,3 +173,63 @@ async def test_a_dot_segment_request_is_a_400_and_leaves_the_decoy(
     assert json.loads(text)["error"]["code"] == ErrorCode.VAL_002
     assert str(workspace) not in text, "응답이 서버의 절대 경로를 흘렸다"
     assert (workspace / "manifest.yaml").read_text() == DECOY
+
+
+# --- PR #284 리뷰: 목록, 링크 순환, 모듈 레지스트리 ---------------------------------------
+
+
+def _outside_manifest(workspace: Path, tmp_path: Path, name: str) -> Path:
+    outside = tmp_path / "elsewhere" / name
+    outside.mkdir(parents=True)
+    document = yaml.safe_load((workspace / "agents" / "planner" / "manifest.yaml").read_text())
+    document["metadata"]["name"] = name
+    (outside / "manifest.yaml").write_text(yaml.safe_dump(document), encoding="utf-8")
+    return outside
+
+
+def test_a_listing_does_not_read_through_a_link_that_leaves_the_root(catalog, workspace, tmp_path):
+    """단건 조회만 막으면 목록 엔드포인트가 같은 파일을 읽어 돌려준다 — glob 은 링크를 따라간다."""
+    (workspace / "agents" / "escape").symlink_to(
+        _outside_manifest(workspace, tmp_path, "escape"), target_is_directory=True
+    )
+
+    listing = catalog.agents()
+
+    assert "escape" not in listing.items
+    assert [p.code for p in listing.problems if "escape" in p.path] == [ErrorCode.VAL_002]
+    assert "planner" in listing.items, "정상 선언은 그대로 보인다"
+
+
+def test_a_symlink_loop_is_a_400_not_a_crash(catalog, workspace):
+    (workspace / "agents" / "loop-a").symlink_to(workspace / "agents" / "loop-b")
+    (workspace / "agents" / "loop-b").symlink_to(workspace / "agents" / "loop-a")
+
+    with pytest.raises(MalkuthError) as exc_info:
+        catalog.agent("loop-a")
+
+    assert exc_info.value.code == ErrorCode.VAL_002
+
+
+def test_the_checked_path_is_the_canonical_one(catalog, workspace, tmp_path):
+    """검사한 경로와 쓰는 경로가 같아야 한다 — 원래 경로를 돌려주면 검사 뒤 링크 교체를 따라간다."""
+    real = workspace / "agents" / "planner"
+    (workspace / "agents" / "alias").symlink_to(real, target_is_directory=True)
+
+    assert catalog.agent_path("alias") == (real / "manifest.yaml").resolve()
+
+
+def test_a_module_behind_a_link_that_leaves_the_root_is_not_loaded(workspace, tmp_path):
+    from malkuth.modules.registry import ModuleRegistry
+
+    promptsets = workspace / "modules" / "promptsets"
+    outside = tmp_path / "elsewhere-modules" / "planner"
+    shutil.copytree(promptsets / "planner", outside)
+    shutil.rmtree(promptsets / "planner")
+    (promptsets / "planner").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(MalkuthError) as exc_info:
+        ModuleRegistry.under(workspace).resolve("promptsets/planner@0.3.0")
+    listing = Catalog.under(workspace).modules("promptsets")
+
+    assert exc_info.value.code == ErrorCode.MOD_001
+    assert "planner" not in listing.items

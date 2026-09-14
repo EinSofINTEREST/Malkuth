@@ -68,6 +68,7 @@ def workspace(tmp_path: Path) -> Path:
         },
     )
     write(tmp_path / "agents" / "worker" / "manifest.yaml", agent("worker", "research"))
+    write(tmp_path / "agents" / "peer" / "manifest.yaml", agent("peer", "research"))
     write(tmp_path / "agents" / "loner" / "manifest.yaml", agent("loner"))
     write(tmp_path / "agents" / STEWARD / "manifest.yaml", agent(STEWARD, "research"))
     write(
@@ -312,22 +313,23 @@ def test_an_agent_outside_the_group_does_not_get_the_group_ceiling(registry, ste
 
 
 def test_a_worker_cannot_grant(registry):
-    """작업 에이전트는 요청만 한다 — 부여 API 를 직접 부를 수 없다."""
+    """작업 에이전트는 요청만 한다 — 상한 안의 부여라도 부여 API 를 직접 부를 수 없다."""
     worker = registry.issue_identity("worker", "dep-1")
 
     err = refused(
         lambda: registry.grant(
             worker,
-            "loner",
-            ResourceKind.A2A,
-            "loner",
+            "peer",
+            ResourceKind.EGRESS,
+            "api.search.example.com",
             ttl_s=60,
-            reason="let me in",
+            reason="within the ceiling",
             requested_by="worker",
         )  # fmt: skip
     )
 
     assert err.code == ErrorCode.ACC_003
+    assert err.details == {"caller": "worker"}
 
 
 def test_a_steward_cannot_grant_to_itself(registry, steward):

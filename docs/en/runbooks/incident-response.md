@@ -80,8 +80,11 @@ An enforcement point (Memory Service, egress proxy, or an A2A server) cannot rea
 registry in the control plane.
 
 1. While this fires, decisions that are not already cached are **denied** and permissions
-   that were already allowed keep working. A revocation made now is **not applied** until the
-   registry is reachable again.
+   that were already allowed keep working — until the decision's `valid_until` when it has one
+   (a grant or a temporary revocation behind it), with no deadline otherwise (a declaration). A
+   revocation made now is **not applied** until the registry is reachable again. A registry that
+   answers but **rejects** the enforcement point (a wrong enforcer token) is not an outage: the
+   enforcement point drops its cache and denies everything — fix the token.
 2. Check the control plane process and the network between it and the `component` in the
    alert.
 3. If a revocation is urgent, stop the affected agent's deployment — that does not depend on

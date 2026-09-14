@@ -18,10 +18,11 @@ from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 
-from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
+from malkuth.core.errors import ErrorCode, MalkuthError
 from malkuth.core.manifest import MemoryMode
 from malkuth.http_errors import status_for
 from malkuth.memory.entry import MemoryEntry
+from malkuth.memory.gate import Gate, TokenGate, unauthorized
 from malkuth.modules.memoryset import ChunkSpec, MemoryKind
 
 if TYPE_CHECKING:
@@ -38,15 +39,6 @@ ACCESS_DENIED: dict[str, int] = {ErrorCode.MEM_001: status.HTTP_401_UNAUTHORIZED
 
 
 DEFAULT_SCAN_LIMIT = 500
-
-
-def unauthorized(reason: str) -> MalkuthError:
-    """토큰 없는/알 수 없는 요청 — space 존재 여부조차 알려주지 않는다."""
-    return MalkuthError(
-        category=ErrorCategory.MEMORY,
-        code=ErrorCode.MEM_001,
-        message=reason,
-    )
 
 
 @dataclass
@@ -132,10 +124,11 @@ class LatestRequest(BaseModel):
 def create_app(
     service: MemoryService,
     recall: Recall,
-    tokens: TokenRegistry,
+    tokens: TokenRegistry | None,
     *,
     indexer: IndexRegistry | None = None,
     chunk: ChunkSpec | None = None,
+    gate: Gate | None = None,
 ) -> FastAPI:
     """Build the Memory Service HTTP app.
 
@@ -144,15 +137,21 @@ def create_app(
     Args:
         service: The framework-side memory gateway.
         recall: Hybrid search over the space indexes.
-        tokens: Opaque token registry.
+        tokens: Opaque token registry — ``gate`` 가 없을 때의 입구.
         indexer: Index registry the write path feeds — 없으면 저장만 하고
             색인하지 않습니다 (읽기 전용 배치용).
         chunk: Chunking policy for indexed entries.
+        gate: 입구 — 레지스트리 판정을 쓰려면 ``RegistryGate`` 를 넘긴다.
 
     Returns:
         The FastAPI application.
     """
     spec = chunk or ChunkSpec()
+    if gate is None:
+        if tokens is None:
+            raise ValueError("memory service needs either issued tokens or a gate")
+        gate = TokenGate(tokens)
+    entrance: Gate = gate
     app = FastAPI(title="Malkuth Memory Service")
 
     @app.exception_handler(MalkuthError)
@@ -166,16 +165,26 @@ def create_app(
         http_status = status_for(err, overrides=ACCESS_DENIED)
         return JSONResponse(status_code=http_status, content=err.payload().model_dump(mode="json"))
 
-    def granted(request: Request) -> AccessToken:
-        """Bearer 토큰을 실제 접근 권한으로 바꾼다.
+    async def granted(
+        request: Request, aliases: list[str] | None, *, write: bool
+    ) -> tuple[AccessToken, list[str]]:
+        """Bearer 토큰 → 지금 닿을 수 있는 권한, 그리고 대상 별칭.
 
         헤더를 직접 읽는다 — ``Depends`` 를 인자 기본값에 두면 lint 가 막고,
         ``Annotated`` 로만 쓰면 FastAPI 가 dataclass 를 쿼리 파라미터로 읽는다.
+
+        별칭을 지정하지 않으면(검색 전체) 지금 허용된 것만 대상이다 — 회수된 space 하나가
+        검색 전체를 실패시키지 않는다. 지정했으면 거부된 별칭이 그대로 ``MEM_001`` 로 간다.
         """
         header = request.headers.get("authorization", "")
         prefix = "bearer "
         presented = header[len(prefix) :] if header.lower().startswith(prefix) else None
-        return tokens.resolve(presented)
+        declared = await entrance.admit(presented)
+        wanted = aliases if aliases is not None else [s.alias for s in declared.spaces]
+        narrowed = await entrance.narrow(presented or "", declared, wanted, write=write)
+        if aliases is None:
+            wanted = list(dict.fromkeys(s.alias for s in narrowed.spaces))
+        return narrowed, wanted
 
     @app.post("/v1/search")
     async def search(request: SearchRequest, http_request: Request) -> list[dict[str, Any]]:
@@ -183,8 +192,9 @@ def create_app(
 
         선언되지 않은 space 요청은 별칭 해석에서 ``MEM_001`` 로 거부됩니다.
         """
-        token = granted(http_request)
-        aliases = list(request.spaces or [space.alias for space in token.spaces])
+        token, aliases = await granted(
+            http_request, list(request.spaces) if request.spaces else None, write=False
+        )
         resolved = [_space_id(token, alias) for alias in aliases]
         entries = {
             entry.entry_id: entry
@@ -208,7 +218,7 @@ def create_app(
         색인은 **저장과 분리된 큐**로 넘깁니다 (09 Write Path) — 여기서
         embedding 을 기다리면 append 지연이 모델 호출만큼 길어집니다.
         """
-        token = granted(http_request)
+        token, _ = await granted(http_request, [request.space], write=True)
         stored = service.append(token, request.space, request.entry)
         if indexer is not None:
             # 저장만 하고 색인하지 않으면 그 기억은 검색에서 영원히 사라진다
@@ -218,14 +228,14 @@ def create_app(
     @app.post("/v1/read")
     async def read(request: ReadRequest, http_request: Request) -> list[dict[str, Any]]:
         """선언된 space 를 최신순으로 읽습니다 — 검색 없이 훑는 창구."""
-        token = granted(http_request)
+        token, _ = await granted(http_request, [request.space], write=False)
         found = service.read(token, request.space, limit=request.limit, kinds=request.kinds)
         return [entry.model_dump(mode="json") for entry in found]
 
     @app.post("/v1/latest")
     async def latest(request: LatestRequest, http_request: Request) -> dict[str, Any] | None:
         """``supersedes`` 체인의 최신 항목 — 정정된 기억을 그대로 읽지 않기 위해서."""
-        token = granted(http_request)
+        token, _ = await granted(http_request, [request.space], write=False)
         found = service.latest(token, request.space, request.entry_id)
         return found.model_dump(mode="json") if found is not None else None
 
@@ -238,14 +248,16 @@ def create_app(
         내보내면 쓸 수 없는 space 가 rw 로 보인다 — 에이전트가 그것을 믿고
         쓰기를 시도하면 401 을 받는다.
         """
-        token = granted(http_request)
+        readable, aliases = await granted(http_request, None, write=False)
+        writable, _ = await granted(http_request, aliases, write=True)
+        can_write = {s.alias for s in writable.spaces if s.may_write(writable.agent)}
         return [
             {
                 "alias": space.alias,
                 "scope": str(space.scope),
-                "mode": str(MemoryMode.RW if space.may_write(token.agent) else MemoryMode.RO),
+                "mode": str(MemoryMode.RW if space.alias in can_write else MemoryMode.RO),
             }
-            for space in token.spaces
+            for space in readable.spaces
         ]
 
     return app

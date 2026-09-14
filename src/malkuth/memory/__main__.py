@@ -73,6 +73,27 @@ def _publish_tokens(tokens: dict[str, str], path: Path) -> None:
     log.info("memory tokens published", **{"agents": len(tokens)})
 
 
+def _access(metrics: Metrics) -> Any:
+    """레지스트리 판정 클라이언트 — 주소와 강제 지점 토큰이 **둘 다** 있어야 켠다.
+
+    하나만 있으면 설정 실수다. 조용히 토큰 모드로 뜨면 운영자는 실시간 회수가 된다고 믿는다.
+    """
+    from malkuth.access.client import ACCESS_URL_ENV, ENFORCER_TOKEN_ENV, AccessClient
+    from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
+
+    url, token = os.environ.get(ACCESS_URL_ENV), os.environ.get(ENFORCER_TOKEN_ENV)
+    if not url and not token:
+        return None
+    if not (url and token):
+        raise MalkuthError(
+            category=ErrorCategory.CONFIG,
+            code=ErrorCode.CFG_001,
+            message="memory service registry mode needs both the access URL and enforcer token",
+            details={"settings": [ACCESS_URL_ENV, ENFORCER_TOKEN_ENV]},
+        )
+    return AccessClient(base_url=url, enforcer_token=token, component="memory", metrics=metrics)
+
+
 def main() -> None:
     """Run the Memory Service."""
     metrics = _setup_observability()
@@ -82,10 +103,10 @@ def main() -> None:
     )
     root = Path(os.environ.get(ROOT_ENV, DEFAULT_ROOT))
 
-    deployment = build_deployment(config, root=root, metrics=metrics)
+    deployment = build_deployment(config, root=root, metrics=metrics, access=_access(metrics))
 
     tokens_path = os.environ.get(TOKENS_PATH_ENV)
-    if tokens_path:
+    if tokens_path and deployment.access is None:
         _publish_tokens(deployment.tokens, Path(tokens_path))
 
     port = int(os.environ.get(PORT_ENV, DEFAULT_PORT))
@@ -111,12 +132,20 @@ async def _run(deployment: MemoryDeployment, port: int, *, interval_s: float) ->
         uvicorn.Config(deployment.app, host="0.0.0.0", port=port, log_config=None)  # noqa: S104
     )
     indexing = asyncio.create_task(_index_loop(deployment.indexer, interval_s))
+    # 변경 알림을 따라가지 않으면 회수가 캐시 뒤에 묻힌다
+    access = deployment.access
+    watching = asyncio.create_task(access.watch()) if access is not None else None
     try:
         await server.serve()
     finally:
         indexing.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await indexing
+        if access is not None and watching is not None:
+            watching.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await watching
+            await access.aclose()
         # 종료 직전 한 번 더 비운다 — 버리면 그 항목은 영원히 검색되지 않는다
         _drain_once(deployment.indexer)
 

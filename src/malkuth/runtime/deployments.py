@@ -730,7 +730,7 @@ class DeploymentManager:
             m.name: {
                 "manifest": m,
                 "secrets": self._env_for(m, provisions[m.name]),
-                "memory": self._memory_for(m),
+                "memory": self._memory_for(m, provisions[m.name]),
                 "mounts": provisions[m.name].mounts,
                 "image": deployed.get(m.name) or provisions[m.name].image,
             }
@@ -775,7 +775,17 @@ class DeploymentManager:
         ).env_for(tuple(manifest.spec.runtime.env_allowlist))
         return {**self.agent_env, **scoped, **provision.env}
 
-    def _memory_for(self, manifest: AgentManifest) -> MemoryEndpoint | None:
+    def _memory_for(self, manifest: AgentManifest, provision: Provision) -> MemoryEndpoint | None:
+        """Memory Service 주소와 내밀 자격.
+
+        레지스트리가 있으면 자격은 **에이전트 신원**이다 — Memory Service 가 요청마다 레지스트리에
+        묻는다. 그때 정적 토큰으로 되돌아가면 회수가 닿지 않는 뒷문이 되므로 쓰지 않는다.
+        """
+        if self.access is not None:
+            credential = provision.env.get(ACCESS_CREDENTIAL_ENV)
+            if self.memory_url and credential:
+                return MemoryEndpoint(url=self.memory_url, token=credential)
+            return None
         token = self.memory_tokens.get(manifest.name)
         if self.memory_url and token:
             return MemoryEndpoint(url=self.memory_url, token=token)
@@ -785,7 +795,7 @@ class DeploymentManager:
         return await self.launcher.start(
             manifest,
             secrets=self._env_for(manifest, provision),
-            memory=self._memory_for(manifest),
+            memory=self._memory_for(manifest, provision),
             mounts=provision.mounts,
             a2a_port=provision.a2a_port,
             image=provision.image,

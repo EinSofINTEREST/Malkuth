@@ -21,7 +21,7 @@ from malkuth.access.registry import AccessRegistry, credential_hash
 from malkuth.access.store import InMemoryAccessStore, SqliteAccessStore
 from malkuth.catalog import Catalog
 from malkuth.core.errors import ErrorCode, MalkuthError
-from tests.fixtures.access import KNOWLEDGE, STEWARD, access_workspace, group, write
+from tests.fixtures.access import KNOWLEDGE, STEWARD, access_workspace, agent, group, write
 
 
 @pytest.fixture
@@ -472,3 +472,39 @@ async def test_a_waiter_behind_the_current_version_returns_at_once(registry):
     registry.revoke("worker", ResourceKind.EGRESS, "api.search.example.com", reason="now")
 
     assert await asyncio.wait_for(registry.wait_for_change(0, timeout_s=5), 0.5) >= 1
+
+
+# --- 선언 변경 (#278) ----------------------------------------------------------
+
+
+def test_a_changed_declaration_file_moves_the_version(registry, workspace):
+    """선언 판정을 캐시한 강제 지점은 선언 파일이 바뀐 것을 버전으로만 안다."""
+    registry.declarations_poll_s = 0
+    before = registry.version()
+
+    write(workspace / "agents" / "worker" / "manifest.yaml", agent("worker"))
+
+    assert registry.version() > before
+    assert registry.version() == registry.version(), "바뀌지 않았는데 버전이 계속 오른다"
+
+
+def test_a_restarted_registry_moves_the_version_once(workspace, tmp_path):
+    """멈춘 동안 파일이 바뀌었는지 모른다 — 강제 지점이 들고 있는 옛 캐시를 버리게 한다."""
+    path = tmp_path / "access.db"
+    first = AccessRegistry(store=SqliteAccessStore(path=path), catalog=Catalog.under(workspace))
+    seen = first.version()
+
+    second = AccessRegistry(store=SqliteAccessStore(path=path), catalog=Catalog.under(workspace))
+
+    assert second.version() > seen
+
+
+async def test_a_waiter_wakes_when_a_declaration_file_changes(registry, workspace):
+    registry.declarations_poll_s = 0
+    before = registry.version()
+    waiter = asyncio.create_task(registry.wait_for_change(before, timeout_s=5))
+    await asyncio.sleep(0.01)
+
+    write(workspace / "agents" / "worker" / "manifest.yaml", agent("worker"))
+
+    assert await asyncio.wait_for(waiter, 2) > before

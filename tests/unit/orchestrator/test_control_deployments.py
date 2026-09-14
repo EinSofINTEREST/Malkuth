@@ -30,6 +30,14 @@ class FakeManager:
                 code=ErrorCode.RT_010,
                 message="agent replica is already launched",
             )
+        if graph == "unbaked":
+            raise MalkuthError(
+                category=ErrorCategory.RUNTIME,
+                code=ErrorCode.RT_012,
+                message="agent image is not built — build it before deploying",
+                agent="custom",
+                details={"image": "malkuth/agent-custom:0.1.0", "build_status": None},
+            )
         if graph == "nope":
             raise MalkuthError(
                 category=ErrorCategory.NOT_FOUND, code=ErrorCode.NF_001, message="unknown graph"
@@ -115,6 +123,17 @@ async def test_a_validation_failure_is_400(api):
 
     assert response.status_code == 400
     assert response.json()["error"]["code"] == ErrorCode.VAL_001
+
+
+async def test_deploying_an_unbuilt_custom_agent_is_409(api):
+    """#266 — 굽고 나면 해소되는 상태 충돌이다. 5xx 면 서버 장애 알림으로 샌다."""
+    response = await api.post("/v1/deployments", json={"graph": "unbaked"})
+
+    assert response.status_code == 409
+    error = response.json()["error"]
+    assert error["code"] == ErrorCode.RT_012
+    assert error["agent"] == "custom"
+    assert error["details"]["image"] == "malkuth/agent-custom:0.1.0"
 
 
 async def test_an_unknown_graph_is_404(api):

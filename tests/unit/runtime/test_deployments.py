@@ -963,3 +963,66 @@ async def test_without_a_registry_no_identity_is_injected(manager, docker):
     assert all(ACCESS_CREDENTIAL_ENV not in c["environment"] for c in docker.created)
     assert all(a.access_credential == "" for a in record.agents)
     await manager.launcher.stop_all()
+
+
+# --- 리뷰 반영 (#288) --------------------------------------------------------------
+
+
+async def test_a_replaced_container_keeps_its_identity_in_the_record(manager):
+    """조회가 기록을 새 컨테이너로 맞출 때 신원을 비우면, 다음 재시작은 신원 없이 선다."""
+    with_access(manager)
+    record = await manager.deploy("two")
+    before = next(a for a in record.agents if a.name == "alpha")
+    launched = manager.launcher.launched[("alpha", 0)]
+    launched.lifecycle.transition(AgentState.UNHEALTHY)
+    await manager.launcher._replace(launched)  # noqa: SLF001 — 재시작 경로를 직접 태운다
+
+    after = next(a for a in manager.get(record.deployment_id).agents if a.name == "alpha")
+
+    assert after.container_id != before.container_id, "교체가 일어나지 않아 확인이 공허하다"
+    assert after.access_credential == before.access_credential != ""
+    assert after.token == before.token
+    await manager.launcher.stop_all()
+
+
+async def test_a_failing_stop_still_revokes_the_identities(manager, monkeypatch):
+    registry = with_access(manager)
+    record = await manager.deploy("two")
+
+    async def refuse(name: str) -> None:
+        raise RuntimeError("docker went away")
+
+    monkeypatch.setattr(manager.launcher, "stop", refuse)
+    with pytest.raises(RuntimeError):
+        await manager.teardown(record.deployment_id)
+
+    for agent in record.agents:
+        with pytest.raises(MalkuthError) as exc_info:
+            registry.identify(agent.access_credential)
+        assert exc_info.value.code == ErrorCode.ACC_001
+
+
+async def test_reattach_revokes_identities_of_a_deployment_interrupted_while_starting(
+    workspace, docker, healthy
+):
+    """기동 도중 control plane 이 죽으면 기록은 STARTING 에 남고 신원은 어디에도 붙지 않는다."""
+    store = InMemoryDeploymentStore()
+    first = wired_manager(workspace, docker, store)
+    registry = with_access(first)
+    credential = registry.issue_identity("alpha", "dep-interrupted")
+    store.upsert(
+        DeploymentRecord(
+            deployment_id="dep-interrupted",
+            graph="two",
+            version="1.0.0",
+            status=DeploymentStatus.STARTING,
+        )
+    )
+
+    second = wired_manager(workspace, docker, store)
+    second.access = registry
+    await second.reattach()
+
+    with pytest.raises(MalkuthError) as exc_info:
+        registry.identify(credential)
+    assert exc_info.value.code == ErrorCode.ACC_001

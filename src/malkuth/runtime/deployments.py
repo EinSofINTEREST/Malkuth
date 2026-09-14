@@ -18,7 +18,7 @@ import threading
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
@@ -468,10 +468,13 @@ class DeploymentManager:
         record = self.get(deployment_id)
         if record.status in (DeploymentStatus.STOPPED, DeploymentStatus.FAILED):
             return record
-        for agent in record.agents:
-            await self.launcher.stop(agent.name)
-        # 멈춘 에이전트의 신원은 더 이상 어떤 강제 지점도 통과하지 못해야 한다
-        self._revoke_identities(deployment_id)
+        try:
+            for agent in record.agents:
+                await self.launcher.stop(agent.name)
+        finally:
+            # 해체를 요청한 이상 신원은 죽인다 — 정지 하나가 실패했다고 모든 신원이 살아 남으면
+            # 운영자가 끝냈다고 믿는 배포가 강제 지점을 계속 통과한다
+            self._revoke_identities(deployment_id)
         stopped = DeploymentRecord(
             **{**record.__dict__, "status": DeploymentStatus.STOPPED, "updated_at": _now()}
         )
@@ -487,6 +490,9 @@ class DeploymentManager:
         """
         touched: list[DeploymentRecord] = []
         for record in self.store.list():
+            if record.status == DeploymentStatus.STARTING:
+                # 기동 도중 죽은 배포다 — 붙일 기록(신원 포함)이 없으니 발급된 신원만 남는다
+                self._revoke_orphaned_identities(record)
             if record.status != DeploymentStatus.READY:
                 continue
             try:
@@ -539,7 +545,7 @@ class DeploymentManager:
         agents = []
         for agent in record.agents:
             launched = self.launcher.launched.get((agent.name, agent.replica))
-            agents.append(_deployed(launched, agent.token) if launched is not None else agent)
+            agents.append(_relaunched(agent, launched) if launched is not None else agent)
         if tuple(agents) == record.agents:
             return record
         refreshed = DeploymentRecord(
@@ -647,6 +653,10 @@ class DeploymentManager:
     def _revoke_identities(self, deployment_id: str) -> None:
         if self.access is not None:
             self.access.revoke_deployment(deployment_id)
+
+    def _revoke_orphaned_identities(self, record: DeploymentRecord) -> None:
+        if self.access is not None and self.access.revoke_deployment(record.deployment_id):
+            self._bind_log(record).warning("identities of an interrupted deployment revoked")
 
     def _baked_image(self, manifest: AgentManifest) -> str | None:
         """재료가 있으면 프레임워크가 소유한 태그, 없으면 None (declarative agent)."""
@@ -822,6 +832,21 @@ def _deployed(launched: LaunchedAgent, token: str, access_credential: str = "") 
         token=token,
         a2a_port=launched.a2a_port,
         access_credential=access_credential,
+    )
+
+
+def _relaunched(agent: DeployedAgent, launched: LaunchedAgent) -> DeployedAgent:
+    """컨테이너가 바뀐 자리 — 바뀌는 것은 컨테이너뿐이다.
+
+    나머지는 **기록에서** 잇는다: 새로 만들면 기록에만 있는 값(토큰, 신원)이 조용히 빈 값이 되고,
+    다음 재시작이 신원 없는 컨테이너를 세운다.
+    """
+    return replace(
+        agent,
+        container_id=launched.handle.container_id,
+        image=launched.handle.image,
+        control_port=launched.handle.control_port,
+        a2a_port=launched.a2a_port,
     )
 
 

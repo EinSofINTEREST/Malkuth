@@ -72,7 +72,7 @@ Status codes follow one rule — **who can fix it**:
 | `400` | the request is malformed or the declaration is invalid | `VAL_001`, `VAL_002`, `MOD_002`, `CFG_002` |
 | `401` | missing or wrong token | — |
 | `404` | no such resource | `NF_001` |
-| `409` | the request conflicts with current state, and you can resolve it | `GRAPH_006`, `RT_010` |
+| `409` | the request conflicts with current state, and you can resolve it | `GRAPH_006`, `RT_010`, `RT_011`, `RT_012` |
 | `500` | the server has to fix it | `RT_001`, `GRAPH_002`, `STOR_003` |
 | `503` | not now, but worth retrying | anything with `retryable: true` |
 
@@ -249,6 +249,14 @@ Failures leave no ghost containers. What you get back tells you which kind it wa
 
 - `404` (`NF_001`) — no such graph.
 - `400` (`VAL_001`) — the graph does not validate; nothing was started.
+- `400` (`VAL_002`) — an agent with build materials declares a `runtime.image` other than the
+  tag its build produces (`malkuth/agent-<name>:<version>`). Two places naming two images
+  leave no way to tell what runs.
+- `409` (`RT_012`) — an agent with build materials has no `built` image for its version: never
+  built, the last build failed, or a build is still running. `details` carries `image`,
+  `build_status` and `build_error`. Build it, then deploy again — a deploy never builds for
+  you. Nothing was started and no deployment was recorded. Agents without materials run on
+  the base image and are never gated.
 - `409` (`RT_010`) — an agent of this graph is already running under another deployment. Tear
   that one down first; a graph and its agents deploy as a unit, so two live deployments
   cannot share an agent.

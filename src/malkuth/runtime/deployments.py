@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 import structlog
 
 from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
+from malkuth.runtime.images import image_tag
 from malkuth.runtime.launcher import LaunchedAgent, MemoryEndpoint
 from malkuth.runtime.scope import ScopedSecrets
 from malkuth.runtime.spec import (
@@ -274,6 +275,19 @@ class Provision:
     env: Mapping[str, str]
     mounts: tuple[Mapping[str, Any], ...]
     a2a_port: int | None
+    image: str | None = None
+    """구운 태그 — 커스텀 에이전트만. None 이면 매니페스트 선언이나 base 이미지 (#266)."""
+
+
+@runtime_checkable
+class BuiltImages(Protocol):
+    """배포가 빌드 단계에 묻는 두 가지 — `ImageBuilder` 가 만족한다 (#266).
+
+    배포는 굽지 않는다 (02 Lifecycle 1). 굽혔는지 **확인만** 한다.
+    """
+
+    def needs_build(self, agent: str, version: str) -> bool: ...
+    def record_of(self, agent: str, version: str) -> Any: ...
 
 
 _HOLDS_DECLARATIONS = (DeploymentStatus.STARTING, DeploymentStatus.READY, DeploymentStatus.LOST)
@@ -311,6 +325,8 @@ class DeploymentManager:
             것이므로, 이름이 secret 패턴이면 거부한다.
         memory_url / memory_tokens: Memory Service 주소와 에이전트별 토큰 파일 내용.
         ready_timeout_s / poll: health 대기. 06 — sleep 은 주입한다.
+        images: 빌드 단계 (#266). 재료가 있는 에이전트는 그 버전이 `built` 여야 기동한다.
+            None 이면 빌드 표면이 꺼진 것이고 매니페스트의 이미지를 그대로 쓴다.
     """
 
     catalog: Catalog
@@ -321,6 +337,7 @@ class DeploymentManager:
     agent_env: Mapping[str, str] = field(default_factory=dict)
     memory_url: str | None = None
     memory_tokens: Mapping[str, str] = field(default_factory=dict)
+    images: BuiltImages | None = None
     ready_timeout_s: float = DEFAULT_READY_TIMEOUT_S
     ready_poll_s: float = DEFAULT_READY_POLL_S
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
@@ -374,6 +391,8 @@ class DeploymentManager:
             )
 
         manifests = self._agents_of(topology)
+        # 기록을 남기기 전에 — 거절된 배포는 실패한 배포가 아니라 시작되지 않은 배포다
+        self._check_images(manifests)
         deployment_id = f"dep-{uuid.uuid4().hex[:12]}"
         record = DeploymentRecord(
             deployment_id=deployment_id,
@@ -585,9 +604,59 @@ class DeploymentManager:
             if peers:
                 env[A2A_PEERS_ENV] = ",".join(peers)
             provisions[manifest.name] = Provision(
-                env=env, mounts=self._mounts(manifest.name), a2a_port=assigned.get(manifest.name)
+                env=env,
+                mounts=self._mounts(manifest.name),
+                a2a_port=assigned.get(manifest.name),
+                image=self._baked_image(manifest),
             )
         return provisions
+
+    def _baked_image(self, manifest: AgentManifest) -> str | None:
+        """재료가 있으면 프레임워크가 소유한 태그, 없으면 None (declarative agent)."""
+        version = manifest.metadata.version
+        if self.images is None or not self.images.needs_build(manifest.name, version):
+            return None
+        return image_tag(manifest.name, version)
+
+    def _check_images(self, manifests: Sequence[AgentManifest]) -> None:
+        """굽지 않은 커스텀 에이전트는 기동하지 않는다 (#266).
+
+        배포가 대신 굽지 않는다 — 02 Lifecycle 1 은 런타임 중 빌드를 금지한다.
+        재배포(reattach/restart)는 이 검사를 거치지 않는다: 이미 떠 있던 것을 다시
+        세우는 일이고, 그 사이 누가 다시 굽다 실패했다고 살아 있는 배포를 잃으면 안 된다.
+
+        Raises:
+            MalkuthError: VALIDATION/``VAL_002`` 매니페스트가 다른 이미지를 선언,
+                RUNTIME/``RT_012`` 그 버전이 아직 `built` 가 아님 (HTTP 409).
+        """
+        for manifest in manifests:
+            tag = self._baked_image(manifest)
+            if tag is None or self.images is None:
+                continue
+            declared = manifest.spec.runtime.image
+            if declared and declared != tag:
+                # 두 곳이 다른 이미지를 가리키면 무엇이 도는지 알 수 없다
+                raise MalkuthError(
+                    category=ErrorCategory.VALIDATION,
+                    code=ErrorCode.VAL_002,
+                    message="manifest declares an image other than its built one",
+                    agent=manifest.name,
+                    details={"declared": declared, "built": tag},
+                )
+            record = self.images.record_of(manifest.name, manifest.metadata.version)
+            if record is None or not record.ok:
+                raise MalkuthError(
+                    category=ErrorCategory.RUNTIME,
+                    code=ErrorCode.RT_012,
+                    message="agent image is not built — build it before deploying",
+                    agent=manifest.name,
+                    details={
+                        "image": tag,
+                        "version": manifest.metadata.version,
+                        "build_status": None if record is None else record.status,
+                        "build_error": None if record is None else record.error,
+                    },
+                )
 
     def _restart_args_of(self, record: DeploymentRecord) -> dict[str, dict[str, Any]]:
         """기록된 배포의 컨테이너를 같은 선언으로 다시 세우는 데 필요한 것 전부."""
@@ -595,12 +664,16 @@ class DeploymentManager:
         manifests = self._agents_of(topology)
         ports = {a.name: a.a2a_port for a in record.agents if a.a2a_port is not None}
         provisions = self._provision(topology, manifests, a2a_secret=record.a2a_secret, ports=ports)
+        # 이미지는 **기록에서** 가져온다 — 지금 스토어로 다시 유도하면, 재료·빌드 스토어 없이
+        # 재시작한 control plane 에서는 None 이 되어 다음 재시작이 base 이미지로 떨어진다
+        deployed = {a.name: a.image for a in record.agents}
         return {
             m.name: {
                 "manifest": m,
                 "secrets": self._env_for(m, provisions[m.name]),
                 "memory": self._memory_for(m),
                 "mounts": provisions[m.name].mounts,
+                "image": deployed.get(m.name) or provisions[m.name].image,
             }
             for m in manifests
         }
@@ -655,6 +728,7 @@ class DeploymentManager:
             memory=self._memory_for(manifest),
             mounts=provision.mounts,
             a2a_port=provision.a2a_port,
+            image=provision.image,
         )
 
     def _release_ports(self, provisions: Mapping[str, Provision]) -> None:

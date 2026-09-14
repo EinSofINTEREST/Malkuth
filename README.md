@@ -73,7 +73,7 @@ export MALKUTH_TEST_REDIS_URL=redis://127.0.0.1:16379    # needs RediSearch (red
 ### Images and stacks
 
 ```bash
-make build              # malkuth/agent-base + agent-echo + agent-claude-code images
+make build              # malkuth/agent-base + agent-echo images
 make up                 # dev stack — one echo agent, control port on 18080
 make down
 make e2e-up             # E2E stack — fake provider, memory service, 4 reference agents
@@ -88,6 +88,15 @@ The E2E stack publishes agent control ports on **18081-18084**, the Memory Servi
 **18090**, the checkpoint Postgres on **15433**, agent metrics on **19082-19084**, and A2A
 ports on **19102-19104**. Its agents talk to a fake model provider, so nothing reaches a
 real LLM.
+
+Custom agents are not built by `make`. Their `Dockerfile` and `src/` live in the control plane's
+material store, and a deploy refuses an agent whose image for that version is not built. The
+repository ships the `claude-code` agent's materials as a seed:
+
+```bash
+uv run malkuth agent-push claude-code examples/materials/claude-code
+uv run malkuth agent-build claude-code --wait   # exits non-zero with the log tail if it fails
+```
 
 ### CLI
 

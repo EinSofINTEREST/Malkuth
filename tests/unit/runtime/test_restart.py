@@ -104,6 +104,19 @@ async def test_an_unhealthy_agent_is_restarted():
     await agents.stop_all()
 
 
+async def test_a_restart_keeps_the_baked_image():
+    """#266 — 재시작만 base 이미지로 돌면 커스텀 실행기가 조용히 사라진다."""
+    client = FakeDockerClient()
+    agents = launcher(client, Recorder())
+    launched = await agents.start(manifest(), image="malkuth/agent-echo-baked:0.1.0")
+
+    await restart_now(agents, launched)
+
+    images = [created["image"] for created in client.created]
+    assert images == ["malkuth/agent-echo-baked:0.1.0"] * 2
+    await agents.stop_all()
+
+
 async def test_the_health_loop_triggers_a_restart():
     """감시 루프가 Unhealthy 를 보면 재시작을 건다 — 이 배선이 #215 의 핵심이다."""
     client = FakeDockerClient()

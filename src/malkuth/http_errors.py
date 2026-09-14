@@ -36,6 +36,7 @@ CODE_STATUS: Mapping[str, int] = {
     ErrorCode.GRAPH_006: HTTPStatus.CONFLICT,
     ErrorCode.RT_010: HTTPStatus.CONFLICT,
     ErrorCode.RT_011: HTTPStatus.CONFLICT,
+    ErrorCode.RT_012: HTTPStatus.CONFLICT,
 }
 """코드 하나가 카테고리보다 정확한 경우 — 카테고리보다 먼저 본다."""
 

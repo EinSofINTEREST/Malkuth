@@ -198,6 +198,16 @@ def test_manifest_image_wins():
     assert spec.image == "malkuth/custom:1.0.0"
 
 
+def test_a_baked_image_wins_over_the_declaration():
+    """#266 — 재료가 있는 에이전트는 빌드 단계가 정한 태그로만 돈다."""
+    spec = build_container_spec(
+        agent_manifest(runtime={"image": "malkuth/custom:1.0.0"}),
+        image="malkuth/agent-custom:0.1.0",
+    )
+
+    assert spec.image == "malkuth/agent-custom:0.1.0"
+
+
 # --- env 주입 ---------------------------------------------------------------
 
 

@@ -5,7 +5,7 @@
 스킬셋, 프롬프트셋, 메모리셋, 그래프는 에이전트 코드와 **독립적으로 배포/교체 가능한
 모듈**이다.
 
-1. **분리**: 모듈은 프레임워크 코드(`src/`)와 에이전트 코드(`agents/*/src/`)에 포함되지 않고
+1. **분리**: 모듈은 프레임워크 코드(`src/`)와 에이전트 코드(재료 스토어의 `src/`)에 포함되지 않고
    `modules/`, `graphs/` 에 별도 존재한다
 2. **버전**: 모든 모듈은 semver 로 버전을 갖고, 참조는 항상 버전 고정 (`name@version`)
 3. **교체 가능**: 같은 계약(변수 스키마 / tool 시그니처)을 만족하는 모듈끼리는
@@ -350,6 +350,27 @@ graphs/{name}.yaml
 4. **Scope Neutrality**: 모듈 아티팩트는 전역 레지스트리 소속 — 리소스 스코프
    (global/group/local, [01-architecture.md](01-architecture.md)) 는 런타임 리소스
    (secrets/memory/artifact/quota) 에 적용되며, 모듈 가시성은 제한하지 않는다 (v0.1)
+
+### Build Materials — 레지스트리 옆의 재료 스토어
+
+커스텀 에이전트의 빌드 입력(`Dockerfile`, `src/`)은 레지스트리 파일 트리에 두지 않고
+**재료 스토어**에 둔다 (`orchestrator.material_store`, SQLite).
+
+```
+(agent, version) → { "Dockerfile": ..., "src/agent.py": ..., ... }
+```
+
+1. **키**: 에이전트 이름 + manifest 의 `metadata.version` — 재료는 선언된 버전에 묶인다
+2. **Immutability**: 레지스트리 규칙 2 와 같다 — 같은 버전에 다른 내용은 `MOD_002`.
+   삭제도 되돌리지 않는다 (삭제 후 같은 버전 재등록으로 불변성을 우회하지 못한다)
+3. **In Use**: 배포 중인 에이전트의 재료는 바꾸거나 지우지 못한다
+4. **Rules**: 경로는 `Dockerfile` 또는 `src/` 아래만 (정규화된 상대 경로), 파일 수·크기 상한,
+   텍스트만 — 저장 시 검사 (`VAL_002`)
+5. **Build Record**: 굽기 결과(`built`/`failed`/`building`, 태그, 로그 꼬리)는 빌드 스토어
+   (`orchestrator.build_store`) 에 남고, 배포 게이트가 이것을 본다
+   ([02-agent-implementation.md](02-agent-implementation.md) Lifecycle Rule 1)
+6. **Seeds**: 저장소에 함께 싣는 예시 재료는 `examples/materials/<agent>/` 에 둔다 —
+   프레임워크는 읽지 않으며, `malkuth agent-push` 로 스토어에 올린다
 
 ### Compatibility Rules
 

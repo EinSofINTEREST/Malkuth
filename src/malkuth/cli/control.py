@@ -14,7 +14,7 @@ import httpx
 from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
 DEFAULT_CONTROL_URL = "http://127.0.0.1:8700"
 CONTROL_TOKEN_ENV = "MALKUTH_CONTROL_TOKEN"  # noqa: S105 — 키 이름이지 값이 아니다
@@ -39,19 +39,40 @@ def _failed(url: str, response: httpx.Response, *, run_scoped: bool) -> MalkuthE
     없으므로, 그 404 는 **엔드포인트가 없다**는 뜻이다 (버전이 안 맞는 Control
     Plane). 둘을 뭉개면 운영자가 없는 run 을 찾아 헤맨다.
     """
+    # `status` 가 아니라 `http_status` 다 — CLI 출력의 `status` 는 명령의 결과(failed)이고,
+    # 세부가 같은 키를 쓰면 "failed" 가 "400" 으로 덮여 스크립트가 분기하지 못한다
+    details = {"url": url, "http_status": str(response.status_code)}
     if response.status_code == httpx.codes.NOT_FOUND and run_scoped:
         return MalkuthError(
             category=ErrorCategory.NOT_FOUND,
             code=ErrorCode.NF_001,
             message="unknown run",
-            details={"url": url, "status": str(response.status_code)},
+            details=details,
         )
-    return MalkuthError(
-        category=ErrorCategory.RUNTIME,
-        code=ErrorCode.GRAPH_001,
-        message=_detail(response),
-        details={"url": url, "status": str(response.status_code)},
-    )
+    category, code = _server_code(response)
+    return MalkuthError(category=category, code=code, message=_detail(response), details=details)
+
+
+def _server_code(response: httpx.Response) -> tuple[ErrorCategory, str]:
+    """서버가 준 카테고리와 코드를 그대로 옮긴다.
+
+    전부 한 코드로 뭉개면 운영자는 "빌드가 이미 진행 중(RT_011)" 과 "재료가 규약 위반
+    (VAL_002)" 을 구분하지 못한다 — 둘의 조치는 정반대다. 본문이 구조화 에러가 아니면
+    (버전이 다른 control plane, 프록시 페이지) 이전과 같은 일반 실패로 둔다.
+    """
+    fallback = (ErrorCategory.RUNTIME, str(ErrorCode.GRAPH_001))
+    try:
+        body = response.json()
+    except ValueError:
+        return fallback
+    error = body.get("error") if isinstance(body, dict) else None
+    if not isinstance(error, dict) or not isinstance(error.get("code"), str):
+        return fallback
+    try:
+        category = ErrorCategory(str(error.get("category")))
+    except ValueError:
+        category = ErrorCategory.RUNTIME
+    return category, error["code"]
 
 
 def _detail(response: httpx.Response) -> str:
@@ -151,6 +172,25 @@ class ControlClient:
     def get_run(self, run_id: str) -> dict[str, Any]:
         """run 하나의 상태."""
         found: dict[str, Any] = self._request("GET", f"/v1/runs/{run_id}")
+        return found
+
+    def push_materials(self, agent: str, files: Mapping[str, str]) -> dict[str, Any]:
+        """에이전트 현재 버전의 빌드 재료를 올린다 (#264). 같은 내용이면 그대로 돌아온다."""
+        stored: dict[str, Any] = self._request(
+            "PUT", f"/v1/agents/{agent}/materials", run_scoped=False, body={"files": dict(files)}
+        )
+        return stored
+
+    def build_image(self, agent: str) -> dict[str, Any]:
+        """빌드를 제출한다 — 즉시 돌아온다 (#265). 진행은 `image_status` 로 본다."""
+        started: dict[str, Any] = self._request(
+            "POST", f"/v1/agents/{agent}/image", run_scoped=False
+        )
+        return started
+
+    def image_status(self, agent: str) -> dict[str, Any]:
+        """현재 버전의 빌드 기록 — 굽힌 적 없으면 `status` 가 None 이다."""
+        found: dict[str, Any] = self._request("GET", f"/v1/agents/{agent}/image", run_scoped=False)
         return found
 
     def drain(self, run_id: str) -> dict[str, Any]:

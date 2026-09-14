@@ -21,10 +21,16 @@ from malkuth.runtime.deployments import (
     SqliteDeploymentStore,
 )
 from malkuth.runtime.docker.engine import DockerEngine
+from malkuth.runtime.images import BuildRecord, BuildStatus
 from malkuth.runtime.launcher import AgentLauncher
 from malkuth.runtime.lifecycle import AgentState
 from malkuth.runtime.ports import A2APortAllocator
-from malkuth.runtime.spec import A2A_EDGES_ENV, A2A_PEERS_ENV, A2A_SECRET_ENV
+from malkuth.runtime.spec import (
+    A2A_EDGES_ENV,
+    A2A_PEERS_ENV,
+    A2A_SECRET_ENV,
+    DEFAULT_BASE_IMAGE,
+)
 from tests.fixtures.fake_docker import FakeDockerClient
 from tests.fixtures.waiting import until
 
@@ -716,3 +722,157 @@ def test_the_sqlite_store_opens_a_database_from_before_the_new_columns(tmp_path)
     store.upsert(DeploymentRecord(**{**record.__dict__, "declared": ("alpha",), "a2a_secret": "s"}))
     assert store.get("dep-old").declared == ("alpha",)
     assert [r.deployment_id for r in store.list()] == ["dep-old"]
+
+
+# --- 배포 게이트: 굽지 않은 커스텀 에이전트는 기동하지 않는다 (#266) ----------------------
+
+
+class FakeImages:
+    """빌드 단계의 두 질문만 답한다 — 조립과 굽기는 `test_images.py` 소관."""
+
+    def __init__(self, custom: set[str], records: dict[str, BuildRecord] | None = None) -> None:
+        self.custom = custom
+        self.records = records or {}
+
+    def needs_build(self, agent: str, version: str) -> bool:
+        return agent in self.custom
+
+    def record_of(self, agent: str, version: str) -> BuildRecord | None:
+        return self.records.get(agent)
+
+
+def built(agent: str, status: BuildStatus = BuildStatus.BUILT) -> BuildRecord:
+    return BuildRecord(
+        agent=agent,
+        version="0.1.0",
+        status=status,
+        image=f"malkuth/agent-{agent}:0.1.0",
+        error="COPY failed" if status is BuildStatus.FAILED else None,
+    )
+
+
+def image_of(docker: TrackingDocker, agent: str) -> str:
+    for created in docker.created:
+        if created["name"] == f"malkuth-{agent}-0":
+            return created["image"]
+    raise AssertionError(f"{agent} was not created")
+
+
+@pytest.mark.parametrize(
+    ("records", "status"),
+    [
+        ({}, None),
+        ({"alpha": built("alpha", BuildStatus.FAILED)}, BuildStatus.FAILED),
+        ({"alpha": built("alpha", BuildStatus.BUILDING)}, BuildStatus.BUILDING),
+    ],
+    ids=["never-built", "failed", "still-building"],
+)
+async def test_an_unbuilt_custom_agent_is_refused_before_anything_starts(
+    manager, docker, records, status
+):
+    """배포가 대신 굽지 않는다 (02 Lifecycle 1) — 굽힌 적 없거나 실패했거나 굽는 중이면 거절."""
+    manager.images = FakeImages({"alpha"}, records)
+
+    with pytest.raises(MalkuthError) as excinfo:
+        await manager.deploy("two")
+
+    assert excinfo.value.code == ErrorCode.RT_012
+    assert excinfo.value.agent == "alpha"
+    assert excinfo.value.details["build_status"] == status
+    assert excinfo.value.details["image"] == "malkuth/agent-alpha:0.1.0"
+    assert docker.created == [], "거절된 배포가 컨테이너를 띄웠다"
+    assert manager.deployments() == [], "거절은 실패한 배포가 아니라 시작되지 않은 배포다"
+
+
+async def test_a_built_custom_agent_runs_its_baked_image(manager, docker):
+    """빌드 후에는 배포되고, 매니페스트가 아니라 **구운 태그**로 돈다."""
+    manager.images = FakeImages({"alpha"}, {"alpha": built("alpha")})
+
+    record = await manager.deploy("two")
+
+    assert record.status == DeploymentStatus.READY
+    assert image_of(docker, "alpha") == "malkuth/agent-alpha:0.1.0"
+    await manager.launcher.stop_all()
+
+
+async def test_a_declarative_agent_needs_no_build(manager, docker):
+    """재료가 없으면 base 이미지 + 선언 마운트 그대로다 (#243) — 빌드를 요구하지 않는다."""
+    manager.images = FakeImages({"alpha"}, {"alpha": built("alpha")})
+
+    await manager.deploy("two")
+
+    assert image_of(docker, "beta") == DEFAULT_BASE_IMAGE
+    await manager.launcher.stop_all()
+
+
+async def test_a_manifest_naming_another_image_is_refused(manager, docker, workspace):
+    """두 곳이 다른 이미지를 가리키면 무엇이 도는지 알 수 없다."""
+    doc = agent_doc("alpha")
+    doc["spec"]["runtime"]["image"] = "malkuth/agent-something-else:0.1.0"
+    write(workspace / "agents" / "alpha" / "manifest.yaml", doc)
+    manager.images = FakeImages({"alpha"}, {"alpha": built("alpha")})
+
+    with pytest.raises(MalkuthError) as excinfo:
+        await manager.deploy("two")
+
+    assert excinfo.value.code == ErrorCode.VAL_002
+    assert excinfo.value.details == {
+        "declared": "malkuth/agent-something-else:0.1.0",
+        "built": "malkuth/agent-alpha:0.1.0",
+    }
+    assert docker.created == []
+
+
+async def test_a_manifest_naming_the_built_tag_is_accepted(manager, docker, workspace):
+    """같은 태그를 적어 둔 기존 매니페스트(claude-code)는 그대로 통과한다."""
+    doc = agent_doc("alpha")
+    doc["spec"]["runtime"]["image"] = "malkuth/agent-alpha:0.1.0"
+    write(workspace / "agents" / "alpha" / "manifest.yaml", doc)
+    manager.images = FakeImages({"alpha"}, {"alpha": built("alpha")})
+
+    record = await manager.deploy("two")
+
+    assert record.status == DeploymentStatus.READY
+    await manager.launcher.stop_all()
+
+
+async def test_a_restart_after_reattach_keeps_the_baked_image(workspace, docker, healthy):
+    """재부착한 컨테이너가 다시 세워질 때 base 이미지로 떨어지면 커스텀 실행기가 사라진다."""
+    wired_workspace(workspace)
+    store = InMemoryDeploymentStore()
+    images = FakeImages({"alpha"}, {"alpha": built("alpha")})
+    first = wired_manager(workspace, docker, store)
+    first.images = images
+    await first.deploy("wired")
+
+    second = wired_manager(workspace, docker, store)
+    second.images = images
+    await second.reattach()
+
+    assert second.launcher.launched[("alpha", 0)].restart_args["image"] == (
+        "malkuth/agent-alpha:0.1.0"
+    )
+    assert second.launcher.launched[("beta", 0)].restart_args["image"] == DEFAULT_BASE_IMAGE
+    await second.launcher.stop_all()
+
+
+async def test_reattach_restarts_with_the_image_that_was_deployed(workspace, docker, healthy):
+    """재부착은 **실제로 배포된** 이미지로 다시 세운다 — 지금 스토어에서 다시 유도하지 않는다.
+
+    재시작한 control plane 이 재료 스토어 없이 떴다면 유도 결과가 None 이 되고, 다음 health
+    재시작이 base 이미지로 떨어져 커스텀 실행기가 조용히 사라진다.
+    """
+    wired_workspace(workspace)
+    store = InMemoryDeploymentStore()
+    first = wired_manager(workspace, docker, store)
+    first.images = FakeImages({"alpha"}, {"alpha": built("alpha")})
+    await first.deploy("wired")
+
+    second = wired_manager(workspace, docker, store)
+    second.images = None  # 재료·빌드 스토어가 설정되지 않은 채 재시작했다
+    await second.reattach()
+
+    assert second.launcher.launched[("alpha", 0)].restart_args["image"] == (
+        "malkuth/agent-alpha:0.1.0"
+    )
+    await second.launcher.stop_all()

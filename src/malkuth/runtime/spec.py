@@ -133,6 +133,7 @@ def build_container_spec(
     a2a_port: int | None = None,
     base_image: str = DEFAULT_BASE_IMAGE,
     mounts: Sequence[Mapping[str, Any]] = (),
+    image: str | None = None,
 ) -> ContainerSpec:
     """Derive a container spec from an agent manifest.
 
@@ -150,6 +151,9 @@ def build_container_spec(
             volumes — 선언(manifest, modules)을 base 이미지에 들여보내는 통로다.
             02 Rule 2 의 declarative agent 는 이미지를 굽지 않으므로 runtime 이
             선언을 실어 줘야 한다 (#243).
+        image: The image the framework baked for this agent (#266). 재료가 있는
+            커스텀 에이전트는 빌드 단계가 정한 태그로만 돈다 — 매니페스트 선언보다
+            우선한다. 둘이 다르면 배포 검증이 먼저 거절한다.
 
     Returns:
         The container specification.
@@ -191,7 +195,7 @@ def build_container_spec(
 
     return ContainerSpec(
         name=container_name(manifest.name, replica),
-        image=runtime.image or base_image,
+        image=image or runtime.image or base_image,
         env=resolved_env,
         network=network,
         ports=tuple(ports),

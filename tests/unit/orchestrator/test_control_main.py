@@ -268,6 +268,45 @@ def test_the_served_author_pins_running_declarations(monkeypatch, tmp_path):
     assert author.in_use("graph", "research-pipeline") is False  # run 이 없으면 사용 중이 아니다
 
 
+def test_deployments_ask_the_builder_before_starting_custom_agents(tmp_path, monkeypatch):
+    """#266 — 게이트가 있어도 진입점이 빌더를 물리지 않으면 배포는 아무것도 묻지 않는다."""
+    from malkuth.runtime.docker import client as docker_client
+    from malkuth.runtime.images import ImageBuilder
+
+    write_config(
+        tmp_path,
+        {
+            "run_store": str(tmp_path / "runs.db"),
+            "deployment_store": str(tmp_path / "deployments.db"),
+            "material_store": str(tmp_path / "materials.db"),
+            "build_store": str(tmp_path / "builds.db"),
+            "control_port": 18999,
+        },
+    )
+    monkeypatch.setenv("MALKUTH_ENV", "local")
+    monkeypatch.setenv("MALKUTH_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr(entrypoint, "_setup_observability", lambda: None)
+    # 데몬 없이 조립만 본다 — SDK 핸들은 만들기만 하고 부르지 않는다
+    monkeypatch.setattr(docker_client.docker, "from_env", lambda: object())
+
+    class Deployments:
+        author = None
+        images = None
+        launcher = None
+
+        def in_use(self, kind: str, name: str) -> bool:
+            return False
+
+    deployments = Deployments()
+    monkeypatch.setattr(entrypoint, "_deployment_manager", lambda *a, **k: deployments)
+    monkeypatch.setattr(entrypoint, "_run_service", lambda *a, **k: None)
+    monkeypatch.setattr(entrypoint.uvicorn, "run", lambda app, **_kwargs: None)
+
+    entrypoint.main()
+
+    assert isinstance(deployments.images, ImageBuilder)
+
+
 async def test_the_served_app_drives_runs_when_deployments_are_configured(tmp_path, monkeypatch):
     """#244 — 배포 표면이 열리면 이 프로세스가 구동 프로세스다: resume 이 501 이 아니다.
 

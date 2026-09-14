@@ -60,7 +60,7 @@ export MALKUTH_TEST_REDIS_URL=redis://127.0.0.1:16379    # RediSearch 필요 (re
 ### 이미지와 스택
 
 ```bash
-make build              # malkuth/agent-base + agent-echo + agent-claude-code 이미지
+make build              # malkuth/agent-base + agent-echo 이미지
 make up                 # 개발 스택 — echo 에이전트 1대, control port 18080
 make down
 make e2e-up             # E2E 스택 — fake provider, memory service, 참조 에이전트 4대
@@ -74,6 +74,15 @@ make e2e-down
 E2E 스택이 노출하는 포트: 에이전트 control **18081-18084**, Memory Service **18090**,
 checkpoint Postgres **15433**, 에이전트 metrics **19082-19084**, A2A **19102-19104**.
 에이전트는 fake 모델 provider 에 붙으므로 실제 LLM 으로 나가지 않습니다.
+
+커스텀 에이전트는 `make` 로 굽지 않습니다. `Dockerfile` 과 `src/` 는 control plane 의 재료
+스토어에 있고, 그 버전의 이미지가 구워지지 않은 에이전트는 배포가 거절합니다. 저장소는
+`claude-code` 에이전트의 재료를 시드로 싣고 있습니다:
+
+```bash
+uv run malkuth agent-push claude-code examples/materials/claude-code
+uv run malkuth agent-build claude-code --wait   # 실패하면 로그 꼬리와 함께 0 이 아닌 코드로 끝난다
+```
 
 ### CLI
 

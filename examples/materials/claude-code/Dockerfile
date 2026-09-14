@@ -1,9 +1,13 @@
-# malkuth/agent-claude-code — Claude Code CLI 를 실행기로 쓰는 에이전트 이미지
+# claude-code — Claude Code CLI 를 실행기로 쓰는 에이전트의 빌드 재료 (#266)
 #
-# base 를 확장해 Node 와 Claude Code 를 얹는다. 실행기는 manifest 의
-# spec.entrypoint 로 지정된 ClaudeCodeExecutor 다 (02 Custom Agent).
-ARG BASE_TAG=0.1.0
-FROM malkuth/agent-base:${BASE_TAG}
+# 이 디렉토리는 **시드**다. 프레임워크는 여기를 읽지 않는다 — 스토어에 올려야 굽힌다:
+#
+#   malkuth agent-push claude-code examples/materials/claude-code
+#   malkuth agent-build claude-code --wait
+#
+# 컨텍스트 루트는 빌더가 조립하는 임시 디렉토리다 (#263 레이아웃):
+#   Dockerfile, manifest.yaml(카탈로그의 선언), modules/(모듈 루트), src/(이 재료)
+FROM malkuth/agent-base:0.1.0
 
 # base 는 non-root 로 끝난다 — 설치 동안만 root 로 올라갔다 되돌린다
 USER root
@@ -19,8 +23,8 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 # 커스텀 실행기 — PYTHONPATH 에 올려야 spec.entrypoint 가 해석된다
-COPY --chown=1000:1000 agents/claude-code/src/ /app/src/
-COPY --chown=1000:1000 agents/claude-code/manifest.yaml /app/manifest.yaml
+COPY --chown=1000:1000 src/ /app/src/
+COPY --chown=1000:1000 manifest.yaml /app/manifest.yaml
 COPY --chown=1000:1000 modules/ /app/modules/
 
 ENV PYTHONPATH=/app/src \

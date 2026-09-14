@@ -173,12 +173,33 @@ class ClaudeCodeExecutor:
 
     async def _run(self, task: TaskRequest) -> dict[str, Any]:
         """CLI 를 자식 프로세스로 실행한다."""
-        command = [*resolve_command(), build_prompt(task)]
-        process = await asyncio.create_subprocess_exec(
-            *command,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
+        # 명령을 세우지 못한 것도 태스크 실패다 — execute 는 MalkuthError 만 결과로 옮기므로,
+        # 여기서 새는 ValueError/OSError 는 typed 실패가 아니라 최상위 INTERNAL 이 된다
+        try:
+            command = [*resolve_command(), build_prompt(task)]
+        except ValueError as err:
+            raise self._error(
+                ErrorCode.LLM_003,
+                ErrorCategory.MODEL,
+                f"{COMMAND_ENV} is not a valid command line",
+                task,
+            ) from err
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except OSError as err:
+            # 실행 파일만 싣는다 — 마지막 인자는 태스크 입력으로 만든 프롬프트다
+            raise self._error(
+                ErrorCode.LLM_003,
+                ErrorCategory.MODEL,
+                "claude code could not be started",
+                task,
+                executable=command[0],
+                cause=type(err).__name__,
+            ) from err
 
         try:
             stdout, stderr = await asyncio.wait_for(

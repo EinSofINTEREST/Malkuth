@@ -27,6 +27,7 @@ class FakeRegistry:
         self.agent: str | None = "worker"
         self.down = False
         self.feed_down = False
+        self.status: int | None = None  # 설정하면 모든 요청에 이 상태로 답한다
         self.calls: list[str] = []
         self.changed = asyncio.Event()
 
@@ -40,6 +41,8 @@ class FakeRegistry:
         self.calls.append(path)
         if self.down or (self.feed_down and path == "/v1/access/changes"):
             raise httpx.ConnectError("registry is down")
+        if self.status is not None:
+            return httpx.Response(self.status, json={"detail": "nope"})
         assert request.headers["authorization"] == "Bearer enforcer"
         if path == "/v1/access/changes":
             after = int(request.url.params["after"])
@@ -240,3 +243,37 @@ async def test_a_lost_feed_falls_back_to_rechecking(client, registry, clock):
         assert (await decide(client)).allowed
         clock.now += 0.2
         assert not (await decide(client)).allowed
+
+
+# --- 거절은 장애가 아니다 (#289 리뷰) ----------------------------------------------
+
+
+@pytest.mark.parametrize("status", [401, 403, 400])
+async def test_a_registry_that_rejects_the_enforcement_point_gets_no_cached_allow(
+    client, registry, clock, status
+):
+    """틀린 강제 지점 토큰을 장애로 보면 옛 허용을 계속 쓴다 — 설정 실수가 권한 우회가 된다."""
+    await decide(client)
+    registry.status = status
+    clock.now += 3
+
+    verdict = await decide(client)
+
+    assert (verdict.allowed, verdict.source) == (False, DecisionSource.UNREACHABLE)
+    registry.status = None
+    assert (await decide(client)).source is DecisionSource.FRESH, "거절당한 판정이 캐시에 남았다"
+
+
+async def test_a_server_error_is_an_outage_and_keeps_the_cached_allow(client, registry, clock):
+    await decide(client)
+    registry.status = 503
+    clock.now += 3
+
+    assert (await decide(client)).source is DecisionSource.CACHE
+
+
+async def test_a_rejected_change_feed_drops_the_cache(client, registry):
+    async with watching(client, registry):
+        await decide(client)
+        registry.status = 401
+        await until(lambda: not client._decisions)  # noqa: SLF001

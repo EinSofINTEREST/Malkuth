@@ -53,7 +53,10 @@ class MemoryBaseline:
 
         if scope == "local":
             # 자기 이름의 space 만 — 남의 local space 는 선언으로 열리지 않는다
-            return owner == agent and any(s.alias == alias for s in manifest.spec.memory.spaces)
+            return owner == agent and any(
+                s.alias == alias and (not writing or s.mode is MemoryMode.RW)
+                for s in manifest.spec.memory.spaces
+            )
 
         if scope == "group":
             if manifest.metadata.group != owner:

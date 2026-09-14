@@ -69,7 +69,8 @@ def start_memory() -> None:
         "run", "-d", "--name", MEMORY,
         "--network", NETWORK, "--network-alias", MEMORY_ALIAS,
         "--add-host", "host.docker.internal:host-gateway",
-        "--read-only", "--tmpfs", "/tmp:size=16m",  # noqa: S108 — 컨테이너 안 tmpfs "--user", "1000:1000", "--cap-drop", "ALL",
+        "--read-only", "--tmpfs", "/tmp:size=16m",  # noqa: S108 — 컨테이너 안 tmpfs
+        "--user", "1000:1000", "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true",
         "-v", f"{REPO_ROOT}:/repo:ro",
         "-e", "MALKUTH_EMBEDDING_BASE_URL=http://fake-provider:8000",
         "-e", f"MALKUTH_ACCESS_URL=http://host.docker.internal:{CONTROL_PORT}",

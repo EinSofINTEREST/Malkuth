@@ -5,7 +5,9 @@
 
 1. **캐시 + 변경 알림**: 판정은 캐시하고, 변경 알림(긴 폴링)이 새 버전을 알리면 전부 버린다.
    알림이 끊겼지만 레지스트리에 닿는 동안에는 ``recheck_s`` 가 지난 판정을 다시 묻는다
-2. **레지스트리에 닿지 않으면**: 캐시에 없는 판정은 거부. 캐시된 판정은 알림이 끊겨도 그대로 쓴다
+2. **레지스트리에 닿지 않으면**: 캐시에 없는 판정은 거부. 캐시된 판정은 알림이 끊겨도 그대로 쓴다.
+   "닿지 않음" 은 전송 실패·시간 초과·5xx 뿐이다 — 레지스트리가 **거절**하면(4xx, 잘못된 응답)
+   캐시도 버리고 거부한다. 강제 지점 토큰이 틀린 설정을 장애로 보고 옛 허용을 계속 쓰면 안 된다
 3. **만료는 자기 시계로**: 판정의 ``valid_until`` 이 지나면 캐시를 쓰지 않는다 — 부여의 만료는
    레지스트리 없이도 알 수 있으므로 장애 중에도 지킨다
 """
@@ -66,6 +68,18 @@ class _Cached:
 
 class _UnreachableError(Exception):
     """레지스트리가 답하지 않았다 — 원인은 로그로, 판정은 캐시 규칙으로."""
+
+
+class _RejectedError(Exception):
+    """레지스트리가 답했지만 판정을 주지 않았다 — 설정·인증 문제다. 캐시로 버티지 않는다."""
+
+
+def _classify(err: Exception) -> type[Exception]:
+    if isinstance(err, httpx.TransportError):
+        return _UnreachableError
+    if isinstance(err, httpx.HTTPStatusError) and err.response.status_code >= 500:
+        return _UnreachableError
+    return _RejectedError
 
 
 @dataclass
@@ -155,7 +169,11 @@ class AccessClient:
                 response.raise_for_status()
                 version = int(response.json()["version"])
             except (httpx.HTTPError, ValueError, KeyError) as err:
-                if self._feed_alive:
+                if _classify(err) is _RejectedError:
+                    # 거절당한 강제 지점이 쥔 캐시는 믿을 근거가 없다
+                    log.error("access change feed rejected", component=self.component, exc_info=err)
+                    self._drop_cache()
+                elif self._feed_alive:
                     log.warning("access change feed lost", component=self.component, exc_info=err)
                 self._feed_alive = False
                 self._reachable(False)
@@ -192,6 +210,10 @@ class AccessClient:
                 # 캐시에 있던 판정은 알림이 끊겨도 그대로 쓴다 (01 — 결정 D4)
                 return entry.value, DecisionSource.CACHE
             return None, DecisionSource.UNREACHABLE
+        except _RejectedError:
+            self._reachable(False)
+            cache.pop(key, None)
+            return None, DecisionSource.UNREACHABLE
         self._reachable(True)
         if version >= self._version:
             # 알림이 이미 더 새 버전을 알렸으면 이 답은 그 전의 것이다 — 캐시하지 않는다
@@ -205,6 +227,9 @@ class AccessClient:
 
     def _invalidate(self, version: int) -> None:
         self._version = version
+        self._drop_cache()
+
+    def _drop_cache(self) -> None:
         if not (self._identities or self._decisions):
             return
         self._identities.clear()
@@ -220,8 +245,14 @@ class AccessClient:
             response.raise_for_status()
             found: dict[str, Any] = response.json()
         except (httpx.HTTPError, ValueError) as err:
-            log.warning("access registry request failed", component=self.component, exc_info=err)
-            raise _UnreachableError from err
+            kind = _classify(err)
+            if kind is _RejectedError:
+                log.error(
+                    "access registry rejected the request", component=self.component, exc_info=err
+                )
+            else:
+                log.warning("access registry unreachable", component=self.component, exc_info=err)
+            raise kind from err
         return found
 
     def _client(self) -> httpx.AsyncClient:

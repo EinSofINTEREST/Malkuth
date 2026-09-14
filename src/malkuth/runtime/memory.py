@@ -78,6 +78,8 @@ def issue_token(
         agent=manifest.name,
         group=group_name,
         local=[(space.alias, manifest.name) for space in manifest.spec.memory.spaces],
+        # 매니페스트가 ro 로 선언한 local space 를 rw 로 열지 않는다
+        local_modes={space.alias: space.mode for space in manifest.spec.memory.spaces},
         group_spaces=[(space.alias, space.mode) for space in group_declared],
         global_spaces=[
             (space.alias, space.writers)

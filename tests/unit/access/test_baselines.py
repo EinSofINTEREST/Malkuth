@@ -26,6 +26,9 @@ def baseline(tmp_path: Path) -> MemoryBaseline:
         with_spaces(agent("worker", "research"), "longterm"),
     )
     write(tmp_path / "agents" / "outsider" / "manifest.yaml", agent("outsider"))
+    reader = with_spaces(agent("reader"), "notes")
+    reader["spec"]["memory"]["spaces"][0]["mode"] = "ro"
+    write(tmp_path / "agents" / "reader" / "manifest.yaml", reader)
     write(tmp_path / "agents" / "librarian" / "manifest.yaml", agent("librarian"))
     write(
         tmp_path / "groups" / "research.yaml",
@@ -66,6 +69,8 @@ def baseline(tmp_path: Path) -> MemoryBaseline:
     [
         ("worker", "local:worker:longterm", Mode.RW, True, "자기 local space"),
         ("worker", "local:worker:diary", Mode.RO, False, "선언하지 않은 local space"),
+        ("reader", "local:reader:notes", Mode.RO, True, "ro 로 선언한 local space 읽기"),
+        ("reader", "local:reader:notes", Mode.RW, False, "ro 로 선언한 local space 쓰기"),
         ("outsider", "local:worker:longterm", Mode.RO, False, "남의 local space"),
         ("worker", "group:research:knowledge", Mode.RW, True, "그룹 rw space"),
         ("worker", "group:research:archive", Mode.RO, True, "그룹 ro space 읽기"),

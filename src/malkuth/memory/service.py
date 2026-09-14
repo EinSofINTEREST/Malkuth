@@ -18,7 +18,7 @@ from malkuth.memory.entry import MemoryEntry
 from malkuth.modules.memoryset import MemoryScope
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
     from malkuth.memory.store import MemoryStore
     from malkuth.modules.memoryset import MemoryKind
@@ -283,6 +283,7 @@ def build_token(
     group_spaces: Sequence[tuple[str, MemoryMode]] = (),
     global_spaces: Sequence[tuple[str, tuple[str, ...]]] = (),
     run_spaces: Sequence[tuple[str, str]] = (),
+    local_modes: Mapping[str, MemoryMode] | None = None,
 ) -> AccessToken:
     """Issue an access token from the declarations that apply to an agent.
 
@@ -297,12 +298,20 @@ def build_token(
         group_spaces: ``(alias, mode)`` pairs from ``group.yaml``.
         global_spaces: ``(alias, writers)`` pairs from ``groups/global.yaml``.
         run_spaces: ``(alias, run_id)`` pairs — omit for direct tasks.
+        local_modes: 매니페스트가 선언한 local space 의 mode — 없으면 rw.
 
     Returns:
         The access token.
     """
+    modes = local_modes or {}
     spaces: list[MemorySpace] = [
-        MemorySpace(alias=alias, scope=MemoryScope.LOCAL, owner=owner) for alias, owner in local
+        MemorySpace(
+            alias=alias,
+            scope=MemoryScope.LOCAL,
+            owner=owner,
+            mode=modes.get(alias, MemoryMode.RW),
+        )
+        for alias, owner in local
     ]
     if group is not None:
         spaces.extend(

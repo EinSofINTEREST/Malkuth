@@ -306,3 +306,15 @@ async def test_recall_reads_each_alias_once(access, monkeypatch):
     await adapter.recall_for_task("sidecar", policy=RecallSpec(auto=True, k=3, min_score=0.0))
 
     assert reads == ["longterm"]
+
+
+def test_a_local_space_declared_read_only_is_not_writable():
+    """매니페스트의 local `mode: ro` 를 토큰이 버리면 선언보다 넓은 권한이 나간다 (#289 리뷰)."""
+    token = issue_token(
+        manifest(spaces=[{"ref": "memorysets/agent-longterm@0.1.0", "as": "notes", "mode": "ro"}])
+    )
+
+    notes = token.resolve("notes")
+    assert notes is not None and not notes.may_write("test-agent")
+    default = issue_token(manifest(**LOCAL)).resolve("longterm")
+    assert default is not None and default.may_write("test-agent"), "mode 미선언 local 은 rw 기본"

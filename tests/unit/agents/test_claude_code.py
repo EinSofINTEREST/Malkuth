@@ -124,6 +124,30 @@ async def test_a_nonzero_exit_fails_the_task_without_raising(monkeypatch):
     assert result.error.code == ErrorCode.LLM_003
 
 
+@pytest.mark.parametrize(
+    ("command", "message"),
+    [
+        ('claude -p "unbalanced', "MALKUTH_CLAUDE_COMMAND is not a valid command line"),
+        ("/nonexistent/claude -p", "claude code could not be started"),
+    ],
+    ids=["malformed-command", "missing-executable"],
+)
+async def test_a_command_that_cannot_start_fails_the_task_without_raising(
+    monkeypatch, command, message
+):
+    """명령을 세우지 못해도 typed 실패다 — 새면 최상위 INTERNAL 로 뭉개져 원인을 잃는다."""
+    monkeypatch.setenv(COMMAND_ENV, command)
+    task = make_task(input={"prompt": "do not leak me"})
+
+    result = await executor().execute(task)
+
+    assert result.status is TaskStatus.FAILED
+    assert result.error is not None
+    assert result.error.code == ErrorCode.LLM_003
+    assert result.error.message == message
+    assert "do not leak me" not in str(result.error.details), "프롬프트가 에러 세부로 샜다"
+
+
 async def test_a_timeout_is_reported_as_to_001(monkeypatch):
     """TaskConfig.timeout_s 를 강제하지 않으면 노드가 영원히 매달린다."""
     from malkuth.core.agent import TaskConfig

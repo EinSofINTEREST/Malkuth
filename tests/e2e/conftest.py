@@ -60,19 +60,29 @@ def memory_tokens() -> dict[str, str]:
     return json.loads(raw)
 
 
-def write_config(directory: Path) -> Path:
+def write_config(directory: Path, *, agent_env: dict[str, str] | None = None) -> Path:
+    """E2E control plane 설정.
+
+    재료·빌드 스토어를 **항상** 켠다 (#266): 켜 두면 배포 게이트가 모든 배포 앞에 선다.
+    재료가 없는 레퍼런스 에이전트가 그대로 배포되는 것이 곧 declarative 회귀 확인이다.
+    """
     (directory / "e2e.yaml").write_text(
         yaml.safe_dump(
             {
                 "runtime": {
                     # 대역 provider 와 Memory Service 가 사는 네트워크에 세운다
                     "network": NETWORK,
-                    "agent_env": {"ANTHROPIC_BASE_URL": "http://fake-provider:8000"},
+                    "agent_env": {
+                        "ANTHROPIC_BASE_URL": "http://fake-provider:8000",
+                        **(agent_env or {}),
+                    },
                     "health_check": {"interval_s": 3, "timeout_s": 2},
                 },
                 "orchestrator": {
                     "run_store": str(directory / "runs.db"),
                     "deployment_store": str(directory / "deployments.db"),
+                    "material_store": str(directory / "materials.db"),
+                    "build_store": str(directory / "builds.db"),
                     "control_port": CONTROL_PORT,
                     "control_token": CONTROL_TOKEN,
                 },

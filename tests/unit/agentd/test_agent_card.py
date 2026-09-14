@@ -26,7 +26,7 @@ async def served(monkeypatch):
     monkeypatch.setenv("MALKUTH_ROOT", str(REPO_ROOT))
     manifest = load_manifest(RESEARCHER)
     executor = await build_executor(manifest)
-    app = build_app(manifest, executor, tools=executor._tool_schemas)
+    app = build_app(manifest, executor, tools=executor.tool_schemas)
     with TestClient(app) as client:
         yield client, executor
 
@@ -38,7 +38,7 @@ async def test_card_advertises_the_loaded_skills(served):
     body = client.get("/v1/card").json()
 
     assert [skill["name"] for skill in body["skills"]] == [
-        spec.name for spec in executor._tool_schemas
+        spec.name for spec in executor.tool_schemas
     ]
 
 
@@ -64,5 +64,5 @@ async def test_advertised_skills_are_all_runnable(served):
 
     advertised = {skill["name"] for skill in client.get("/v1/card").json()["skills"]}
 
-    assert advertised == {spec.name for spec in executor._tool_schemas}
-    assert advertised <= set(executor._tools._skills)
+    assert advertised == {spec.name for spec in executor.tool_schemas}
+    assert advertised <= set(executor.binding.tools._skills)

@@ -101,8 +101,8 @@ async def test_injected_endpoint_becomes_memory_access(monkeypatch):
 
     executor = await build_executor(load_manifest(RESEARCHER))
 
-    assert isinstance(executor._tools.memory, HttpMemoryAccess)
-    assert executor._tools.memory.token == "opaque"
+    assert isinstance(executor.binding.tools.memory, HttpMemoryAccess)
+    assert executor.binding.tools.memory.token == "opaque"
 
 
 async def test_without_an_endpoint_there_is_no_memory_access(monkeypatch):
@@ -114,7 +114,7 @@ async def test_without_an_endpoint_there_is_no_memory_access(monkeypatch):
 
     executor = await build_executor(load_manifest(RESEARCHER))
 
-    assert executor._tools.memory is None
+    assert executor.binding.tools.memory is None
 
 
 async def test_memory_search_is_advertised_once_access_exists(monkeypatch):
@@ -134,7 +134,7 @@ async def test_memory_search_is_advertised_once_access_exists(monkeypatch):
 
     executor = await build_executor(AgentManifest.model_validate(doc))
 
-    assert MEMORY_SEARCH_TOOL in {spec.name for spec in executor._tool_schemas}
+    assert MEMORY_SEARCH_TOOL in {spec.name for spec in executor.tool_schemas}
 
 
 # --- 선택적 협력자 묶음이 실제로 채워지는가 (#235) -------------------------------

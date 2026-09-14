@@ -18,7 +18,8 @@ from malkuth.core.agent import TaskStatus
 from malkuth.core.errors import ErrorCode
 from tests.fixtures.builders import make_manifest, make_task
 
-sys.path.insert(0, "agents/claude-code/src")
+# 실행기는 저장소의 agents/ 가 아니라 시드 재료에 있다 — 스토어로 올려 굽는다 (#266)
+sys.path.insert(0, "examples/materials/claude-code/src")
 
 from agent import (  # noqa: E402 — 경로 삽입 뒤에야 import 가능
     COMMAND_ENV,

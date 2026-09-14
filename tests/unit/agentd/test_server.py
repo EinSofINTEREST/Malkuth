@@ -268,7 +268,10 @@ def test_reload_invokes_the_hook():
 
 
 def test_reload_without_a_hook_says_it_did_not_reload():
-    """#274 — 훅 없이 ``reloaded`` 로 답하면 호출자는 반영된 줄 안다. 이 테스트가 그 거짓을 고정했다."""
+    """#274 — 훅 없이 ``reloaded`` 로 답하면 호출자는 반영된 줄 안다.
+
+    이전 테스트가 바로 그 거짓을 고정하고 있었다.
+    """
     client, _ = make_client()
 
     response = client.post("/v1/reload", headers=AUTH)

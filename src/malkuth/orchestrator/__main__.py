@@ -270,17 +270,22 @@ def _access_registry(orchestrator: Any, catalog: Catalog, *, metrics: Any = None
     if orchestrator.access_store is None:
         log.warning("access control disabled — orchestrator.access_store is not set")
         return None
-    from malkuth.access.baselines import MemoryBaseline
+    from malkuth.access.baselines import A2ABaseline, MemoryBaseline
     from malkuth.access.model import ResourceKind
     from malkuth.access.registry import AccessRegistry
     from malkuth.access.store import SqliteAccessStore
 
+    store = SqliteAccessStore(path=orchestrator.access_store)
     return AccessRegistry(
-        store=SqliteAccessStore(path=orchestrator.access_store),
+        store=store,
         catalog=catalog,
         stewards=frozenset(orchestrator.access_stewards),
-        # 선언 판정은 그것을 쓰는 강제 지점과 함께 연결한다 — memory 는 Memory Service (#278)
-        baselines={ResourceKind.MEMORY: MemoryBaseline(catalog)},
+        # 선언 판정은 그것을 쓰는 강제 지점과 함께 연결한다 — memory 는 Memory Service (#278),
+        # a2a 는 피호출자의 A2A 서버 (#281)
+        baselines={
+            ResourceKind.MEMORY: MemoryBaseline(catalog),
+            ResourceKind.A2A: A2ABaseline(catalog, store),
+        },
         metrics=metrics,
     )
 

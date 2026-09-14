@@ -426,7 +426,7 @@ class DeploymentManager:
         provisions: dict[str, Provision] = {}
         launched: list[LaunchedAgent] = []
         try:
-            credentials = self._issue_identities(manifests, deployment_id)
+            credentials = self._issue_identities(manifests, deployment_id, graph_name)
             provisions = self._provision(
                 topology, manifests, a2a_secret=record.a2a_secret, credentials=credentials
             )
@@ -652,12 +652,15 @@ class DeploymentManager:
         return provisions
 
     def _issue_identities(
-        self, manifests: Sequence[AgentManifest], deployment_id: str
+        self, manifests: Sequence[AgentManifest], deployment_id: str, graph: str
     ) -> dict[str, str]:
         """배포할 에이전트마다 신원 하나 — 레지스트리가 없으면 발급하지 않는다."""
         if self.access is None:
             return {}
-        return {m.name: self.access.issue_identity(m.name, deployment_id) for m in manifests}
+        return {
+            m.name: self.access.issue_identity(m.name, deployment_id, graph=graph)
+            for m in manifests
+        }
 
     def _revoke_identities(self, deployment_id: str) -> None:
         if self.access is not None:

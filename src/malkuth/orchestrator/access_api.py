@@ -7,14 +7,16 @@
 |---|---|---|
 | 운영자 | control plane 토큰 | 조회 · 회수 · 기록 종료 |
 | 권한 에이전트 | 자기 에이전트 신원 | 부여 |
-| 강제 지점 | enforcer 토큰 | 판정 · 변경 알림 |
+| 에이전트 (A2A) | 자기 에이전트 신원 | 호출 표 발급 · 받은 표 확인 · 변경 알림 |
+| 강제 지점 | enforcer 토큰 | 판정 · 신원 · 변경 알림 |
 """
 
 from __future__ import annotations
 
+import hmac
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar
 
-from fastapi import APIRouter, Body, Depends, FastAPI, Query, Request, status
+from fastapi import APIRouter, Body, Depends, FastAPI, HTTPException, Query, Request, status
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from malkuth.access.model import Mode, ResourceKind, Rule, mode_problem
@@ -63,6 +65,18 @@ class GrantRequest(_Request):
     requested_by: str = Field(min_length=1, max_length=200)
 
 
+class TicketRequest(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    callee: str = Field(min_length=1, max_length=200)
+
+
+class VerifyRequest(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    ticket: str = Field(min_length=1, max_length=512)
+
+
 class IdentityRequest(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -102,6 +116,26 @@ def mount_access(
     _mount_operator(operator, registry)
 
     steward = APIRouter()
+
+    @steward.post("/v1/access/a2a/tickets", status_code=status.HTTP_201_CREATED)
+    async def ticket(request: Request, body: Annotated[Any, Body()]) -> dict[str, Any]:
+        """호출 표 — 자격은 **호출하려는 에이전트 자신의** 신원이다 (03 Enforcement)."""
+        asked = parsed(body, TicketRequest)
+        issued, expires_at = registry.issue_ticket(presented_token(request) or "", asked.callee)
+        return {"ticket": issued, "callee": asked.callee, "expires_at": expires_at}
+
+    @steward.post("/v1/access/a2a/verify")
+    async def verify(request: Request, body: Annotated[Any, Body()]) -> dict[str, Any]:
+        """받은 표 확인 — 자격은 **피호출자 자신의** 신원이다. 남의 표는 거부 판정으로 답한다."""
+        asked = parsed(body, VerifyRequest)
+        decision = registry.verify_ticket(presented_token(request) or "", asked.ticket)
+        return {
+            "agent": decision.agent or None,
+            "decision": decision.outcome.value,
+            "decided_by": decision.decided_by,
+            "version": decision.version,
+            "valid_until": decision.valid_until,
+        }
 
     @steward.post("/v1/access/grants", status_code=status.HTTP_201_CREATED)
     async def grant(request: Request, body: Annotated[Any, Body()]) -> dict[str, Any]:
@@ -163,16 +197,43 @@ def mount_access(
             agent = None
         return {"agent": agent, "version": registry.version()}
 
-    @enforcer.get("/v1/access/changes")
+    feed = APIRouter(dependencies=[Depends(_enforcer_or_agent(registry, enforcer_token))])
+
+    @feed.get("/v1/access/changes")
     async def changes(
         after: Annotated[int, Query(ge=0)] = 0,
         wait_s: Annotated[float, Query(ge=0, le=MAX_WAIT_S)] = MAX_WAIT_S,
     ) -> dict[str, int]:
-        """변경 알림 긴 폴링 — 버전이 ``after`` 를 넘거나 ``wait_s`` 가 지나면 답한다."""
+        """변경 알림 긴 폴링 — 버전이 ``after`` 를 넘거나 ``wait_s`` 가 지나면 답한다.
+
+        피호출자 에이전트도 받은 표의 판정을 캐시하므로 자기 신원으로 따라온다 — 알림은 버전뿐이다.
+        """
         return {"version": await registry.wait_for_change(after, timeout_s=wait_s)}
 
     app.include_router(steward)
     app.include_router(enforcer)
+    app.include_router(feed)
+
+
+def _enforcer_or_agent(registry: AccessRegistry, enforcer_token: str | None) -> Any:
+    """강제 지점 토큰, 또는 살아 있는 에이전트 신원."""
+
+    def check(request: Request) -> None:
+        presented = presented_token(request) or ""
+        if enforcer_token is None:
+            return
+        if hmac.compare_digest(presented.encode(), enforcer_token.encode()):
+            return
+        try:
+            registry.identify(presented)
+        except MalkuthError as err:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="invalid access feed credential",
+                headers={"WWW-Authenticate": "Bearer"},
+            ) from err
+
+    return check
 
 
 def _mount_operator(api: APIRouter, registry: AccessRegistry) -> None:

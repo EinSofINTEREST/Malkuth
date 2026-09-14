@@ -18,6 +18,7 @@ from malkuth.core.errors import ErrorCode, MalkuthError
 from malkuth.core.manifest import RESERVED_GLOBAL_GROUP, MemoryMode
 
 if TYPE_CHECKING:
+    from malkuth.access.store import AccessStore
     from malkuth.catalog import Catalog
     from malkuth.core.manifest import GroupManifest
 
@@ -84,4 +85,32 @@ class MemoryBaseline:
             raise
 
 
-__all__ = ["SPACE_ID", "MemoryBaseline"]
+@dataclass(frozen=True)
+class A2ABaseline:
+    """Declared A2A connections — the graph the caller is deployed in.
+
+    그래프의 ``connections`` 가 기본 권한이다 (03 Enforcement). 호출자가 **지금 배포된** 그래프만
+    본다 — 같은 두 에이전트를 잇는 그래프가 저장소에 있어도 배포되지 않았으면 연결이 아니다.
+
+    Attributes:
+        catalog: 그래프 선언.
+        store: 호출자의 살아 있는 신원이 어느 그래프에 배포됐는지.
+    """
+
+    catalog: Catalog
+    store: AccessStore
+
+    def allows(self, agent: str, target: str, mode: Mode | None) -> bool:
+        for graph in sorted(self.store.live_graphs(agent)):
+            try:
+                topology = self.catalog.graph(graph)
+            except MalkuthError as err:
+                if err.code == ErrorCode.NF_001:
+                    continue
+                raise
+            if any(c.caller == agent and c.callee == target for c in topology.spec.connections):
+                return True
+        return False
+
+
+__all__ = ["SPACE_ID", "A2ABaseline", "MemoryBaseline"]

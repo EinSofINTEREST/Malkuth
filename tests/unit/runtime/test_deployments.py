@@ -1072,3 +1072,13 @@ async def test_with_a_registry_the_memory_token_is_the_agent_identity(workspace,
     )
     await manager.launcher.stop_all()
     await again.launcher.stop_all()
+
+
+async def test_each_identity_records_the_graph_it_was_deployed_in(manager):
+    """A2A 선언 판정은 호출자가 지금 배포된 그래프의 connections 를 본다 (#281)."""
+    registry = with_access(manager)
+
+    await manager.deploy("two")
+
+    assert registry.store.live_graphs("alpha") == frozenset({"two"})
+    await manager.launcher.stop_all()

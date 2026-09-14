@@ -52,6 +52,11 @@ class AccessStore(Protocol):
 
     def rule(self, rule_id: str) -> Rule | None: ...
     def rules(self, agent: str) -> Sequence[Rule]: ...
+
+    def touch(self) -> int:
+        """Bump the version for a change that has no record — a declaration file changed."""
+        ...
+
     def version(self) -> int: ...
 
 
@@ -89,6 +94,10 @@ class InMemoryAccessStore:
 
     def rules(self, agent: str) -> Sequence[Rule]:
         return sorted((r for r in self._rules.values() if r.agent == agent), key=_order)
+
+    def touch(self) -> int:
+        self._version += 1
+        return self._version
 
     def version(self) -> int:
         return self._version
@@ -249,6 +258,10 @@ class SqliteAccessStore:
                 .fetchall()
             )
         return [_rule(row) for row in rows]
+
+    def touch(self) -> int:
+        with self._transaction() as conn:
+            return _bump(conn)
 
     def version(self) -> int:
         with self._lock:

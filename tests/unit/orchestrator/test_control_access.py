@@ -202,6 +202,24 @@ async def test_a_mode_that_does_not_fit_the_kind_is_rejected(api, registry, path
     assert not registry.rules("worker")
 
 
+async def test_an_enforcer_learns_who_a_credential_belongs_to(api, registry):
+    worker = registry.issue_identity("worker", "dep-1")
+
+    known = await api.post(
+        "/v1/access/identities", json={"credential": worker}, headers=bearer(ENFORCER)
+    )
+    unknown = await api.post(
+        "/v1/access/identities", json={"credential": "made-up"}, headers=bearer(ENFORCER)
+    )
+    as_operator = await api.post(
+        "/v1/access/identities", json={"credential": worker}, headers=bearer(CONTROL)
+    )
+
+    assert known.json()["agent"] == "worker"
+    assert unknown.status_code == 200 and unknown.json()["agent"] is None
+    assert as_operator.status_code == 401, "운영자 토큰으로 강제 지점 라우트를 부를 수 없다"
+
+
 async def test_an_unknown_credential_is_a_cacheable_deny(api):
     response = await api.post(
         "/v1/access/decisions",

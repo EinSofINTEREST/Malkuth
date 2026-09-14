@@ -65,6 +65,22 @@ class Baseline(Protocol):
     def allows(self, agent: str, target: str, mode: Mode | None) -> bool: ...
 
 
+DECLARATIONS_POLL_S = 2.0
+
+
+def declaration_fingerprint(catalog: Catalog) -> tuple[tuple[str, int, int, int], ...]:
+    """선언 판정과 상한이 읽는 파일의 (경로, inode, 크기, mtime) — 원자적 교체는 inode 가 바뀐다."""
+    paths = sorted(
+        [*catalog.roots.agents.glob("*/manifest.yaml"), *catalog.roots.groups.glob("*.yaml")]
+    )
+    found = []
+    for path in paths:
+        with contextlib.suppress(FileNotFoundError):
+            stat = path.stat()
+            found.append((str(path), stat.st_ino, stat.st_size, stat.st_mtime_ns))
+    return tuple(found)
+
+
 def credential_hash(credential: str) -> str:
     """저장하고 대조하는 것은 해시다 — 저장 파일이 새도 사칭할 수 없다."""
     return hashlib.sha256(credential.encode()).hexdigest()
@@ -117,7 +133,13 @@ class AccessRegistry:
     baselines: Mapping[ResourceKind, Baseline] = field(default_factory=dict)
     clock: Callable[[], float] = time.time
     metrics: Metrics | None = None
+    declarations_poll_s: float = DECLARATIONS_POLL_S
+    """선언 파일 변경을 몇 초마다 보는가 — 변경 알림 긴 폴링도 이 간격으로 깨어 확인한다."""
     _changed: asyncio.Event | None = field(default=None, init=False, repr=False)
+    _declarations: tuple[tuple[str, int, int, int], ...] | None = field(
+        default=None, init=False, repr=False
+    )
+    _declarations_seen_at: float = field(default=float("-inf"), init=False, repr=False)
 
     # --- 신원 ---------------------------------------------------------------
 
@@ -168,6 +190,7 @@ class AccessRegistry:
             MalkuthError: VALIDATION/``VAL_002`` if the mode does not fit the kind.
         """
         _check_mode(kind, mode, memory_needs_mode=True)
+        self._sync_declarations()
         now = self.clock()
         active = [
             r for r in self.store.rules(agent) if r.active(now) and r.covers(kind, target, mode)
@@ -360,6 +383,7 @@ class AccessRegistry:
         return list(self.store.rules(agent))
 
     def version(self) -> int:
+        self._sync_declarations()
         return self.store.version()
 
     async def wait_for_change(self, after: int, timeout_s: float) -> int:
@@ -368,17 +392,43 @@ class AccessRegistry:
         강제 지점의 변경 알림 (01 Access Control — 캐시 + 변경 알림). 긴 폴링이라 알림을 받는 쪽이
         연결을 끊어도 레지스트리에 남는 상태가 없다.
         """
-        current = self.store.version()
-        if current > after:
-            return current
-        if self._changed is None:
-            self._changed = asyncio.Event()
-        event = self._changed
-        with contextlib.suppress(TimeoutError):
-            await asyncio.wait_for(event.wait(), timeout=timeout_s)
-        return self.store.version()
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_s
+        while True:
+            current = self.version()
+            remaining = deadline - loop.time()
+            if current > after or remaining <= 0:
+                return current
+            if self._changed is None:
+                self._changed = asyncio.Event()
+            event = self._changed
+            # 기록 변경은 이벤트가 깨우지만 선언 파일 변경은 아무도 알려주지 않는다 — 짧게 끊어 본다
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(
+                    event.wait(), timeout=min(remaining, max(self.declarations_poll_s, 0.05))
+                )
 
     # --- 내부 ---------------------------------------------------------------
+
+    def _sync_declarations(self) -> None:
+        """선언 파일이 바뀌었으면 버전을 올린다 — 선언 판정을 캐시한 강제 지점이 버리게.
+
+        처음 볼 때도 올린다: 레지스트리가 멈춘 동안 파일이 바뀌었는지 알 수 없고, 강제 지점은
+        재시작 전 버전의 캐시를 들고 있을 수 있다.
+        """
+        now = self.clock()
+        if now - self._declarations_seen_at < self.declarations_poll_s:
+            return
+        self._declarations_seen_at = now
+        current = declaration_fingerprint(self.catalog)
+        if current == self._declarations:
+            return
+        first = self._declarations is None
+        self._declarations = current
+        self.store.touch()
+        self._wake_waiters()
+        if not first:
+            log.info("access declarations changed", files=len(current))
 
     def _record(self, rule: Rule, *, op: str) -> Rule:
         self.store.put_rule(rule)

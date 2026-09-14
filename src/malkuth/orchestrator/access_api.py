@@ -63,6 +63,12 @@ class GrantRequest(_Request):
     requested_by: str = Field(min_length=1, max_length=200)
 
 
+class IdentityRequest(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    credential: str = Field(min_length=1, max_length=512)
+
+
 class DecisionRequest(_Request):
     credential: str = Field(min_length=1, max_length=512)
     target: str = _TARGET
@@ -141,6 +147,21 @@ def mount_access(
             "version": decision.version,
             "valid_until": decision.valid_until,
         }
+
+    @enforcer.post("/v1/access/identities")
+    async def identify(body: Annotated[Any, Body()]) -> dict[str, Any]:
+        """자격 → 에이전트. 강제 지점이 대상을 해석하려면 먼저 누구인지 알아야 한다 (메모리 별칭).
+
+        모르는 자격도 에러가 아니라 ``agent: null`` 이다 — 판정과 같은 이유로 캐시할 수 있어야 한다.
+        """
+        asked = parsed(body, IdentityRequest)
+        try:
+            agent: str | None = registry.identify(asked.credential)
+        except MalkuthError as err:
+            if err.code != ErrorCode.ACC_001:
+                raise
+            agent = None
+        return {"agent": agent, "version": registry.version()}
 
     @enforcer.get("/v1/access/changes")
     async def changes(

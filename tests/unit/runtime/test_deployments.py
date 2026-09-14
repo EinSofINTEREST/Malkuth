@@ -852,5 +852,27 @@ async def test_a_restart_after_reattach_keeps_the_baked_image(workspace, docker,
     assert second.launcher.launched[("alpha", 0)].restart_args["image"] == (
         "malkuth/agent-alpha:0.1.0"
     )
-    assert second.launcher.launched[("beta", 0)].restart_args["image"] is None
+    assert second.launcher.launched[("beta", 0)].restart_args["image"] == DEFAULT_BASE_IMAGE
+    await second.launcher.stop_all()
+
+
+async def test_reattach_restarts_with_the_image_that_was_deployed(workspace, docker, healthy):
+    """재부착은 **실제로 배포된** 이미지로 다시 세운다 — 지금 스토어에서 다시 유도하지 않는다.
+
+    재시작한 control plane 이 재료 스토어 없이 떴다면 유도 결과가 None 이 되고, 다음 health
+    재시작이 base 이미지로 떨어져 커스텀 실행기가 조용히 사라진다.
+    """
+    wired_workspace(workspace)
+    store = InMemoryDeploymentStore()
+    first = wired_manager(workspace, docker, store)
+    first.images = FakeImages({"alpha"}, {"alpha": built("alpha")})
+    await first.deploy("wired")
+
+    second = wired_manager(workspace, docker, store)
+    second.images = None  # 재료·빌드 스토어가 설정되지 않은 채 재시작했다
+    await second.reattach()
+
+    assert second.launcher.launched[("alpha", 0)].restart_args["image"] == (
+        "malkuth/agent-alpha:0.1.0"
+    )
     await second.launcher.stop_all()

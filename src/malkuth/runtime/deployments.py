@@ -664,13 +664,16 @@ class DeploymentManager:
         manifests = self._agents_of(topology)
         ports = {a.name: a.a2a_port for a in record.agents if a.a2a_port is not None}
         provisions = self._provision(topology, manifests, a2a_secret=record.a2a_secret, ports=ports)
+        # 이미지는 **기록에서** 가져온다 — 지금 스토어로 다시 유도하면, 재료·빌드 스토어 없이
+        # 재시작한 control plane 에서는 None 이 되어 다음 재시작이 base 이미지로 떨어진다
+        deployed = {a.name: a.image for a in record.agents}
         return {
             m.name: {
                 "manifest": m,
                 "secrets": self._env_for(m, provisions[m.name]),
                 "memory": self._memory_for(m),
                 "mounts": provisions[m.name].mounts,
-                "image": provisions[m.name].image,
+                "image": deployed.get(m.name) or provisions[m.name].image,
             }
             for m in manifests
         }

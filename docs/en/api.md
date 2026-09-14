@@ -144,6 +144,11 @@ Writes declarations to disk after validating them. Location is identity: a graph
 `docs-demo` lives at `graphs/docs-demo.yaml`, so the path segment and the declared name must
 agree (`VAL_002` otherwise).
 
+Because a name becomes a file path, every route that takes an agent, graph or group name
+checks it first: lowercase letters, digits and single hyphens only. Anything else, such as
+`..`, a slash or an uppercase letter, is `400` (`VAL_002`) and nothing on disk is read, written
+or deleted. The same holds for reads, material routes and image routes.
+
 ### `POST /v1/validate`
 
 Validates drafts **without writing anything**. This is what the editor calls on every change.

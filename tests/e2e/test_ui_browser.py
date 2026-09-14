@@ -334,6 +334,7 @@ def test_a_custom_agent_is_built_deployed_and_run_by_clicking(page):
     try:
         _save_custom_agent(page, "0.1.0")
         _fail_a_build_and_read_why(page)
+        _refuse_materials_for_an_unsaved_version(page)
         _save_custom_agent(page, "0.1.1")
         _save_good_materials(page)
         _compose_custom_graph(page)
@@ -405,6 +406,13 @@ def _fail_a_build_and_read_why(page) -> None:
     log = page.locator("#image-log")
     assert log.is_visible()
     assert "broken-on-purpose" in log.inner_text(), log.inner_text()
+
+
+def _refuse_materials_for_an_unsaved_version(page) -> None:
+    """폼의 버전만 올리고 저장하지 않으면, 서버는 옛 버전에 재료를 넣는다 — 화면이 막는다."""
+    page.fill("#agent-form [name=version]", "0.1.1")
+    page.click("#materials-load")
+    _status_includes(page, "에이전트를 먼저 저장하세요")
 
 
 def _save_good_materials(page) -> None:

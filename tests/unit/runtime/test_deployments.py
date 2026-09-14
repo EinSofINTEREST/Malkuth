@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from malkuth.access.registry import ACCESS_CREDENTIAL_ENV, AccessRegistry
 from malkuth.authoring import Author
 from malkuth.catalog import Catalog
 from malkuth.core.agent import HealthState, HealthStatus
@@ -876,3 +877,89 @@ async def test_reattach_restarts_with_the_image_that_was_deployed(workspace, doc
         "malkuth/agent-alpha:0.1.0"
     )
     await second.launcher.stop_all()
+
+
+# --- 에이전트 신원 (#277) ------------------------------------------------------------
+
+
+def with_access(manager: DeploymentManager) -> AccessRegistry:
+    from malkuth.access.store import InMemoryAccessStore
+
+    registry = AccessRegistry(store=InMemoryAccessStore(), catalog=manager.catalog)
+    manager.access = registry
+    return registry
+
+
+async def test_each_deployed_agent_carries_its_own_identity(manager, docker):
+    registry = with_access(manager)
+
+    record = await manager.deploy("two")
+
+    credentials = {a.name: a.access_credential for a in record.agents}
+    for name, credential in credentials.items():
+        created = next(c for c in docker.created if c["name"] == f"malkuth-{name}-0")
+        assert created["environment"][ACCESS_CREDENTIAL_ENV] == credential
+        assert registry.identify(credential) == name
+    assert len(set(credentials.values())) == 2, "에이전트끼리 신원을 공유하면 서로를 사칭한다"
+    await manager.launcher.stop_all()
+
+
+async def test_tearing_down_revokes_the_identities(manager):
+    registry = with_access(manager)
+    record = await manager.deploy("two")
+
+    await manager.teardown(record.deployment_id)
+
+    for agent in record.agents:
+        with pytest.raises(MalkuthError) as exc_info:
+            registry.identify(agent.access_credential)
+        assert exc_info.value.code == ErrorCode.ACC_001
+
+
+async def test_a_rolled_back_deployment_leaves_no_live_identity(workspace, healthy):
+    """되감긴 배포의 신원이 살아 있으면 없는 컨테이너 이름으로 강제 지점을 통과한다."""
+    failing = TrackingDocker(start_error=RuntimeError("no room"))
+    catalog = Catalog.under(workspace)
+    manager = DeploymentManager(
+        catalog=catalog,
+        author=Author(catalog=catalog),
+        launcher=AgentLauncher(engine=DockerEngine(client=failing)),
+        store=InMemoryDeploymentStore(),
+        secrets_env={"ANTHROPIC_API_KEY": "k"},
+        ready_poll_s=0.0,
+        sleep=NoSleep(),
+    )
+    registry = with_access(manager)
+
+    with pytest.raises(MalkuthError):
+        await manager.deploy("two")
+
+    identities = list(registry.store._identities.values())  # noqa: SLF001
+    assert identities, "신원이 발급되지 않았다 — 되감기 확인이 공허하다"
+    assert all(identity.revoked_at is not None for identity in identities)
+
+
+async def test_reattach_reinjects_the_recorded_identity(workspace, docker, healthy):
+    wired_workspace(workspace)
+    store = InMemoryDeploymentStore()
+    first = wired_manager(workspace, docker, store)
+    with_access(first)
+    record = await first.deploy("wired")
+
+    second = wired_manager(workspace, docker, store)
+    second.access = first.access
+    await second.reattach()
+
+    beta = next(a for a in record.agents if a.name == "beta")
+    assert second.launcher.launched[("beta", 0)].restart_args["secrets"][ACCESS_CREDENTIAL_ENV] == (
+        beta.access_credential
+    )
+    await second.launcher.stop_all()
+
+
+async def test_without_a_registry_no_identity_is_injected(manager, docker):
+    record = await manager.deploy("two")
+
+    assert all(ACCESS_CREDENTIAL_ENV not in c["environment"] for c in docker.created)
+    assert all(a.access_credential == "" for a in record.agents)
+    await manager.launcher.stop_all()

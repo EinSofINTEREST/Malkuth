@@ -207,8 +207,8 @@ finding 은 에러 상태가 아니라 `200` 이다 — "아직 유효한가?" �
 declarative 에이전트는 재료가 없고 굽지도 않는다 — base 이미지에 선언을 마운트해 돈다.
 
 굽기는 명시적 단계다. 재료를 저장해도 굽지 않고, 배포도 굽지 않는다 — 그 버전의 이미지가
-`built` 가 아닌 커스텀 에이전트는 배포가 **거절한다** (`409`, `RT_012`.
-[`POST /v1/deployments`](#post-v1deployments) 참조).
+`built` 가 아닌 커스텀 에이전트는 배포가 **거절한다** (`409`, `RT_012`) —
+[`POST /v1/deployments`](#post-v1deployments) 참조.
 
 ### `GET /v1/agents/{name}/materials`
 

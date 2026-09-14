@@ -85,12 +85,10 @@ def test_a_symlink_that_leaves_the_root_is_refused(catalog, workspace, tmp_path)
     """규칙에 맞는 이름이라도 해석한 경로가 루트 밖이면 막는다 — 규칙이 느슨해져도 남는 방어."""
     outside = tmp_path / "elsewhere" / "escape"
     outside.mkdir(parents=True)
-    (outside / "manifest.yaml").write_text(
-        yaml.safe_dump(
-            yaml.safe_load((workspace / "agents" / "planner" / "manifest.yaml").read_text())
-        ),
-        encoding="utf-8",
-    )
+    # 이름까지 맞춘 온전한 매니페스트 — 포함 확인이 없으면 그대로 읽힌다
+    document = yaml.safe_load((workspace / "agents" / "planner" / "manifest.yaml").read_text())
+    document["metadata"]["name"] = "escape"
+    (outside / "manifest.yaml").write_text(yaml.safe_dump(document), encoding="utf-8")
     (workspace / "agents" / "escape").symlink_to(outside, target_is_directory=True)
 
     with pytest.raises(MalkuthError) as exc_info:

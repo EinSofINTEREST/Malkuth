@@ -463,7 +463,8 @@ def _control_client(args: argparse.Namespace) -> Any:
 def _report_control_failure(err: MalkuthError, *, as_json: bool) -> int:
     """조작 실패를 사람이 읽을 형태로 — 연결 거부를 그대로 던지지 않는다."""
     emit(
-        {"status": "failed", "error_code": str(err.code), "message": err.message, **err.details},
+        # 세부를 먼저 — 세부의 키가 명령 결과(`status`)나 코드를 덮지 못하게
+        {**err.details, "status": "failed", "error_code": str(err.code), "message": err.message},
         as_json=as_json,
     )
     return EXIT_FAILED

@@ -39,19 +39,40 @@ def _failed(url: str, response: httpx.Response, *, run_scoped: bool) -> MalkuthE
     없으므로, 그 404 는 **엔드포인트가 없다**는 뜻이다 (버전이 안 맞는 Control
     Plane). 둘을 뭉개면 운영자가 없는 run 을 찾아 헤맨다.
     """
+    # `status` 가 아니라 `http_status` 다 — CLI 출력의 `status` 는 명령의 결과(failed)이고,
+    # 세부가 같은 키를 쓰면 "failed" 가 "400" 으로 덮여 스크립트가 분기하지 못한다
+    details = {"url": url, "http_status": str(response.status_code)}
     if response.status_code == httpx.codes.NOT_FOUND and run_scoped:
         return MalkuthError(
             category=ErrorCategory.NOT_FOUND,
             code=ErrorCode.NF_001,
             message="unknown run",
-            details={"url": url, "status": str(response.status_code)},
+            details=details,
         )
-    return MalkuthError(
-        category=ErrorCategory.RUNTIME,
-        code=ErrorCode.GRAPH_001,
-        message=_detail(response),
-        details={"url": url, "status": str(response.status_code)},
-    )
+    category, code = _server_code(response)
+    return MalkuthError(category=category, code=code, message=_detail(response), details=details)
+
+
+def _server_code(response: httpx.Response) -> tuple[ErrorCategory, str]:
+    """서버가 준 카테고리와 코드를 그대로 옮긴다.
+
+    전부 한 코드로 뭉개면 운영자는 "빌드가 이미 진행 중(RT_011)" 과 "재료가 규약 위반
+    (VAL_002)" 을 구분하지 못한다 — 둘의 조치는 정반대다. 본문이 구조화 에러가 아니면
+    (버전이 다른 control plane, 프록시 페이지) 이전과 같은 일반 실패로 둔다.
+    """
+    fallback = (ErrorCategory.RUNTIME, str(ErrorCode.GRAPH_001))
+    try:
+        body = response.json()
+    except ValueError:
+        return fallback
+    error = body.get("error") if isinstance(body, dict) else None
+    if not isinstance(error, dict) or not isinstance(error.get("code"), str):
+        return fallback
+    try:
+        category = ErrorCategory(str(error.get("category")))
+    except ValueError:
+        category = ErrorCategory.RUNTIME
+    return category, error["code"]
 
 
 def _detail(response: httpx.Response) -> str:

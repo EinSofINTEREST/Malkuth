@@ -497,6 +497,10 @@ SHA-256 해시만 저장하며, 값은 어떤 API 응답에도 실리지 않는�
 따라서 회수는 선언과 부여를 모두 이긴다. 메모리에 `mode: "rw"` 로 회수하면 쓰기만 막고 읽기는
 남는다.
 
+2단계는 강제 지점이 갖춰진 자원 종류에만 적용된다. 종류별 선언 판정은 그것을 쓰는 강제 지점과
+함께 연결되므로, 선언과 강제가 따로 놀 수 없다. 그 전까지는 해당 종류에서 선언이 아무것도
+허용하지 않고, 부여가 없는 요청은 `decided_by: "default"` 로 `deny` 된다.
+
 ### 확장 상한
 
 권한 에이전트는 운영자가 그 에이전트의 그룹이나 `global` 에 선언한 **상한** 안에서만 권한을
@@ -516,8 +520,10 @@ spec:
       a2a: []
 ```
 
-상한이 없는 그룹은 확장도 없다. 상한 변경은 선언 변경이며, 권한 에이전트는 자기 상한을 바꾸지
-못한다.
+상한이 없는 그룹은 확장도 없다. 그룹 상한과 `global` 이 같은 요청을 함께 덮으면 더 작은
+`max_ttl_s` 가 적용된다. 메모리 space 는 명시적인 영구 space id(`local|group|global:<소유자>:<별칭>`)
+여야 하고, 어떤 대상도 비어 있거나 와일드카드를 담을 수 없다. 상한 변경은 선언 변경이며, 권한
+에이전트는 자기 상한을 바꾸지 못한다.
 
 ### `POST /v1/access/grants` — 권한 에이전트
 
@@ -530,7 +536,8 @@ curl -X POST -H "Authorization: Bearer $MALKUTH_ACCESS_CREDENTIAL" \
 ```
 
 `kind` 는 `memory`, `egress`, `mcp_tool`, `a2a` 중 하나다. `mode`(`ro`/`rw`)는 메모리에는 필수,
-나머지에는 없다. `201` 로 기록을 돌려준다:
+나머지에는 없어야 한다. 종류에 맞지 않는 mode 는 회수·판정을 포함한 모든 권한 라우트에서 `400`
+(`VAL_002`) 이다. `201` 로 기록을 돌려준다:
 
 ```json
 {
@@ -555,8 +562,13 @@ curl -X POST -H "Authorization: Bearer $MALKUTH_ACCESS_CREDENTIAL" \
 ```
 
 ```json
-{"agent": "researcher", "decision": "allow", "decided_by": "permission-agent", "version": 42}
+{"agent": "researcher", "decision": "allow", "decided_by": "permission-agent", "version": 42,
+ "valid_until": 1789381800.0}
 ```
+
+`valid_until` 은 이 판정의 근거가 된 기록 중 가장 이른 만료 시각이며, 없으면 `null` 이다. 만료는
+레지스트리 버전을 올리지 않으므로, 강제 지점은 `valid_until` 이 지난 캐시 판정을 쓰면 안 된다 —
+레지스트리에 닿지 않는 동안에도 자기 시계로 알 수 있다. 메모리 판정에는 `mode` 가 필요하다.
 
 모르거나 폐기된 신원은 에러가 아니다: `200` 에
 `{"agent": null, "decision": "deny", "decided_by": "unknown-identity"}` 로 답해, 강제 지점이 다른

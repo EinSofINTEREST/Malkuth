@@ -512,6 +512,11 @@ In order, first match wins:
 A revocation therefore beats both the declaration and any grant. For memory, revoking with
 `mode: "rw"` removes writing only — reading stays.
 
+Step 2 counts only for a resource kind whose enforcement point is in place. Each kind's
+declaration check is wired together with the enforcement point that uses it, so the
+declaration and its enforcement cannot drift apart. Until then, a declaration contributes
+nothing for that kind, and a request with no grant is `deny` with `decided_by: "default"`.
+
 ### Expansion ceilings
 
 A permission agent can widen an agent's permissions only inside the **ceiling** the operator
@@ -531,8 +536,10 @@ spec:
       a2a: []
 ```
 
-A group without a ceiling gets no expansion. Changing a ceiling is a declaration change; a
-permission agent cannot change its own.
+A group without a ceiling gets no expansion. When the group's ceiling and `global` both
+cover a request, the smaller `max_ttl_s` applies. Memory spaces must be explicit persistent
+space ids (`local|group|global:<owner>:<alias>`), and no target may be blank or contain a
+wildcard. Changing a ceiling is a declaration change; a permission agent cannot change its own.
 
 ### `POST /v1/access/grants` — permission agent
 
@@ -545,7 +552,8 @@ curl -X POST -H "Authorization: Bearer $MALKUTH_ACCESS_CREDENTIAL" \
 ```
 
 `kind` is `memory`, `egress`, `mcp_tool` or `a2a`; `mode` (`ro`/`rw`) is required for memory
-and absent otherwise. `201` returns the record:
+and must be absent otherwise. A mode that does not fit the kind is `400` (`VAL_002`) on every
+access route, including revocations and decisions. `201` returns the record:
 
 ```json
 {
@@ -572,8 +580,14 @@ is `404`.
 ```
 
 ```json
-{"agent": "researcher", "decision": "allow", "decided_by": "permission-agent", "version": 42}
+{"agent": "researcher", "decision": "allow", "decided_by": "permission-agent", "version": 42,
+ "valid_until": 1789381800.0}
 ```
+
+`valid_until` is the earliest expiry among the records behind this decision, or `null`.
+Expiry does not move the registry version, so an enforcement point must not use a cached
+decision past `valid_until` — its own clock tells it when, even while the registry is
+unreachable. Memory decisions require `mode`.
 
 An unknown or revoked identity is not an error: it is answered `200` with
 `{"agent": null, "decision": "deny", "decided_by": "unknown-identity"}`, so the enforcement

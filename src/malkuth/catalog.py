@@ -105,10 +105,25 @@ def contained(root: Path, kind: str, name: str, *parts: str) -> Path:
     if not isinstance(name, str) or not NAME_PATTERN.fullmatch(name):
         raise invalid_name(kind, str(name))
     path = root.joinpath(*parts) if parts else root / name
-    base = root.resolve()
-    if not path.resolve().is_relative_to(base):
+    resolved = inside(root, path)
+    if resolved is None:
         raise invalid_name(kind, name)
-    return path
+    # 검사한 **정규 경로**를 돌려준다 — 원래 경로를 돌려주면 검사 뒤에 링크가 바뀌었을 때
+    # 쓰기·삭제·마운트가 새 대상을 따라간다
+    return resolved
+
+
+def inside(root: Path, path: Path) -> Path | None:
+    """``path`` 의 정규 경로가 ``root`` 안이면 그 경로, 아니면 None.
+
+    링크 순환이나 읽을 수 없는 구간은 해석 자체가 실패한다 — 그것도 밖으로 본다.
+    """
+    try:
+        resolved = path.resolve()
+        base = root.resolve()
+    except (OSError, RuntimeError):
+        return None
+    return resolved if resolved.is_relative_to(base) else None
 
 
 def _invalid(path: Path, err: ValidationError) -> MalkuthError:
@@ -159,6 +174,7 @@ def _collect[T: BaseModel](
     key: Callable[[T], str],
     *,
     located: Callable[[Path], str],
+    root: Path | None = None,
 ) -> Listing[T]:
     """파싱해 이름으로 묶는다 — **위치가 곧 정체성**이다.
 
@@ -169,6 +185,16 @@ def _collect[T: BaseModel](
     items: dict[str, T] = {}
     problems: list[Problem] = []
     for path in sorted(paths):
+        if root is not None and inside(root, path) is None:
+            # 조용히 건너뛰면 운영자가 왜 목록에 없는지 모른다 — 깨진 선언처럼 보고한다
+            problems.append(
+                Problem(
+                    path=str(path),
+                    code=ErrorCode.VAL_002,
+                    message="declaration resolves outside its root",
+                )
+            )
+            continue
         try:
             parsed = _parse(path, model)
             if key(parsed) != located(path):
@@ -228,6 +254,7 @@ class Catalog:
             AgentManifest,
             lambda m: m.name,
             located=lambda path: path.parent.name,
+            root=self.roots.agents,
         )
 
     def agent_path(self, name: str) -> Path:
@@ -248,6 +275,7 @@ class Catalog:
             GraphTopology,
             lambda g: g.metadata.name,
             located=lambda path: path.stem,
+            root=self.roots.graphs,
         )
 
     def graph_path(self, name: str) -> Path:
@@ -268,6 +296,7 @@ class Catalog:
             GroupManifest,
             lambda g: g.metadata.name,
             located=lambda path: path.stem,
+            root=self.roots.groups,
         )
 
     def group_path(self, name: str) -> Path:

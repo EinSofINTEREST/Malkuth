@@ -184,6 +184,14 @@ class ModuleRegistry:
                 message=f"module not found: {ref}",
                 details={"module_ref": ref, "expected_path": str(manifest_file)},
             )
+        if not _within(root, manifest_file):
+            # 모듈 루트 안의 링크가 밖을 가리키면 루트 밖 코드와 선언을 모듈로 로드한다 (#273)
+            raise MalkuthError(
+                category=ErrorCategory.MODULE,
+                code=ErrorCode.MOD_001,
+                message=f"module resolves outside the registry root: {ref}",
+                details={"module_ref": ref},
+            )
 
         return ModulePath(ref=parsed, root=module_root, manifest_file=manifest_file)
 
@@ -207,6 +215,14 @@ class ModuleRegistry:
         document = _read_yaml(path.manifest_file, ref)
         _check_integrity(document, path, ref)
         return path, document
+
+
+def _within(root: Path, path: Path) -> bool:
+    """정규 경로가 루트 안인가 — 링크 순환처럼 해석이 실패하면 밖으로 본다."""
+    try:
+        return path.resolve().is_relative_to(root.resolve())
+    except (OSError, RuntimeError):
+        return False
 
 
 def _read_yaml(file: Path, ref: str) -> dict[str, Any]:

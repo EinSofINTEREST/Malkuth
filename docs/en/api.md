@@ -19,6 +19,8 @@ It reads `configs/{MALKUTH_ENV}.yaml`. Which surfaces open depends on that file:
 | Runs (read, drain) | always |
 | Catalog, authoring | always — `registry.roots` resolves against `MALKUTH_REPO_ROOT` |
 | Deployments, run submission, resume | `orchestrator.deployment_store` is set |
+| Build materials | `orchestrator.material_store` is set — otherwise the routes answer `400` (`CFG_001`) |
+| Image builds, and the deploy gate on custom agents | `orchestrator.material_store` **and** `orchestrator.build_store` are set — otherwise the image routes are absent (`404`) |
 | Web UI at `/ui` | always |
 
 Without `orchestrator.deployment_store` the process refuses to start containers and answers
@@ -197,10 +199,129 @@ points at:
 the `details` differ by reason: an agent still used by saved graphs lists them in
 `referenced_by`, while anything currently deployed reports `kind` and `name` instead.
 
-**Only the declaration is removed.** An agent that carries its own `Dockerfile` or `src/`
-keeps them: the file the control plane wrote is the file it deletes, and code you wrote is
-not the control plane's to throw away. The agent disappears from the catalog while that
-directory stays on disk.
+**Only the declaration is removed.** The manifest file goes; the agent's directory under
+`agents/` stays, and so do its build materials in the material store. Materials stay bound
+to their version: if you declare the same name and version again, you get those materials
+back, and different materials under that version are still refused (`MOD_002`). Bump the
+version to start over.
+
+## Build materials and images
+
+A custom agent is an agent with **build materials**: a `Dockerfile` (optional) and a `src/`
+tree. They live in the control plane's material store, keyed by the agent's name and its
+declared version, not in the repository. Declarative agents have none and never build: they
+run on the base image with their declarations mounted.
+
+Building is an explicit step. Saving materials does not build, and deploying does not build
+either — a deploy **refuses** a custom agent whose image for that version is not `built`
+(`409`, `RT_012`; see [`POST /v1/deployments`](#post-v1deployments)).
+
+### `GET /v1/agents/{name}/materials`
+
+The materials for the agent's **current** version. An agent without any is not an error:
+
+```json
+{"agent": "docs-custom", "version": "0.1.0", "files": {}, "updated_at": ""}
+```
+
+`404` (`NF_001`) if the agent is not declared.
+
+### `PUT /v1/agents/{name}/materials`
+
+Stores the materials for the agent's current version. The body maps context-relative paths
+to text content:
+
+```bash
+curl -X PUT -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+  -d '{"files": {"src/marker.py": "MARK = 1\n"}}' \
+  http://127.0.0.1:8700/v1/agents/docs-custom/materials
+```
+
+The response has the same shape as `GET`, with `updated_at` stamped. The rules:
+
+- **Paths** are `Dockerfile` or under `src/`, relative, posix-style, and already normalised
+  (`src/./a.py` and `src//a.py` are refused, as is anything with `..`). At most 200 files,
+  each at most 256 KiB of text. Violations are `400` (`VAL_002`) with the offending `path`
+  in `details`.
+- **A version's materials are immutable.** Different content under the same version is `400`
+  (`MOD_002`); identical content is idempotent. Bump the agent's version, save the agent,
+  then save the new materials.
+- **Materials of a deployed agent cannot change** (`400`, `VAL_002`).
+
+The `Dockerfile` is checked when you build, not when you save.
+
+### `DELETE /v1/agents/{name}/materials`
+
+`204`. Clears the materials of the current version, so the agent runs as a declarative agent
+again. The version stays taken: saving different materials under it afterwards is still
+`MOD_002`. Refused while the agent is deployed.
+
+### `POST /v1/agents/{name}/image`
+
+Submits a build and returns at once with `202`:
+
+```json
+{"agent": "docs-custom", "version": "0.1.0", "status": "building",
+ "image": "malkuth/agent-docs-custom:0.1.0", "error": null, "log": "",
+ "updated_at": "2026-09-14T11:02:03.123456+00:00"}
+```
+
+The builder assembles a temporary build context from the catalog and the store, bakes it as
+`malkuth/agent-<name>:<version>`, and deletes the directory:
+
+```
+Dockerfile        # yours, or the skeleton when you saved none
+manifest.yaml     # the agent's declaration
+modules/          # the module roots
+src/              # your materials
+```
+
+The skeleton copies those three into `/app` and puts `/app/src` on `PYTHONPATH`, so a manifest
+`spec.entrypoint: agent:MyAgent` resolves to `src/agent.py`. A `Dockerfile` of your own must:
+
+- start `FROM malkuth/agent-base:<tag>` — the base carries `agentd`;
+- not end as `root` (going up to install and back down is fine);
+- `COPY`/`ADD` only from inside the context — no absolute paths, no `..`, no remote URLs.
+
+What is refused before anything is built:
+
+- `404` (`NF_001`) — the agent is not declared.
+- `400` (`VAL_002`) — the agent has no materials, or the `Dockerfile` breaks one of the rules
+  above.
+- `409` (`RT_011`) — a build of this version is already running. Two builds would write the
+  same tag, and the one that finished last would win.
+
+A build that starts and then fails is **not** an HTTP error. It ends as `failed` in the
+record below. `error` only says which image failed; the cause is in `log`, the tail of
+Docker's output:
+
+```
+Step 2/2 : RUN exit 3
+ ---> Running in 80c5a8ac55e7
+The command '/bin/sh -c exit 3' returned a non-zero code: 3
+```
+
+### `GET /v1/agents/{name}/image`
+
+The build record for the agent's current version, plus whether it needs one:
+
+```json
+{"agent": "docs-custom", "version": "0.1.2", "status": "failed",
+ "image": "malkuth/agent-docs-custom:0.1.2", "needs_build": true,
+ "error": "image build failed: malkuth/agent-docs-custom:0.1.2",
+ "log": "Step 1/2 : FROM malkuth/agent-base:0.1.0\n ... returned a non-zero code: 3",
+ "updated_at": "..."}
+```
+
+| `status` | Meaning |
+|---|---|
+| `null` | never built |
+| `building` | a build is running — poll again |
+| `built` | the image exists; a deploy may use it |
+| `failed` | the last build failed — read `error` and `log` |
+
+`needs_build` is `false` for an agent without materials. `log` keeps the last 8000 characters.
+Records survive a control plane restart.
 
 ## Deployments
 
@@ -352,8 +473,13 @@ them, and answering `200` would leave an operator believing a resume happened.
 | `GET /v1/runs` | `malkuth run-list [--mode service]` |
 | `POST /v1/runs/{id}/drain` | `malkuth run-drain <id>` |
 | `POST /v1/runs/{id}/resume` | `malkuth run-resume <id>` |
+| `PUT /v1/agents/{name}/materials` | `malkuth agent-push <name> <directory>` |
+| `POST` + `GET /v1/agents/{name}/image` | `malkuth agent-build <name> [--wait]` |
 
-The run commands take `--control-url` and `--control-token` (or `MALKUTH_CONTROL_TOKEN`).
+These commands take `--control-url` and `--control-token` (or `MALKUTH_CONTROL_TOKEN`).
+`agent-push` reads a directory, skips cache directories such as `__pycache__`, and refuses
+symbolic links. `agent-build --wait` exits non-zero when the build fails and prints the log
+tail.
 
 `malkuth validate` is deliberately absent from that table: it is a **local** command that
 reads the repository directly and takes no control-plane flags. `POST /v1/validate` is the

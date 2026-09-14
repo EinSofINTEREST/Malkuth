@@ -18,6 +18,8 @@ python -m malkuth.orchestrator
 | Run 조회·drain | 항상 |
 | 카탈로그·저작 | 항상 — `registry.roots` 는 `MALKUTH_REPO_ROOT` 기준으로 해석된다 |
 | 배포·run 제출·재개 | `orchestrator.deployment_store` 가 설정된 경우 |
+| 빌드 재료 | `orchestrator.material_store` 가 설정된 경우 — 아니면 라우트가 `400` (`CFG_001`) 로 답한다 |
+| 이미지 빌드, 커스텀 에이전트의 배포 게이트 | `orchestrator.material_store` **와** `orchestrator.build_store` 가 모두 설정된 경우 — 아니면 이미지 라우트가 없다 (`404`) |
 | `/ui` 의 Web UI | 항상 |
 
 `orchestrator.deployment_store` 가 없으면 컨테이너를 띄우지 않고
@@ -193,9 +195,122 @@ finding 은 에러 상태가 아니라 `200` 이다 — "아직 유효한가?" �
 다르다 — 저장된 그래프가 쓰는 에이전트는 그 목록을 `referenced_by` 에 싣고, 현재 배포 중인
 것은 `kind` 와 `name` 을 싣는다.
 
-**선언만 지운다.** 자체 `Dockerfile` 이나 `src/` 를 가진 에이전트는 그것들을 그대로 유지한다 —
-control plane 이 쓴 파일이 곧 control plane 이 지우는 파일이고, 사람이 쓴 코드는 control
-plane 이 버릴 것이 아니다. 카탈로그에서는 사라지지만 그 디렉토리는 디스크에 남는다.
+**선언만 지운다.** 매니페스트 파일은 사라지지만 `agents/` 아래의 디렉토리는 남고, 재료
+스토어의 빌드 재료도 남는다. 재료는 버전에 묶여 있다: 같은 이름과 버전을 다시 선언하면 그
+재료가 돌아오고, 그 버전에 다른 재료를 넣는 것은 여전히 거절된다 (`MOD_002`). 새로
+시작하려면 버전을 올린다.
+
+## 빌드 재료와 이미지
+
+커스텀 에이전트는 **빌드 재료**를 가진 에이전트다: `Dockerfile`(선택)과 `src/` 트리. 재료는
+저장소가 아니라 control plane 의 재료 스토어에 에이전트 이름과 선언된 버전을 키로 산다.
+declarative 에이전트는 재료가 없고 굽지도 않는다 — base 이미지에 선언을 마운트해 돈다.
+
+굽기는 명시적 단계다. 재료를 저장해도 굽지 않고, 배포도 굽지 않는다 — 그 버전의 이미지가
+`built` 가 아닌 커스텀 에이전트는 배포가 **거절한다** (`409`, `RT_012`.
+[`POST /v1/deployments`](#post-v1deployments) 참조).
+
+### `GET /v1/agents/{name}/materials`
+
+에이전트 **현재** 버전의 재료. 없는 것은 오류가 아니다:
+
+```json
+{"agent": "docs-custom", "version": "0.1.0", "files": {}, "updated_at": ""}
+```
+
+에이전트가 선언되지 않았으면 `404` (`NF_001`).
+
+### `PUT /v1/agents/{name}/materials`
+
+에이전트 현재 버전의 재료를 저장한다. 본문은 컨텍스트 상대 경로 → 텍스트 내용이다:
+
+```bash
+curl -X PUT -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+  -d '{"files": {"src/marker.py": "MARK = 1\n"}}' \
+  http://127.0.0.1:8700/v1/agents/docs-custom/materials
+```
+
+응답은 `GET` 과 같은 모양이고 `updated_at` 이 찍힌다. 규칙:
+
+- **경로**는 `Dockerfile` 이거나 `src/` 아래, 상대·posix 형식, 이미 정규화된 형태여야 한다
+  (`src/./a.py`, `src//a.py`, `..` 가 들어간 것은 거절). 파일은 최대 200개, 각각 텍스트
+  256 KiB 까지. 위반은 `400` (`VAL_002`) 이고 `details` 에 문제의 `path` 가 실린다.
+- **한 버전의 재료는 불변이다.** 같은 버전에 다른 내용은 `400` (`MOD_002`), 같은 내용은
+  멱등이다. 에이전트 버전을 올려 에이전트를 저장한 뒤 새 재료를 저장한다.
+- **배포 중인 에이전트의 재료는 바꿀 수 없다** (`400`, `VAL_002`).
+
+`Dockerfile` 은 저장할 때가 아니라 구울 때 검사한다.
+
+### `DELETE /v1/agents/{name}/materials`
+
+`204`. 현재 버전의 재료를 비워 에이전트가 다시 declarative 에이전트로 돈다. 버전은 계속
+점유된다: 그 뒤에 그 버전으로 다른 재료를 저장해도 `MOD_002` 다. 배포 중이면 거절한다.
+
+### `POST /v1/agents/{name}/image`
+
+빌드를 제출하고 곧바로 `202` 로 돌아온다:
+
+```json
+{"agent": "docs-custom", "version": "0.1.0", "status": "building",
+ "image": "malkuth/agent-docs-custom:0.1.0", "error": null, "log": "",
+ "updated_at": "2026-09-14T11:02:03.123456+00:00"}
+```
+
+빌더는 카탈로그와 스토어에서 임시 빌드 컨텍스트를 조립해 `malkuth/agent-<name>:<version>`
+으로 굽고, 그 디렉토리를 지운다:
+
+```
+Dockerfile        # 사용자의 것, 저장하지 않았으면 스켈레톤
+manifest.yaml     # 에이전트의 선언
+modules/          # 모듈 루트
+src/              # 재료
+```
+
+스켈레톤은 이 셋을 `/app` 에 복사하고 `/app/src` 를 `PYTHONPATH` 에 올린다. 그래서
+매니페스트의 `spec.entrypoint: agent:MyAgent` 는 `src/agent.py` 로 해석된다. 직접 쓴
+`Dockerfile` 은 다음을 지켜야 한다:
+
+- `FROM malkuth/agent-base:<tag>` 로 시작한다 — base 에 `agentd` 가 들어 있다
+- `root` 로 끝나지 않는다 (설치하려고 올라갔다 내려오는 것은 괜찮다)
+- `COPY`/`ADD` 는 컨텍스트 안에서만 — 절대 경로, `..`, 원격 URL 금지
+
+굽기 전에 거절되는 경우:
+
+- `404` (`NF_001`) — 에이전트가 선언되지 않았다.
+- `400` (`VAL_002`) — 재료가 없거나 `Dockerfile` 이 위 규칙을 어겼다.
+- `409` (`RT_011`) — 이 버전의 빌드가 이미 진행 중이다. 두 빌드가 같은 태그를 쓰면 늦게
+  끝난 쪽이 이긴다.
+
+시작한 뒤 실패한 빌드는 HTTP 오류가 **아니다**. 아래 기록에 `failed` 로 남는다. `error` 는
+어느 이미지가 실패했는지만 말하고, 원인은 Docker 출력의 꼬리인 `log` 에 있다:
+
+```
+Step 2/2 : RUN exit 3
+ ---> Running in 80c5a8ac55e7
+The command '/bin/sh -c exit 3' returned a non-zero code: 3
+```
+
+### `GET /v1/agents/{name}/image`
+
+에이전트 현재 버전의 빌드 기록과, 빌드가 필요한지:
+
+```json
+{"agent": "docs-custom", "version": "0.1.2", "status": "failed",
+ "image": "malkuth/agent-docs-custom:0.1.2", "needs_build": true,
+ "error": "image build failed: malkuth/agent-docs-custom:0.1.2",
+ "log": "Step 1/2 : FROM malkuth/agent-base:0.1.0\n ... returned a non-zero code: 3",
+ "updated_at": "..."}
+```
+
+| `status` | 의미 |
+|---|---|
+| `null` | 구운 적이 없다 |
+| `building` | 굽는 중 — 다시 조회한다 |
+| `built` | 이미지가 있다 — 배포가 쓸 수 있다 |
+| `failed` | 마지막 빌드가 실패했다 — `error` 와 `log` 를 읽는다 |
+
+재료가 없는 에이전트는 `needs_build` 가 `false` 다. `log` 는 마지막 8000자를 보관한다. 기록은
+control plane 재시작을 넘는다.
 
 ## 배포
 
@@ -342,8 +457,13 @@ curl -X POST -H "Authorization: Bearer $TOKEN" -H 'content-type: application/jso
 | `GET /v1/runs` | `malkuth run-list [--mode service]` |
 | `POST /v1/runs/{id}/drain` | `malkuth run-drain <id>` |
 | `POST /v1/runs/{id}/resume` | `malkuth run-resume <id>` |
+| `PUT /v1/agents/{name}/materials` | `malkuth agent-push <name> <directory>` |
+| `POST` + `GET /v1/agents/{name}/image` | `malkuth agent-build <name> [--wait]` |
 
-run 관련 명령은 `--control-url` 과 `--control-token` (또는 `MALKUTH_CONTROL_TOKEN`) 을 받는다.
+이 명령들은 `--control-url` 과 `--control-token` (또는 `MALKUTH_CONTROL_TOKEN`) 을 받는다.
+`agent-push` 는 디렉토리를 읽되 `__pycache__` 같은 캐시 디렉토리는 건너뛰고 심볼릭 링크는
+거절한다. `agent-build --wait` 은 빌드가 실패하면 로그 꼬리를 출력하고 0 이 아닌 코드로
+끝난다.
 
 `malkuth validate` 를 표에서 뺀 것은 의도적이다 — 저장소를 직접 읽는 **로컬** 명령이고
 control plane 플래그를 받지 않는다. 저장하지 않은 초안을 검증하는 원격 대응이

@@ -23,6 +23,7 @@ from malkuth.agentd import __main__ as agentd
 from malkuth.agentd.executor import Executor, ModuleBinding
 from malkuth.core.errors import MalkuthError
 from malkuth.core.manifest import AgentManifest
+from malkuth.core.skill import SkillContext
 from malkuth.observability.metrics import Metrics
 from tests.fixtures.builders import make_task
 from tests.fixtures.fake_model import FakeModel, FakeTools, calls, text
@@ -203,3 +204,74 @@ def test_the_served_app_reloads_the_standard_executor(root, tmp_path, monkeypatc
 
     assert response.json()["status"] == "reloaded"
     assert served["executor"].binding.render(make_task(**FRESH)).startswith("FRESH q")
+
+
+# --- #274 리뷰: 스킬 코드 리로드, 커스텀 entrypoint -------------------------------------
+
+
+async def test_reload_executes_changed_skill_code(root, monkeypatch):
+    """선언만 다시 읽고 코드는 import 캐시에서 가져오면, 고친 스킬이 반영되지 않는다."""
+    skillset = root / "modules" / "skillsets" / "probe" / "0.1.0"
+    (skillset / "skills").mkdir(parents=True)
+    (skillset / "skills" / "__init__.py").write_text("", encoding="utf-8")
+    (skillset / "skillset.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "apiVersion": "malkuth/v1",
+                "kind": "Skillset",
+                "metadata": {"name": "probe", "version": "0.1.0"},
+                "spec": {"skills": [{"name": "answer", "entrypoint": "skills.answer:answer"}]},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def code(value: str) -> str:
+        return (
+            "from malkuth.core.skill import SkillContext, skill\n"
+            "@skill\n"
+            "async def answer(ctx: SkillContext) -> str:\n"
+            '    """설명."""\n'
+            f"    return '{value}'\n"
+        )
+
+    (skillset / "skills" / "answer.py").write_text(code("before"), encoding="utf-8")
+    doc = planner().model_dump(mode="json", by_alias=True, exclude_none=True)
+    doc["spec"]["skillsets"] = [{"ref": "skillsets/probe@0.1.0"}]
+    manifest = AgentManifest.model_validate(doc)
+    executor = await agentd.build_executor(manifest)
+    reload = agentd.build_reload(manifest, executor)
+    ctx = SkillContext(agent="planner", task_id="t", run_id="r")
+    name = next(iter(executor.binding.tools._skills))
+    assert await executor.binding.tools.call(name, {}, ctx) == "before"
+
+    (skillset / "skills" / "answer.py").write_text(code("after"), encoding="utf-8")
+    await reload()
+
+    assert await executor.binding.tools.call(name, {}, ctx) == "after"
+
+
+def test_a_custom_entrypoint_is_not_given_the_standard_reload(root, tmp_path, monkeypatch):
+    """entrypoint 가 Executor 를 돌려주더라도 그 배선은 표준 조립과 다를 수 있다."""
+    doc = planner().model_dump(mode="json", by_alias=True, exclude_none=True)
+    doc["spec"]["entrypoint"] = "agent:Custom"
+    manifest_path = tmp_path / "manifest.yaml"
+    manifest_path.write_text(yaml.safe_dump(doc), encoding="utf-8")
+    monkeypatch.setenv(agentd.MANIFEST_ENV, str(manifest_path))
+    monkeypatch.setenv(agentd.TOKEN_ENV, "agent-token")
+    monkeypatch.setattr(agentd, "_setup_observability", Metrics)
+    custom = Executor(agent="planner", model=FakeModel([text("x")]), tools=FakeTools(), render=str)
+
+    async def build(manifest, **kwargs):
+        return custom
+
+    monkeypatch.setattr(agentd, "build_executor", build)
+    served = {}
+    monkeypatch.setattr(agentd, "_serve", lambda app, manifest, executor: served.update(app=app))
+
+    agentd.main()
+
+    response = TestClient(served["app"]).post(
+        "/v1/reload", headers={"Authorization": "Bearer agent-token"}
+    )
+    assert response.json()["status"] == "unsupported"

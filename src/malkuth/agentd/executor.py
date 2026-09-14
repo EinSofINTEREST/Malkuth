@@ -189,6 +189,21 @@ def _tool_error(name: str, task: TaskRequest, agent: str, err: BaseException) ->
     )
 
 
+@dataclass(frozen=True)
+class ModuleBinding:
+    """What the executor takes from modules — the unit a reload swaps (#274).
+
+    모듈에서 온 것 네 가지를 한 묶음으로 둔다. 태스크는 시작할 때 이것을 **한 번** 잡고
+    끝까지 쓴다: 도중에 갈아 끼우면 한 태스크 안에서 프롬프트는 옛 템플릿, 도구는 새 목록이
+    섞인다 (02 Hot Reload — 신규 태스크부터 적용).
+    """
+
+    tools: ToolRegistry
+    render: Callable[[TaskRequest], str]
+    tool_schemas: tuple[Any, ...] = ()
+    output_keys: Callable[[TaskRequest], Sequence[str]] | None = None
+
+
 class Executor:
     """Runs a task through the model/tool loop.
 
@@ -208,13 +223,34 @@ class Executor:
     ) -> None:
         self._agent = agent
         self._model = model
-        self._tools = tools
-        self._render = render
-        self._tool_schemas = list(tool_schemas)
         self._config = config or ExecutorConfig()
         self._services = services or ExecutorServices()
+        self._binding = ModuleBinding(
+            tools=tools,
+            render=render,
+            tool_schemas=tuple(tool_schemas),
+            output_keys=self._services.output_keys,
+        )
         # 멱등성: 완료된 태스크는 같은 결과를 돌려준다 (재시도/재개 시나리오)
         self._completed: dict[str, TaskResult] = {}
+
+    @property
+    def binding(self) -> ModuleBinding:
+        """지금 새 태스크가 잡을 모듈 묶음."""
+        return self._binding
+
+    @property
+    def tool_schemas(self) -> list[Any]:
+        """모델과 peer 에게 광고하는 도구 — 실행할 수 있는 것만."""
+        return list(self._binding.tool_schemas)
+
+    def rebind(self, binding: ModuleBinding) -> None:
+        """Swap the module binding for tasks that start from now on.
+
+        진행 중인 태스크는 시작할 때 잡은 묶음으로 끝까지 간다. 교체는 참조 하나의 대입이라
+        이벤트 루프 안에서 원자적이다.
+        """
+        self._binding = binding
 
     async def execute(self, task: TaskRequest) -> TaskResult:
         """Run a task to completion.
@@ -284,7 +320,9 @@ class Executor:
             status=result.status.value, duration_s=duration_s, graph=task.trace.graph
         )
 
-    def _shape_output(self, content: str, task: TaskRequest) -> dict[str, Any]:
+    def _shape_output(
+        self, content: str, task: TaskRequest, binding: ModuleBinding
+    ) -> dict[str, Any]:
         """Build the task output from the model's final response.
 
         선언된 키가 없으면 기존대로 ``{"content": ...}`` 하나입니다.
@@ -298,7 +336,7 @@ class Executor:
                 declared key is missing — 조용히 빈 출력으로 떨어지면 그래프가
                 다음 노드에서야 GRAPH_003 으로 실패해 원인이 멀어집니다.
         """
-        keys = tuple(self._services.output_keys(task)) if self._services.output_keys else ()
+        keys = tuple(binding.output_keys(task)) if binding.output_keys else ()
         if not keys:
             return {"content": content}
 
@@ -326,7 +364,7 @@ class Executor:
             details={"declared": ",".join(keys), "content": content[-300:]},
         )
 
-    async def _initial_prompt(self, task: TaskRequest) -> str:
+    async def _initial_prompt(self, task: TaskRequest, binding: ModuleBinding) -> str:
         """Build the task-entry prompt, recalling memory once.
 
         09 Context Assembly 의 구성 순서를 따릅니다:
@@ -336,7 +374,7 @@ class Executor:
         않습니다 (09 Rule 7). 추가 탐색은 모델이 ``memory_search`` 를 명시
         호출합니다.
         """
-        prompt = self._render(task)
+        prompt = binding.render(task)
         if self._services.recall is None:
             return prompt
 
@@ -357,7 +395,7 @@ class Executor:
                 return TaskResult.completed(task, output=event.output, usage=event.usage)
         raise AssertionError("event loop ended without a terminal event")  # pragma: no cover
 
-    async def _call_model(self, prompt: str) -> ModelResponse:
+    async def _call_model(self, prompt: str, binding: ModuleBinding) -> ModelResponse:
         """모델 한 번 — 실패도 메트릭에 남겨야 하므로 여기서 감싼다.
 
         **재시도 안쪽**이라 시도마다 계수된다: 05 의 rate limit 알림은
@@ -365,10 +403,10 @@ class Executor:
         provider 압박이 지표에서 사라진다.
         """
         if self._services.telemetry is None:
-            return await self._model.run(prompt, self._tool_schemas)
+            return await self._model.run(prompt, list(binding.tool_schemas))
 
         try:
-            response = await self._model.run(prompt, self._tool_schemas)
+            response = await self._model.run(prompt, list(binding.tool_schemas))
         except asyncio.CancelledError:
             raise
         except Exception as err:
@@ -378,7 +416,7 @@ class Executor:
         self._services.telemetry.model_called(status=STATUS_COMPLETED, usage=response.usage)
         return response
 
-    async def _model_turn(self, prompt: str) -> ModelResponse:
+    async def _model_turn(self, prompt: str, binding: ModuleBinding) -> ModelResponse:
         """모델 한 턴 — 정책이 허용하는 실패는 재시도한다.
 
         **재시도 주체는 agentd 다** (05 Retry Layering). provider SDK 재시도는
@@ -389,25 +427,27 @@ class Executor:
         """
 
         async def attempt() -> ModelResponse:
-            return await self._call_model(prompt)
+            return await self._call_model(prompt, binding)
 
         return await retrying_any(
             self._config.retry_policies, attempt, sleep=self._config.retry_sleep, agent=self._agent
         )
 
-    def _tool_timeout(self, name: str, task: TaskRequest) -> float:
+    def _tool_timeout(self, name: str, task: TaskRequest, binding: ModuleBinding) -> float:
         """tool 실행 상한 — per-tool 선언이 있으면 그것, 없으면 더 엄격한 쪽."""
-        declared = self._tools.timeout_for(name)
+        declared = binding.tools.timeout_for(name)
         if declared:
             return declared
         return min(task.config.tool_timeout_s, self._config.tool_timeout_s)
 
-    async def _run_tool(self, call: ToolCall, task: TaskRequest, ctx: SkillContext) -> Any:
+    async def _run_tool(
+        self, call: ToolCall, task: TaskRequest, ctx: SkillContext, binding: ModuleBinding
+    ) -> Any:
         """단일 tool 을 상한 안에서 실행하고 실패를 변환한다."""
-        timeout = self._tool_timeout(call.name, task)
+        timeout = self._tool_timeout(call.name, task, binding)
         try:
             result = await asyncio.wait_for(
-                self._tools.call(call.name, call.arguments, ctx), timeout=timeout
+                binding.tools.call(call.name, call.arguments, ctx), timeout=timeout
             )
         except TimeoutError as err:
             self._record_tool(call.name, status=STATUS_FAILED)
@@ -541,14 +581,16 @@ class Executor:
         Raises:
             MalkuthError: When a turn fails or the turn ceiling is reached.
         """
-        prompt = await self._initial_prompt(task)
+        # 이 태스크가 끝까지 쓸 모듈 묶음 — 리로드가 도중에 갈아 끼워도 섞이지 않는다
+        binding = self._binding
+        prompt = await self._initial_prompt(task, binding)
         usage = ModelUsage()
         max_turns = self._max_turns(task)
         ctx = self._skill_context(task)
 
         try:
             for turn in range(max_turns):
-                response = await self._model_turn(prompt)
+                response = await self._model_turn(prompt, binding)
                 usage = usage.merge(response.usage)
 
                 if response.content:
@@ -557,7 +599,7 @@ class Executor:
                 if response.is_final:
                     yield DoneEvent(
                         task_id=task.task_id,
-                        output=self._shape_output(response.content, task),
+                        output=self._shape_output(response.content, task, binding),
                         usage=usage,
                     )
                     return
@@ -573,7 +615,7 @@ class Executor:
                 results = []
                 failure: MalkuthError | None = None
                 for event, outcome in await self._invoke_tools(
-                    response.tool_calls, task, ctx, turn
+                    response.tool_calls, task, ctx, turn, binding
                 ):
                     yield event
                     if isinstance(outcome, MalkuthError):
@@ -622,7 +664,12 @@ class Executor:
         )
 
     async def _invoke_tools(
-        self, calls: Sequence[ToolCall], task: TaskRequest, ctx: SkillContext, turn: int
+        self,
+        calls: Sequence[ToolCall],
+        task: TaskRequest,
+        ctx: SkillContext,
+        turn: int,
+        binding: ModuleBinding,
     ) -> list[tuple[ToolResultEvent, Any]]:
         """독립 tool 호출을 병렬 실행하고, 각 결과를 이벤트와 짝지어 돌려준다.
 
@@ -634,7 +681,7 @@ class Executor:
         """
         started = time.monotonic()
         outcomes = await asyncio.gather(
-            *(self._run_tool(call, task, ctx) for call in calls),
+            *(self._run_tool(call, task, ctx, binding) for call in calls),
             return_exceptions=True,
         )
         elapsed_ms = int((time.monotonic() - started) * 1000)

@@ -190,7 +190,7 @@ async def test_the_production_assembly_wires_the_peer_client(monkeypatch):
 
     built = await build_executor(load_manifest(REPO_ROOT / "agents/researcher/manifest.yaml"))
 
-    assert built._tools.peers is not None
+    assert built.binding.tools.peers is not None
 
 
 async def test_no_peer_addresses_means_no_client(monkeypatch):
@@ -205,7 +205,7 @@ async def test_no_peer_addresses_means_no_client(monkeypatch):
 
     built = await build_executor(load_manifest(REPO_ROOT / "agents/researcher/manifest.yaml"))
 
-    assert built._tools.peers is None
+    assert built.binding.tools.peers is None
 
 
 async def test_a_signing_secret_alone_is_not_enough(monkeypatch):
@@ -224,7 +224,7 @@ async def test_a_signing_secret_alone_is_not_enough(monkeypatch):
 
     built = await build_executor(load_manifest(REPO_ROOT / "agents/researcher/manifest.yaml"))
 
-    assert built._tools.peers is None
+    assert built.binding.tools.peers is None
 
 
 def test_peer_addresses_are_parsed_from_the_runtime_injection():

@@ -7,10 +7,11 @@ import/실행되며, tool 스키마는 함수 시그니처에서 자동 생성�
 from __future__ import annotations
 
 import hashlib
+import importlib.abc
 import importlib.machinery
 import importlib.util
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Literal
@@ -214,8 +215,15 @@ class SkillsetLoader:
     격리 import 되며, 스킬셋 간 import 는 허용하지 않는다.
     """
 
-    def __init__(self, registry: ModuleRegistry) -> None:
+    def __init__(self, registry: ModuleRegistry, *, generation: int = 0) -> None:
+        """Args:
+        registry: Module resolution.
+        generation: Import namespace generation. 같은 세대끼리는 import 한 모듈을 공유하고,
+            세대가 바뀌면 스킬 코드를 **새로 실행**한다. 리로드가 세대를 올린다 (#274) —
+            ``sys.modules`` 캐시를 그대로 쓰면 코드를 고치고 리로드해도 옛 함수가 남는다.
+        """
         self._registry = registry
+        self._generation = generation
 
     def load(self, ref: str) -> LoadedSkillset:
         """Load a skillset and bind its skill functions.
@@ -245,7 +253,7 @@ class SkillsetLoader:
 
     def _bind(self, declaration: SkillDeclaration, path: ModulePath, ref: str) -> LoadedSkill:
         """선언된 entrypoint 를 실제 함수로 해석하고 스키마를 도출한다."""
-        module = _import_module(declaration.module_name, path, ref)
+        module = _import_module(declaration.module_name, path, ref, generation=self._generation)
         fn = getattr(module, declaration.function_name, None)
         if fn is None:
             raise MalkuthError(
@@ -324,7 +332,59 @@ def _make_package(name: str, directory: Path) -> ModuleType:
     return module
 
 
-def _import_module(module_name: str, path: ModulePath, ref: str) -> Any:
+class _SourceLoader(importlib.machinery.SourceFileLoader):
+    """Always compile skill code from source.
+
+    바이트코드 캐시는 mtime(초 단위)과 크기로 신선도를 본다. 같은 초 안에 같은 크기로 고친
+    파일은 옛 ``.pyc`` 가 그대로 쓰여, 리로드가 세대를 올려도 옛 코드가 실행된다 (#274).
+    스킬 코드는 작아서 매번 컴파일하는 비용이 무시할 만하다.
+    """
+
+    def get_code(self, fullname: str) -> Any:
+        source = self.get_data(self.path)
+        return compile(source, self.path, "exec", dont_inherit=True)
+
+
+_NAMESPACE = "_malkuth_skillset_"
+
+
+class _SkillsetFinder(importlib.abc.MetaPathFinder):
+    """Route every module inside a skillset namespace through `_SourceLoader`.
+
+    진입 모듈만 소스로 컴파일하면, 스킬 코드가 ``from .helper import ...`` 로 끌어오는 하위 모듈은
+    기본 finder 가 바이트코드 캐시로 읽어 옛 코드가 섞인다 (#274).
+    """
+
+    def find_spec(
+        self, fullname: str, path: Sequence[str] | None, target: ModuleType | None = None
+    ) -> importlib.machinery.ModuleSpec | None:
+        if not fullname.startswith(_NAMESPACE) or path is None:
+            return None
+        leaf = fullname.rsplit(".", 1)[-1]
+        for directory in path:
+            package = Path(directory) / leaf / "__init__.py"
+            if package.is_file():
+                return importlib.util.spec_from_file_location(
+                    fullname,
+                    package,
+                    loader=_SourceLoader(fullname, str(package)),
+                    submodule_search_locations=[str(package.parent)],
+                )
+            module = Path(directory) / f"{leaf}.py"
+            if module.is_file():
+                return importlib.util.spec_from_file_location(
+                    fullname, module, loader=_SourceLoader(fullname, str(module))
+                )
+        return None
+
+
+def _install_finder() -> None:
+    """한 번만, 맨 앞에 — 기본 path finder 보다 먼저 봐야 캐시를 우회한다."""
+    if not any(isinstance(finder, _SkillsetFinder) for finder in sys.meta_path):
+        sys.meta_path.insert(0, _SkillsetFinder())
+
+
+def _import_module(module_name: str, path: ModulePath, ref: str, *, generation: int = 0) -> Any:
     """스킬셋 루트를 기준으로 모듈을 격리 import 한다."""
     file = path.root / Path(*module_name.split(".")).with_suffix(".py")
     if not file.is_file():
@@ -338,7 +398,9 @@ def _import_module(module_name: str, path: ModulePath, ref: str) -> Any:
     # 스킬셋 위치별 고유 이름으로 등록해 모듈 네임스페이스가 겹치지 않게 한다.
     # 같은 name@version 이라도 해석 루트가 다르면 다른 모듈이므로 경로를 키에 포함한다
     location = hashlib.sha256(str(path.root.resolve()).encode()).hexdigest()[:12]
-    prefix = f"_malkuth_skillset_{path.name}_{location}"
+    # 세대를 이름에 넣는다 — 패키지 하위 모듈까지 새 이름이 되어 통째로 다시 실행된다.
+    # 옛 세대 모듈은 지우지 않는다: 진행 중 태스크의 옛 함수가 그 네임스페이스를 계속 참조한다
+    prefix = f"{_NAMESPACE}{path.name}_{location}_g{generation}"
     qualified = f"{prefix}.{module_name}"
     if qualified in sys.modules:
         return sys.modules[qualified]
@@ -346,8 +408,11 @@ def _import_module(module_name: str, path: ModulePath, ref: str) -> Any:
     # 중간 패키지를 먼저 등록한다 — 없으면 스킬 코드의 `from .util import ...` 같은
     # 정상적인 스킬셋 내부 import 가 전부 실패한다
     _register_packages(prefix, module_name, path)
+    _install_finder()
 
-    spec = importlib.util.spec_from_file_location(qualified, file)
+    spec = importlib.util.spec_from_file_location(
+        qualified, file, loader=_SourceLoader(qualified, str(file))
+    )
     if spec is None or spec.loader is None:
         raise MalkuthError(
             category=ErrorCategory.MODULE,

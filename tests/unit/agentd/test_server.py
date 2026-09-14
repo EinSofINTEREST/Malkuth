@@ -267,10 +267,47 @@ def test_reload_invokes_the_hook():
     assert reloaded.is_set()
 
 
-def test_reload_without_a_hook_is_accepted():
+def test_reload_without_a_hook_says_it_did_not_reload():
+    """#274 — 훅 없이 ``reloaded`` 로 답하면 호출자는 반영된 줄 안다.
+
+    이전 테스트가 바로 그 거짓을 고정하고 있었다.
+    """
     client, _ = make_client()
 
-    assert client.post("/v1/reload", headers=AUTH).json()["status"] == "reloaded"
+    response = client.post("/v1/reload", headers=AUTH)
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "unsupported"
+
+
+def test_reload_replaces_the_card_the_hook_returns():
+    """card 의 skill 목록은 실제로 로드된 도구와 같아야 한다 (03 AgentCard 1)."""
+
+    async def reload() -> dict:
+        return {"name": "test-agent", "skills": [{"name": "fresh"}]}
+
+    client, _ = make_client(reload=reload)
+
+    client.post("/v1/reload", headers=AUTH)
+
+    assert client.get("/v1/card", headers=AUTH).json()["skills"] == [{"name": "fresh"}]
+
+
+def test_a_failed_reload_is_a_typed_error_and_keeps_the_card():
+    from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
+
+    async def reload() -> dict:
+        raise MalkuthError(
+            category=ErrorCategory.MODULE, code=ErrorCode.MOD_001, message="promptset not found"
+        )
+
+    client, _ = make_client(reload=reload)
+    before = client.get("/v1/card", headers=AUTH).json()
+
+    response = client.post("/v1/reload", headers=AUTH)
+
+    assert response.json()["code"] == ErrorCode.MOD_001
+    assert client.get("/v1/card", headers=AUTH).json() == before
 
 
 def test_drain_marks_the_runtime_draining():

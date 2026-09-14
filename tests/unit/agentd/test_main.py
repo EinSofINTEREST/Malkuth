@@ -271,7 +271,7 @@ async def test_unrunnable_tools_are_not_advertised(monkeypatch):
 
     executor = await researcher_with_memory(monkeypatch)
 
-    advertised = {spec.name for spec in executor._tool_schemas}
+    advertised = {spec.name for spec in executor.tool_schemas}
     assert MEMORY_SEARCH_TOOL not in advertised
     assert "search" in advertised
 
@@ -280,9 +280,9 @@ async def test_every_advertised_tool_is_runnable(monkeypatch):
     """노출과 실행이 어긋나면 그 자체가 결함이다."""
     executor = await researcher_with_memory(monkeypatch)
 
-    for spec in executor._tool_schemas:
-        assert executor._tools.timeout_for(spec.name) >= 0.0
-        assert spec.name in executor._tools._skills
+    for spec in executor.tool_schemas:
+        assert executor.binding.tools.timeout_for(spec.name) >= 0.0
+        assert spec.name in executor.binding.tools._skills
 
 
 def test_mcp_tools_carry_their_schema():

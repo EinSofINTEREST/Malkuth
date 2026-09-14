@@ -344,3 +344,43 @@ def test_loader_stays_quiet_when_every_parameter_is_typed(tmp_path, monkeypatch)
     loader.load("skillsets/custom@0.1.0")
 
     assert [r for r in recorded if "have no type" in r["event"]] == []
+
+
+# --- 리로드: 고친 스킬 코드가 다시 실행되는가 (#274 리뷰) --------------------------------
+
+
+def _versioned_skill(value: str) -> str:
+    return (
+        "from malkuth.core.skill import SkillContext, skill\n"
+        "from .helper import SUFFIX\n"
+        "@skill\n"
+        "async def answer(ctx: SkillContext) -> str:\n"
+        '    """설명."""\n'
+        f"    return '{value}' + SUFFIX\n"
+    )
+
+
+async def test_a_new_generation_executes_changed_skill_code(tmp_path):
+    """같은 세대면 import 캐시가 옛 함수를 준다 — 리로드가 세대를 올리는 이유."""
+    body = HEADER + "    - name: answer\n      entrypoint: skills.answer:answer\n"
+    loader = _write_skillset(
+        tmp_path,
+        yaml_body=body,
+        modules={"answer": _versioned_skill("v1"), "helper": "SUFFIX = '-a'\n"},
+    )
+    ctx = SkillContext(agent="a", task_id="t", run_id="r")
+    first = loader.load("skillsets/custom@0.1.0").get("answer").fn
+
+    skills = tmp_path / "modules" / "skillsets" / "custom" / "0.1.0" / "skills"
+    (skills / "answer.py").write_text(_versioned_skill("v2"), encoding="utf-8")
+    (skills / "helper.py").write_text("SUFFIX = '-b'\n", encoding="utf-8")
+    registry = ModuleRegistry.under(tmp_path)
+    same_generation = SkillsetLoader(registry).load("skillsets/custom@0.1.0").get("answer").fn
+    next_generation = (
+        SkillsetLoader(registry, generation=1).load("skillsets/custom@0.1.0").get("answer").fn
+    )
+
+    assert await first(ctx) == "v1-a"
+    assert await same_generation(ctx) == "v1-a", "같은 세대는 캐시를 공유한다"
+    assert await next_generation(ctx) == "v2-b", "새 세대는 패키지 하위 모듈까지 다시 실행한다"
+    assert await first(ctx) == "v1-a", "옛 함수는 진행 중 태스크를 위해 그대로 남는다"

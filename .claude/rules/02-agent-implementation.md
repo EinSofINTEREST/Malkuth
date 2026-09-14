@@ -285,6 +285,12 @@ Runtime layer →  env_allowlist 각 키를 local > group > global 순으로 해
 ### Hot Reload
 
 - **Promptset / Skillset 교체**: `POST /reload` 로 무중단 리로드 지원 (신규 태스크부터 적용)
+  - 다시 읽는 것: promptset 선언(템플릿 목록·변수·출력 키), skillset 선언과 코드, 광고 도구와 AgentCard.
+    템플릿 **본문**은 렌더할 때마다 읽으므로 리로드와 무관하다
+  - 진행 중 태스크는 시작할 때 잡은 모듈 묶음으로 끝까지 간다 — 한 태스크 안에서 옛·새 모듈이 섞이지 않는다
+  - 새 묶음을 끝까지 조립한 뒤 교체한다. 실패하면 typed 에러로 답하고 이전 상태를 유지한다
+  - 메모리·peer·MCP 연결은 모듈이 아니라 배선이라 유지한다
+  - 리로드할 모듈이 없는 실행기(커스텀 entrypoint, echo)는 `unsupported` 로 답한다
 - **Manifest 변경**: 리로드 불가 — 새 버전으로 재배포 (컨테이너 교체)
 - **MCP 서버 목록 변경**: manifest 변경에 해당 — 재배포
 

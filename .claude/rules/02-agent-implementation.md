@@ -217,17 +217,27 @@ spec:
    - 소속 그룹의 quota 합계 검증 — 초과 시 기동 거부 (`RT_006`)
 
 5. **Network**
-   - 전용 bridge network (`malkuth-net`) 에만 연결
+   - 에이전트는 **외부 경로가 없는 내부 네트워크**(Docker `--internal`)에만 연결한다
+   - 외부로 나가는 유일한 경로는 **egress proxy** — 내부 네트워크와 외부 네트워크에 함께 붙는
+     유일한 컨테이너다 ([01-architecture.md](01-architecture.md) Access Control)
    - 노출 포트는 두 개뿐:
      - **Control port** (agentd, 컨테이너 내부 8080) — runtime layer 만 접근
-     - **A2A port** (manifest 로 활성화 시) — allowlist 된 peer 만 접근
+     - **A2A port** (manifest 로 활성화 시) — 호출마다 레지스트리 판정을 거친 peer 만
    - 호스트 네트워크 모드 금지, 임의 포트 publish 금지
-   - Egress: 모델 API / 선언된 MCP 원격 서버 / A2A peer 외 차단이 이상적 (v0.1 은 정책 문서화, 향후 network policy 적용)
+   - Egress 는 문서화가 아니라 **강제**다: 모델 API 는 base URL 로 프록시가 종단하고, 그 밖의
+     외부 HTTPS 는 프록시가 CONNECT 목적지 호스트 단위로 판정한다
+     ([03-protocol-integration.md](03-protocol-integration.md) Egress)
+   - 전환 시에는 먼저 **기록만 하는 모드**로 켜서 선언되지 않은 외부 호출을 드러낸 뒤 강제한다
+   - 도구 주입 여부(스킬셋·MCP 선언)는 **강제 수단이 아니다** — 컨테이너 안의 코드는 무엇이든
+     실행할 수 있으므로, 외부로 향하는 권한은 프록시의 판정이 쥔다
 
 6. **Volumes**
    - 기본: 볼륨 없음
    - 필요 시 manifest 에 명시 선언 + 에이전트별 격리 경로만 마운트
-   - 에이전트 간 볼륨 공유 금지 (사이드채널 차단)
+   - 에이전트 간 볼륨 공유 금지 (사이드채널 차단). 예외는 runtime 이 거는 **읽기 전용 선언
+     마운트**(자기 매니페스트 디렉토리, 모듈 루트) 하나다 — 쓸 수 없으므로 사이드채널이 아니다
+   - 선언은 **디렉토리 단위**로 마운트한다 — 단일 파일 바인드는 원자적 교체를 반영하지 못해
+     떠 있는 컨테이너가 옛 선언을 읽는다
    - 호스트 민감 경로 (`/var/run/docker.sock` 등) 마운트 절대 금지
 
 ### Secrets Injection — Scoped
@@ -238,7 +248,11 @@ Runtime layer →  env_allowlist 각 키를 local > group > global 순으로 해
               → (기동 시) docker env 주입 → 컨테이너
 ```
 
-- Secrets 는 runtime 이 기동 시점에 env 로 주입 — `env_allowlist` 에 있는 키만
+- **프록시가 종단하는 서비스의 자격증명은 env 로 넣지 않는다**: 모델 API 키와 원격 MCP 서버
+  자격증명은 egress proxy 가 요청에 주입한다. 에이전트 컨테이너는 그 값을 갖지 않으므로
+  회수가 재배포 없이 반영된다
+- 그 밖의 secrets 는 runtime 이 기동 시점에 env 로 주입 — `env_allowlist` 에 있는 키만.
+  env 로 넣은 값은 실시간 회수가 되지 않는다 (재배포 필요)
 - 키 해석은 **local > 소속 group > global** — 가까운 스코프 값이 우선 (shadowing 허용)
 - Group 스코프 키는 group.yaml 의 `secrets` 목록에 선언된 것만 멤버에게 제공 —
   비멤버 에이전트는 같은 키를 allowlist 에 넣어도 group 값으로 해석되지 않는다

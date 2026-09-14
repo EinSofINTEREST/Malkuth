@@ -9,6 +9,10 @@
    - 여러 에이전트가 하나의 MCP 서버 프로세스를 공유하는 것 금지
    - 에이전트 컨테이너 밖의 "글로벌 MCP 허브" / "공용 tool 게이트웨이" 금지
    - A2A 엔드포인트를 우회하는 에이전트 간 직통 채널 금지
+   - **예외 — egress proxy**: 공유 프록시는 도구를 **호스팅하지 않고** MCP 세션도 갖지 않는다.
+     에이전트가 연 호출을 요청 단위로 판정하고 전달만 한다. MCP 서버는 여전히 에이전트별
+     (stdio / 전용 사이드카 / external) 이고, 프록시는 그 사이의 강제 지점일 뿐이다
+     (아래 Egress 절)
 3. **선언 필수**: 에이전트가 사용하는 모든 프로토콜 자원은 manifest 에 선언되어야 한다
 4. **격리 경계 = 컨테이너 경계**: MCP 서버는 소유 에이전트의 컨테이너 내부(stdio) 또는
    해당 에이전트 전용 사이드카로만 실행된다
@@ -53,9 +57,13 @@ spec:
       # researcher → planner 방향 호출만 허용. 역방향은 별도 선언 필요.
 ```
 
-1. **Enforcement (이중 방어)**
-   - Caller 측: agentd 가 allowlist 에 없는 callee 로의 호출을 `A2A_004` 로 거부
-   - Callee 측: runtime 이 발급한 per-edge token 검증 — allowlist 외 호출자 차단
+1. **Enforcement**
+   - **Callee 측이 강제 지점이다**: 피호출자 A2A 서버는 호출마다 호출자의 에이전트 신원으로
+     레지스트리에 `a2a` 판정을 묻고, 거부면 `A2A_004`. 연결을 회수하면 재배포 없이 다음
+     호출부터 거부된다 ([01-architecture.md](01-architecture.md) Access Control)
+   - Caller 측: agentd 가 allowlist 에 없는 callee 로의 호출을 `A2A_004` 로 먼저 거부한다 —
+     헛호출을 줄이는 **편의**이지 강제 수단이 아니다 (컨테이너 안의 검사)
+   - 그래프 `connections` 선언이 기본 권한이고, 운영자는 그것을 실시간으로 회수할 수 있다
 2. **Discovery**: 에이전트는 peer 의 주소를 직접 알지 못한다 —
    `AgentContext.peers` 로 주입된 (allowlist 기반) 목록만 조회 가능
 3. **No Transitive Calls**: A 가 B 를 호출하고 B 가 C 를 호출하는 것은 각각의 선언이 있을 때만
@@ -170,6 +178,38 @@ agentd bootstrap
 - 3단계에서 하나라도 실패하면 Ready 로 전환하지 않는다 (부분 기동 금지)
 - 단, manifest 에 `optional: true` 로 표시된 서버는 실패해도 기동 지속 + WARN 로그
 
+## Egress — 외부로 나가는 모든 호출
+
+에이전트는 외부 경로가 없는 내부 네트워크에만 있다 ([02-agent-implementation.md](02-agent-implementation.md)
+Network). 외부로 나가는 호출은 전부 **egress proxy** 를 거치고, 프록시가 요청마다
+레지스트리 판정을 적용한다.
+
+### 무엇을 어디까지 보는가
+
+| 대상 | 프록시 동작 | 판정 단위 |
+|---|---|---|
+| 모델 API | base URL 로 **종단** — 에이전트는 프록시를 provider 로 부른다 | 요청, 자격증명 주입 |
+| 원격 MCP (sidecar / external) | base URL 로 **종단** | **도구 이름** (`mcp_tool`), 자격증명 주입 |
+| 그 밖의 외부 HTTPS | CONNECT 터널 | 목적지 호스트 (`egress`) |
+
+1. **TLS 가로채기는 하지 않는다**: 종단하지 않는 HTTPS 는 CONNECT 목적지까지만 본다.
+   에이전트에 프록시 CA 를 심지 않는다
+2. **자격증명은 프록시가 주입한다**: 종단하는 서비스의 키는 에이전트 env 에 없다
+   ([02-agent-implementation.md](02-agent-implementation.md) Secrets Injection)
+3. **stdio MCP 와 스킬 코드**: 그 외부 효과는 목적지 판정으로 통제된다. 로컬 효과만 있는
+   동작은 실시간 통제 대상이 아니다
+4. **프록시 자체의 격리**: 프록시는 비밀값을 모두 쥐므로 최소 권한으로 따로 격리한다.
+   도구 코드를 실행하지 않고, 에이전트 네트워크 쪽에는 프록시 포트만 연다
+
+### 공유 프록시에서 사이드카로 옮기는 계기
+
+v0.1 은 **전달 전용 공유 프록시** 하나로 시작한다. 격리 요구가 커지면 에이전트별 사이드카
+프록시로 옮긴다 — 강제 지점의 계약(판정 조회·캐시·장애 시 동작)은 같다. 계기 예:
+
+- 서로 신뢰하지 않는 테넌트의 에이전트가 한 호스트에 올라올 때
+- 프록시 침해의 영향 범위(모든 에이전트의 자격증명)를 받아들일 수 없을 때
+- 에이전트마다 이그레스 규칙이 크게 갈라져 공유 프록시 설정이 복잡해질 때
+
 ## Protocol Error Mapping
 
 프로토콜 계층에서 발생하는 에러는 boundary 에서 `MalkuthError` 로 변환한다.
@@ -186,6 +226,8 @@ agentd bootstrap
 | A2A task 거부/실패 | `a2a` | `A2A_003` | 아니오 |
 | A2A allowlist 위반 | `a2a` | `A2A_004` | 아니오 |
 | A2A 호출 깊이 초과 | `a2a` | `A2A_005` | 아니오 |
+| 이그레스 목적지·원격 MCP 도구 판정 거부 | `forbidden` | `ACC_001` | 아니오 |
+| 판정 불가 (레지스트리 도달 불가, 캐시 없음) | `network` | `ACC_002` | 예 |
 
 ## Version Pinning
 

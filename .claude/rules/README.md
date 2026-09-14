@@ -215,6 +215,8 @@ Key for:
 - No shared mutable state between agents outside the graph state and declared
   scoped memory
 - Resource access is bounded by scope: global / group / local (nearest wins)
+- Permissions that must change at runtime are decided **outside** the agent container, per
+  request — checks inside the container are conveniences, not enforcement
 
 ### 2. Composability
 - Agents connect only through declared graph edges and A2A connections

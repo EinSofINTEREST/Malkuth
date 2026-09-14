@@ -14,7 +14,7 @@ import httpx
 from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
 DEFAULT_CONTROL_URL = "http://127.0.0.1:8700"
 CONTROL_TOKEN_ENV = "MALKUTH_CONTROL_TOKEN"  # noqa: S105 — 키 이름이지 값이 아니다
@@ -172,6 +172,25 @@ class ControlClient:
     def get_run(self, run_id: str) -> dict[str, Any]:
         """run 하나의 상태."""
         found: dict[str, Any] = self._request("GET", f"/v1/runs/{run_id}")
+        return found
+
+    def push_materials(self, agent: str, files: Mapping[str, str]) -> dict[str, Any]:
+        """에이전트 현재 버전의 빌드 재료를 올린다 (#264). 같은 내용이면 그대로 돌아온다."""
+        stored: dict[str, Any] = self._request(
+            "PUT", f"/v1/agents/{agent}/materials", run_scoped=False, body={"files": dict(files)}
+        )
+        return stored
+
+    def build_image(self, agent: str) -> dict[str, Any]:
+        """빌드를 제출한다 — 즉시 돌아온다 (#265). 진행은 `image_status` 로 본다."""
+        started: dict[str, Any] = self._request(
+            "POST", f"/v1/agents/{agent}/image", run_scoped=False
+        )
+        return started
+
+    def image_status(self, agent: str) -> dict[str, Any]:
+        """현재 버전의 빌드 기록 — 굽힌 적 없으면 `status` 가 None 이다."""
+        found: dict[str, Any] = self._request("GET", f"/v1/agents/{agent}/image", run_scoped=False)
         return found
 
     def drain(self, run_id: str) -> dict[str, Any]:

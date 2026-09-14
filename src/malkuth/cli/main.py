@@ -11,6 +11,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -36,6 +37,13 @@ EXIT_FAILED = 1
 """검증/점검 실패 — 운영 스크립트가 분기할 수 있도록 0 과 구분한다."""
 
 EXIT_USAGE = 2
+
+BUILD_POLL_S = 2.0
+"""`agent-build --wait` 의 조회 간격 — 빌드는 분 단위라 촘촘히 물을 이유가 없다."""
+
+DEFAULT_BUILD_TIMEOUT_S = 1800.0
+
+_SKIPPED_MATERIAL_PARTS = frozenset({"__pycache__", ".git", ".venv", "node_modules"})
 
 
 def validate_root(
@@ -539,6 +547,92 @@ def cmd_run_resume(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def read_materials(directory: Path) -> dict[str, str]:
+    """디렉토리를 재료 표현으로 — 컨텍스트 상대 경로 → 내용.
+
+    캐시·의존성 디렉토리는 싣지 않는다: 재료는 **소스**다. 경로·크기 규칙은 control
+    plane 이 검사한다 — 같은 규칙을 여기 두 벌 두지 않는다.
+
+    Raises:
+        MalkuthError: VALIDATION/``VAL_002`` 디렉토리가 아니거나 텍스트가 아닌 파일.
+    """
+    from malkuth.core.errors import ErrorCategory, ErrorCode
+
+    if not directory.is_dir():
+        raise MalkuthError(
+            category=ErrorCategory.VALIDATION,
+            code=ErrorCode.VAL_002,
+            message="materials must be a directory",
+            details={"path": str(directory)},
+        )
+    files: dict[str, str] = {}
+    for path in sorted(directory.rglob("*")):
+        relative = path.relative_to(directory)
+        if not path.is_file() or _SKIPPED_MATERIAL_PARTS & set(relative.parts):
+            continue
+        try:
+            files[relative.as_posix()] = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError as err:
+            raise MalkuthError(
+                category=ErrorCategory.VALIDATION,
+                code=ErrorCode.VAL_002,
+                message="materials must be utf-8 text",
+                details={"path": relative.as_posix()},
+            ) from err
+    return files
+
+
+def cmd_agent_push(args: argparse.Namespace) -> int:
+    """Upload a directory as an agent's build materials.
+
+    디렉토리를 에이전트 현재 버전의 빌드 재료로 올립니다 (#266). 같은 내용을 다시 올리면
+    그대로 성공합니다 — 시드 스크립트가 여러 번 돌아도 안전합니다.
+    """
+    try:
+        stored = _control_client(args).push_materials(
+            args.agent, read_materials(Path(args.directory))
+        )
+    except MalkuthError as err:
+        return _report_control_failure(err, as_json=args.json)
+
+    emit(
+        {"agent": stored["agent"], "version": stored["version"], "files": sorted(stored["files"])},
+        as_json=args.json,
+    )
+    return EXIT_OK
+
+
+def cmd_agent_build(args: argparse.Namespace) -> int:
+    """Bake an agent's image; with ``--wait``, block until it is built or failed.
+
+    빌드를 제출합니다. `--wait` 이면 끝날 때까지 기다리고, 실패하면 0 이 아닌 코드와 함께
+    에러와 로그 꼬리를 보여줍니다 — 배포 게이트(#266)가 막기 전에 여기서 알 수 있습니다.
+    """
+    client = _control_client(args)
+    try:
+        record = client.build_image(args.agent)
+        deadline = time.monotonic() + args.timeout_s
+        while args.wait and record["status"] == "building":
+            if time.monotonic() >= deadline:
+                emit({**_build_summary(record), "note": "timed out waiting"}, as_json=args.json)
+                return EXIT_FAILED
+            time.sleep(BUILD_POLL_S)
+            record = client.image_status(args.agent)
+    except MalkuthError as err:
+        return _report_control_failure(err, as_json=args.json)
+
+    emit(_build_summary(record), as_json=args.json)
+    return EXIT_FAILED if record["status"] == "failed" else EXIT_OK
+
+
+def _build_summary(record: dict[str, Any]) -> dict[str, Any]:
+    summary = {key: record.get(key) for key in ("agent", "version", "status", "image")}
+    if record.get("status") == "failed":
+        summary["error"] = record.get("error")
+        summary["log"] = record.get("log", "")
+    return summary
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the CLI argument parser.
 
@@ -654,6 +748,31 @@ def build_parser() -> argparse.ArgumentParser:
             help=f"control plane token (defaults to ${CONTROL_TOKEN_ENV})",
         )
         command.set_defaults(handler=handler)
+
+    push = subcommands.add_parser("agent-push", help="upload a directory as build materials")
+    push.add_argument("agent", help="the declared agent the materials belong to")
+    push.add_argument("directory", help="build context: Dockerfile (optional) and src/")
+    push.set_defaults(handler=cmd_agent_push)
+
+    bake = subcommands.add_parser("agent-build", help="bake an agent image from its materials")
+    bake.add_argument("agent", help="the declared agent to build")
+    bake.add_argument("--wait", action="store_true", help="block until built or failed")
+    bake.add_argument("--timeout-s", type=float, default=DEFAULT_BUILD_TIMEOUT_S, dest="timeout_s")
+    bake.set_defaults(handler=cmd_agent_build)
+
+    for command in (push, bake):
+        command.add_argument(
+            "--control-url",
+            default=None,
+            dest="control_url",
+            help=f"control plane address (default: {DEFAULT_CONTROL_URL})",
+        )
+        command.add_argument(
+            "--control-token",
+            default=None,
+            dest="control_token",
+            help=f"control plane token (defaults to ${CONTROL_TOKEN_ENV})",
+        )
 
     check = subcommands.add_parser("check", help="report integrity discrepancies")
     check.add_argument("state", help="path to a yaml document describing observed state")

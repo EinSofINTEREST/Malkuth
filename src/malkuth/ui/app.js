@@ -372,7 +372,8 @@ function showImage(record) {
   const line = $("#image-status");
   const log = $("#image-log");
   log.hidden = true;
-  if (!record.needs_build) {
+  // 명시적인 false 만 "재료 없음" 이다 — 빌드 제출 응답(202)에는 needs_build 가 없다
+  if (record.needs_build === false) {
     line.textContent = "재료 없음 — base 이미지 + 선언으로 돕니다 (빌드 불필요)";
     line.className = "muted";
     return;
@@ -392,14 +393,43 @@ function showImage(record) {
   }
 }
 
+// 이미지 라우트가 없는 것(material_store 만 설정)은 문서화된 상태다 — 실패로 보고하면
+// 방금 성공한 재료 저장이 실패처럼 보인다. 라우트 부재는 구조화 에러 코드가 없는 404 다
+const buildSurfaceClosed = (err) => err instanceof ApiError && err.status === 404 && !err.code;
+
 async function refreshImage(name) {
   try { const record = await api.image(name); showImage(record); return record; }
+  catch (err) {
+    if (buildSurfaceClosed(err)) {
+      $("#image-status").textContent = "빌드 표면이 꺼져 있습니다 (build_store 미설정)";
+      $("#image-status").className = "muted";
+      $("#image-log").hidden = true;
+      return null;
+    }
+    report(err);
+    return null;
+  }
+}
+
+// 재료는 **저장된** 매니페스트의 버전에 묶인다. 폼의 버전이 그와 다르면(불러오기가 patch 를
+// 올렸거나 사람이 고쳤다) 서버는 옛 버전에 재료를 넣는다 — 새 버전의 빌드는 "재료 없음" 이
+// 된다. 에이전트를 먼저 저장하게 한다
+async function savedVersionOrRefuse(name) {
+  const formVersion = agentForm.version.value.trim();
+  let saved;
+  try { saved = (await api.agent(name)).metadata.version; }
   catch (err) { report(err); return null; }
+  if (formVersion && formVersion !== saved) {
+    status(`${name}: 폼은 ${formVersion}, 저장된 선언은 ${saved} 입니다 — 에이전트를 먼저 저장하세요`, true);
+    return null;
+  }
+  return saved;
 }
 
 $("#materials-load").addEventListener("click", async () => {
   const name = agentName();
   if (!name) return status("에이전트 이름을 먼저 적거나 불러오세요", true);
+  if (!(await savedVersionOrRefuse(name))) return;
   try {
     const found = await api.materials(name);
     $("#agent-materials tbody").replaceChildren();
@@ -415,16 +445,28 @@ materialsForm.addEventListener("submit", async (event) => {
   const name = agentName();
   if (!name) return status("에이전트 이름을 먼저 적거나 불러오세요", true);
   if (!showMaterialProblems()) return;
+  const version = await savedVersionOrRefuse(name);
+  if (!version) return;
+  const rows = materialRows();
   try {
-    const saved = await api.saveMaterials(name, Object.fromEntries(materialRows()));
-    status(`재료 저장됨: ${name}@${saved.version} (${Object.keys(saved.files).length}개)`);
+    if (rows.length === 0) {
+      // 빈 집합을 PUT 하면 그 버전이 "재료 없음" 으로 굳어 나중에 재료를 넣지 못한다 — 비우기는 삭제다
+      if (!confirm(`${name}@${version} 의 재료를 비울까요? 이 버전에 다른 재료는 다시 넣을 수 없습니다`)) return;
+      await api.deleteMaterials(name);
+      status(`재료 비움: ${name}@${version}`);
+    } else {
+      const saved = await api.saveMaterials(name, Object.fromEntries(rows));
+      status(`재료 저장됨: ${name}@${saved.version} (${Object.keys(saved.files).length}개)`);
+    }
     await refreshImage(name);
+    checkDeployable(); // 재료가 생기면 이 에이전트를 쓰는 그래프는 굽기 전까지 배포할 수 없다
   } catch (err) { showApiFindings("#material-findings", err); report(err); }
 });
 
 $("#image-build").addEventListener("click", async () => {
   const name = agentName();
   if (!name) return status("에이전트 이름을 먼저 적거나 불러오세요", true);
+  if (!(await savedVersionOrRefuse(name))) return;
   try {
     showImage(await api.buildImage(name));
     status(`빌드 제출: ${name}`);
@@ -441,22 +483,32 @@ $("#image-build").addEventListener("click", async () => {
 
 // 굽지 않은 에이전트를 쓰는 그래프는 **누르기 전에** 알린다 (#267). 서버의 게이트(#266)가
 // 판정의 주인이고, 여기서는 같은 질문을 먼저 던질 뿐이다
+let deployCheck = 0;
 async function checkDeployable() {
   const select = $("#deploy-graph");
   const button = $("#deploy-form button[type=submit]");
   const graph = select.value;
-  if (!graph) { $("#deploy-warnings").replaceChildren(); button.disabled = false; return; }
+  const check = ++deployCheck;
+  const current = () => check === deployCheck && select.value === graph;
+  $("#deploy-warnings").replaceChildren();
+  if (!graph) { button.disabled = false; return; }
+  // 답이 오기 전에 누르면 경고가 뜨기 전에 409 를 받는다 — 판정이 날 때까지 잠근다
+  button.disabled = true;
   try {
     const names = agentsOfGraph(await api.graph(graph));
     // 빌드 표면이 꺼져 조회가 안 되면 경고하지 않는다 — 그때는 게이트도 없다
     const images = await Promise.all(names.map((name) => api.image(name).catch(() => null)));
-    if (select.value !== graph) return; // 조회하는 동안 다른 그래프를 골랐다
+    if (!current()) return; // 조회하는 동안 다른 그래프를 골랐거나 더 새 확인이 시작됐다
     const blocked = unbuiltAgents(images);
     $("#deploy-warnings").replaceChildren(...blocked.map((img) => el("li", {
       textContent: `${img.agent}@${img.version}: 이미지를 굽지 않았습니다 (${img.status || "아직 안 구움"}) — 에이전트 편집기에서 빌드하세요`,
     })));
     button.disabled = blocked.length > 0;
-  } catch (err) { report(err); button.disabled = false; }
+  } catch (err) {
+    if (!current()) return; // 옛 그래프의 실패가 새 그래프의 잠금을 풀면 안 된다
+    report(err);
+    button.disabled = false; // 판정을 못 내리면 서버 게이트에 맡긴다
+  }
 }
 $("#deploy-graph").addEventListener("change", checkDeployable);
 

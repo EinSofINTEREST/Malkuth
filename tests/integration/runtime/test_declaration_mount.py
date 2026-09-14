@@ -28,6 +28,8 @@ from malkuth.runtime.deployments import (
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 IMAGE = "malkuth/agent-base:0.1.0"
+FOREIGN_UID = "4242:4242"
+"""control plane 과 다른 uid — 같은 uid 면 0600 으로 교체된 파일도 읽혀 회귀를 못 본다."""
 
 
 def docker(*args: str, check: bool = True) -> str:
@@ -87,7 +89,7 @@ def container(workspace: Path) -> Iterator[str]:
         "--read-only",
         "--cap-drop=ALL",
         "--user",
-        "1000:1000",
+        FOREIGN_UID,
         *flags,
         "--entrypoint",
         "sleep",

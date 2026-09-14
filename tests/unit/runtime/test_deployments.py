@@ -1039,3 +1039,36 @@ def test_the_manifest_env_names_what_agentd_reads():
     from malkuth.runtime.deployments import MANIFEST_ENV
 
     assert MANIFEST_ENV == AGENTD_MANIFEST_ENV
+
+
+# --- 메모리 신원 (#278) --------------------------------------------------------------
+
+
+async def test_with_a_registry_the_memory_token_is_the_agent_identity(workspace, docker, healthy):
+    """정적 메모리 토큰으로 되돌아가면 레지스트리 회수가 닿지 않는 뒷문이 된다."""
+    from malkuth.memory.http import MEMORY_TOKEN_ENV
+
+    wired_workspace(workspace)
+    store = InMemoryDeploymentStore()
+    manager = wired_manager(workspace, docker, store)
+    manager.memory_url = "http://memory:8090"
+    manager.memory_tokens = {"alpha": "static", "beta": "static"}
+    with_access(manager)
+
+    record = await manager.deploy("wired")
+
+    for agent in record.agents:
+        assert env_of(docker, agent.name)[MEMORY_TOKEN_ENV] == agent.access_credential != "static"
+    again = wired_manager(workspace, docker, store)
+    again.memory_url, again.memory_tokens, again.access = (
+        manager.memory_url,
+        manager.memory_tokens,
+        manager.access,
+    )
+    await again.reattach()
+    beta = next(a for a in record.agents if a.name == "beta")
+    assert (
+        again.launcher.launched[("beta", 0)].restart_args["memory"].token == beta.access_credential
+    )
+    await manager.launcher.stop_all()
+    await again.launcher.stop_all()

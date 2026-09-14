@@ -31,6 +31,7 @@ from malkuth.runtime.memory import issue_token
 if TYPE_CHECKING:
     from fastapi import FastAPI
 
+    from malkuth.access.client import AccessClient
     from malkuth.config import MalkuthConfig
     from malkuth.core.manifest import AgentManifest, GroupManifest
     from malkuth.observability.metrics import Metrics
@@ -56,6 +57,8 @@ class MemoryDeployment:
     tokens: dict[str, str] = field(default_factory=dict)
     indexer: Any = None
     """색인 큐 — **누군가 비워야** 저장한 기억이 검색된다 (09 Write Path)."""
+    access: AccessClient | None = None
+    """레지스트리 판정 클라이언트 — 있으면 **누군가 변경 알림을 따라가야** 캐시가 무효화된다."""
 
 
 def _embedding_source(
@@ -98,6 +101,7 @@ def build_deployment(
     *,
     root: Path,
     metrics: Metrics | None = None,
+    access: AccessClient | None = None,
 ) -> MemoryDeployment:
     """Assemble the Memory Service for a repository.
 
@@ -107,9 +111,12 @@ def build_deployment(
         config: Validated framework settings — 저장소 백엔드가 여기서 온다.
         root: Repository root holding ``agents/`` and ``groups/``.
         metrics: Collector for the memory metrics, when observability is on.
+        access: Registry decision client. 있으면 토큰을 발급하지 않는다 — 에이전트는 control
+            plane 이 발급한 신원을 내밀고, 권한은 요청마다 레지스트리가 판정한다 (09 Access
+            Enforcement). 정적 토큰을 함께 발급하면 회수가 닿지 않는 뒷문이 된다.
 
     Returns:
-        The app plus one token per declared agent.
+        The app plus one token per declared agent (none in registry mode).
     """
     from malkuth.catalog import Catalog
 
@@ -140,17 +147,34 @@ def build_deployment(
     recall = Recall(indexes=indexer.indexes, metrics=metrics, latest_resolver=service.store)
     tokens = TokenRegistry()
 
+    if access is not None:
+        from malkuth.memory.gate import RegistryGate
+
+        log.info("memory service assembled", mode="registry")
+        return MemoryDeployment(
+            app=create_app(
+                service,
+                recall,
+                None,
+                indexer=indexer,
+                chunk=chunk,
+                gate=RegistryGate(client=access, catalog=catalog),
+            ),
+            indexer=indexer,
+            access=access,
+        )
+
     issued: dict[str, str] = {}
     global_group = groups.get(GLOBAL_GROUP)
     for name, manifest in manifests.items():
         # 그룹 space 는 멤버에게만 — issue_token 이 소속을 검증한다
         group = groups.get(manifest.metadata.group or "")
-        access = issue_token(
+        declared = issue_token(
             manifest,
             group=group,
             global_spaces=global_group.spec.memory if global_group else None,
         )
-        issued[name] = tokens.issue(access)
+        issued[name] = tokens.issue(declared)
 
     log.info("memory service assembled", agent="", **{"agents": len(issued)})
     return MemoryDeployment(

@@ -146,7 +146,7 @@ spec:
       streaming: true
 
   runtime:
-    image: malkuth/agent-base:0.1.0   # 커스텀 Dockerfile 있으면 빌드 결과 태그
+    image: malkuth/agent-base:0.1.0   # 빌드 재료가 있으면 malkuth/agent-<name>:<version> 과 같아야 함
     resources:
       cpu: "1.0"
       memory: 1Gi
@@ -186,21 +186,25 @@ spec:
 
 2. **Base Image**
    - 모든 에이전트는 `malkuth/agent-base` 에서 시작 (agentd 포함)
-   - 커스텀 의존성은 에이전트별 `Dockerfile` 에서 base 를 확장
+   - 커스텀 의존성은 에이전트별 **빌드 재료**의 `Dockerfile` 에서 base 를 확장
+     (재료는 스토어에 둔다 — 아래 Registering Agents)
    - 이미지 태그는 semver — `latest` 태그로 배포 금지
 
 3. **Security**
    ```dockerfile
-   # agents/<name>/Dockerfile
+   # 빌드 재료의 Dockerfile — 컨텍스트 루트는 빌더가 조립하는 임시 디렉토리
+   # (Dockerfile, manifest.yaml, modules/, src/)
    FROM malkuth/agent-base:0.1.0
 
    # 에이전트별 추가 의존성만 여기서 설치
-   COPY requirements.txt .
-   RUN pip install --no-cache-dir -r requirements.txt
+   COPY src/requirements.txt /tmp/requirements.txt
+   RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
-   COPY src/ /app/agent/
+   COPY --chown=1000:1000 src/ /app/src/
    # base 이미지가 이미 non-root (uid 1000, user: agent) 로 실행
    ```
+   - 빌더가 **굽기 전에** 검사한다 (`VAL_002`): `FROM malkuth/agent-base:<tag>` 로 시작,
+     root 로 끝나지 않음, `COPY`/`ADD` 소스가 컨텍스트 안의 로컬 경로 (원격 `ADD` 금지)
    - MUST run as non-root user
    - MUST NOT bake secrets into images (빌드 arg 로도 금지)
    - SHOULD use read-only root filesystem + 명시적 writable volume (`/workspace`, `/tmp`)
@@ -267,7 +271,10 @@ Runtime layer →  env_allowlist 각 키를 local > group > global 순으로 해
 
 ### Lifecycle Rules
 
-1. **Build**: 이미지 빌드는 배포 파이프라인에서 — 런타임 중 빌드 금지
+1. **Build**: 이미지 빌드는 **명시적 빌드 단계**에서 — 런타임 중 빌드 금지.
+   빌드 재료가 있는 에이전트는 그 버전이 `built` 여야 배포된다 — 굽지 않았거나 실패했거나
+   굽는 중이면 배포가 기동 전에 거절한다 (`RT_012`, HTTP 409). 배포가 대신 굽지 않는다.
+   재료가 없는 declarative agent 는 빌드 단계가 없다 (base 이미지 + 선언 마운트)
 2. **Start**: 기동 → `initialize()` → health OK 가 되어야 그래프에 attach
 3. **Ready**: health check 주기 실행 (기본 10s 간격, 3회 연속 실패 시 Unhealthy)
 4. **Drain**: 새 태스크 수락 중지 → 진행 중 태스크 완료 대기 (기본 30s) → 종료
@@ -363,24 +370,32 @@ Client → Control Plane → Runtime → 대상 에이전트 Control API (/invok
 ### Agent Registry
 
 ```
-agents/
+agents/                     # 선언만 — 빌드 입력은 두지 않는다
 ├── planner/
-│   ├── manifest.yaml
-│   └── Dockerfile          # 선택 — 없으면 base image 그대로 사용
+│   └── manifest.yaml
 ├── researcher/
-│   ├── manifest.yaml
-│   ├── Dockerfile
-│   └── src/
-│       └── agent.py        # BaseAgent 커스텀 구현 (선택)
+│   └── manifest.yaml       # spec.entrypoint: agent:ResearchAgent
 └── writer/
     └── manifest.yaml
+
+Material store (agent, version) → files      # 커스텀 에이전트의 빌드 재료
+├── Dockerfile              # 선택 — 없으면 스켈레톤
+└── src/
+    └── agent.py            # BaseAgent 커스텀 구현
 ```
 
 1. **Declarative Agent** (기본): manifest 만으로 정의 — agentd 의 기본 실행 루프 사용.
+   base 이미지에 선언(manifest, modules)을 읽기 전용으로 마운트해 돈다. 빌드 없음.
    대부분의 에이전트는 promptset + skillset 조합으로 충분해야 한다
-2. **Custom Agent**: `src/agent.py` 에 `BaseAgent` 서브클래스 제공 — manifest 의
-   `spec.entrypoint: agent.ResearchAgent` 로 지정. 커스텀 구현도 모든 계약 규칙 준수
-3. 그래프는 에이전트를 `agents/{name}@{version}` 으로만 참조
+2. **Custom Agent**: 빌드 재료의 `src/agent.py` 에 `BaseAgent` 서브클래스 제공 — manifest 의
+   `spec.entrypoint: agent:ResearchAgent` 로 지정. 커스텀 구현도 모든 계약 규칙 준수
+3. **Build Materials**: 커스텀 에이전트의 `Dockerfile` 과 `src/` 는 저장소가 아니라
+   **재료 스토어**에 `(에이전트, 버전)` 단위로 둔다 (`PUT /v1/agents/{name}/materials`,
+   `malkuth agent-push`). 같은 버전의 재료는 불변이고, 배포 중인 에이전트의 재료는 바꾸지
+   못한다. 굽는 것은 명시적 단계다 (`POST /v1/agents/{name}/image`, `malkuth agent-build`):
+   임시 디렉토리에 선언과 재료를 조립해 `malkuth/agent-<name>:<version>` 으로 굽고 지운다.
+   manifest 가 `runtime.image` 를 선언하면 그 태그와 같아야 한다 (다르면 `VAL_002`)
+4. 그래프는 에이전트를 `agents/{name}@{version}` 으로만 참조
 
 ## Monitoring per Agent
 

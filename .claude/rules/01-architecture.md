@@ -328,11 +328,11 @@ malkuth/
 │       │
 │       └── cli/                 # malkuth CLI (deploy/run/status/logs)
 │
-├── agents/                      # 에이전트 정의 (컨테이너 빌드 단위)
+├── agents/                      # 에이전트 선언 — 빌드 입력은 재료 스토어에 (02)
 │   └── <agent-name>/
-│       ├── manifest.yaml        # 에이전트 계약 선언
-│       ├── Dockerfile           # 베이스 이미지 확장 (필요 시)
-│       └── src/                 # 에이전트 고유 코드 (선택)
+│       └── manifest.yaml        # 에이전트 계약 선언
+│
+├── examples/materials/          # 시드 빌드 재료 — 프레임워크는 읽지 않는다 (agent-push 로 올림)
 │
 ├── modules/                     # 배포 가능한 모듈 저장소 (로컬 레지스트리)
 │   ├── skillsets/<name>/        # skillset.yaml + skills/

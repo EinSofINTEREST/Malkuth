@@ -47,6 +47,13 @@ export function createClient({ baseUrl = "", token = null, fetchImpl = globalThi
     deleteGraph: (name) => call("DELETE", `/v1/graphs/${encodeURIComponent(name)}`),
     saveAgent: (name, document) => call("PUT", `/v1/agents/${encodeURIComponent(name)}`, document),
     deleteAgent: (name) => call("DELETE", `/v1/agents/${encodeURIComponent(name)}`),
+    // 빌드 재료와 이미지 (#264, #265) — 재료는 에이전트의 **현재** 버전에 묶인다
+    materials: (name) => call("GET", `/v1/agents/${encodeURIComponent(name)}/materials`),
+    saveMaterials: (name, files) =>
+      call("PUT", `/v1/agents/${encodeURIComponent(name)}/materials`, { files }),
+    deleteMaterials: (name) => call("DELETE", `/v1/agents/${encodeURIComponent(name)}/materials`),
+    buildImage: (name) => call("POST", `/v1/agents/${encodeURIComponent(name)}/image`),
+    image: (name) => call("GET", `/v1/agents/${encodeURIComponent(name)}/image`),
     // 배포 (#243)
     deployments: () => call("GET", "/v1/deployments"),
     deploy: (graph) => call("POST", "/v1/deployments", { graph }),
@@ -134,6 +141,41 @@ export function formatPairs(pairs) {
 // 대부분의 배선이 이 모양이므로 편집기가 미리 채워 준다.
 export function suggestInputMap(required) {
   return Object.fromEntries((required || []).map((name) => [name, `state.${name}`]));
+}
+
+// 재료 경로 하나가 빌드 컨텍스트 레이아웃(#263)을 따르는지 — 문제가 없으면 null.
+// **서버의 `malkuth.materials.check_path` 와 같은 규칙**이다. 판정은 서버가 하고, 여기서는
+// 저장을 누르기 전에 보이게만 한다. 두 규칙이 어긋나지 않는지는 브라우저 E2E 가 같은 경로
+// 표로 양쪽을 대조해 확인한다.
+export const MATERIAL_DOCKERFILE = "Dockerfile";
+export const MATERIAL_SOURCE_ROOT = "src";
+
+export function materialPathProblem(path) {
+  const value = String(path ?? "");
+  if (!value || value !== value.trim()) return "경로가 비었거나 앞뒤에 공백이 있습니다";
+  if (value.startsWith("/") || value.includes(":") || value.includes("\\")) {
+    return "상대 경로(posix)여야 합니다";
+  }
+  const parts = value.split("/");
+  if (parts.some((part) => part === "." || part === "..")) return "빌드 컨텍스트를 벗어납니다";
+  if (parts.some((part) => part === "")) return "정규화된 경로여야 합니다 (빈 구간·끝 슬래시 없음)";
+  if (value === MATERIAL_DOCKERFILE) return null;
+  if (parts[0] === MATERIAL_SOURCE_ROOT && parts.length > 1) return null;
+  return `${MATERIAL_DOCKERFILE} 이거나 ${MATERIAL_SOURCE_ROOT}/ 아래여야 합니다`;
+}
+
+// 그래프가 쓰는 에이전트 이름 — 노드의 `agents/<name>@<version>` 에서 뽑는다 (중복 없이)
+export function agentsOfGraph(graph) {
+  const names = (graph?.spec?.nodes || [])
+    .map((node) => String(node.agent || "").split("/")[1]?.split("@")[0])
+    .filter(Boolean);
+  return [...new Set(names)];
+}
+
+// 배포 전에 보여 줄 빌드 문제 — 재료가 있는데 그 버전이 `built` 가 아닌 에이전트.
+// 서버의 배포 게이트(#266)와 같은 판정이다. 빌드 표면이 꺼져 조회가 안 되면 경고하지 않는다
+export function unbuiltAgents(images) {
+  return images.filter((image) => image && image.needs_build && image.status !== "built");
 }
 
 export function moduleRef(type, name, version) {

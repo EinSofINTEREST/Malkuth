@@ -21,6 +21,7 @@ import pytest
 
 from tests.e2e.conftest import (
     CONTROL_TOKEN,
+    REPO_ROOT,
     api,
     deployed_containers,
     plane_url,
@@ -271,3 +272,223 @@ def _tear_down(page) -> None:
     tab(page, "graph")
     page.click("#graph-delete")  # confirm() 은 위의 dialog 핸들러가 받는다
     page.wait_for_function("() => document.querySelector('#status').textContent.includes('삭제됨')")
+
+
+# --- 커스텀 에이전트: 재료 → 빌드 → 배포 → run (#267) ---------------------------------
+
+CUSTOM = "ui-custom"
+MATERIAL_PATHS = [
+    "Dockerfile",
+    "src/agent.py",
+    "src/pkg/mod.py",
+    "",
+    " src/a.py",
+    "/src/a.py",
+    "src\\a.py",
+    "C:src/a.py",
+    "src/../x.py",
+    "../x.py",
+    "./src/a.py",
+    "src/./a.py",
+    "src//a.py",
+    "src/a/",
+    "src",
+    "Makefile",
+    "srcx/a.py",
+    "dockerfile",
+]
+
+
+def test_the_page_checks_material_paths_like_the_server(page):
+    """화면이 저장 전에 보여 주는 판정이 서버의 판정과 어긋나면, 통과시킨 것을 서버가 거절하거나
+    막은 것을 서버가 받는다 — 같은 경로 표로 양쪽을 대조한다."""
+    from malkuth.core.errors import MalkuthError
+    from malkuth.materials import check_path
+
+    def server_accepts(path: str) -> bool:
+        try:
+            check_path(path)
+        except MalkuthError:
+            return False
+        return True
+
+    page_accepts = page.evaluate(
+        """async (paths) => {
+            const { materialPathProblem } = await import('./client.js');
+            return paths.map((path) => materialPathProblem(path) === null);
+        }""",
+        MATERIAL_PATHS,
+    )
+
+    assert dict(zip(MATERIAL_PATHS, page_accepts, strict=True)) == {
+        path: server_accepts(path) for path in MATERIAL_PATHS
+    }
+
+
+def test_a_custom_agent_is_built_deployed_and_run_by_clicking(page):
+    """#267 완료 조건 — 화면에서 커스텀 에이전트를 만들고, 재료를 넣고, 굽고, 배포해 run 까지.
+
+    실패한 빌드의 원인이 화면에서 읽히는지도 같은 흐름에서 본다. 재료는 버전마다 불변이라
+    실패한 0.1.0 을 고칠 수 없다 — 버전을 올려 다시 굽는 것이 실제 운영 흐름이다.
+    """
+    try:
+        _save_custom_agent(page, "0.1.0")
+        _fail_a_build_and_read_why(page)
+        _refuse_materials_for_an_unsaved_version(page)
+        _save_custom_agent(page, "0.1.1")
+        _save_good_materials(page)
+        _compose_custom_graph(page)
+        _see_the_unbuilt_warning_before_deploying(page)
+        _build(page)
+        _deploy_run_and_tear_down_custom(page)
+    finally:
+        for deployment in api("GET", "/v1/deployments")[1]["items"]:
+            if deployment["graph"] == GRAPH_NAME and deployment["status"] in ("ready", "lost"):
+                api("DELETE", f"/v1/deployments/{deployment['deployment_id']}")
+        api("DELETE", f"/v1/graphs/{GRAPH_NAME}")
+        api("DELETE", f"/v1/agents/{CUSTOM}")
+        leftover = REPO_ROOT / "agents" / CUSTOM
+        if leftover.is_dir() and not any(leftover.iterdir()):
+            leftover.rmdir()  # 삭제는 매니페스트만 지운다 (#258)
+        for version in ("0.1.0", "0.1.1"):
+            docker("rmi", "-f", f"malkuth/agent-{CUSTOM}:{version}", check=False)
+
+
+def _status_includes(page, text: str, *, timeout: int = UI_TIMEOUT_MS) -> None:
+    page.wait_for_function(
+        "(text) => document.querySelector('#status').textContent.includes(text)",
+        arg=text,
+        timeout=timeout,
+    )
+
+
+def _save_custom_agent(page, version: str) -> None:
+    tab(page, "agent")
+    form = "#agent-form"
+    page.fill(f"{form} [name=name]", CUSTOM)
+    page.fill(f"{form} [name=version]", version)
+    page.fill(f"{form} [name=description]", "made and baked in the ui")
+    page.select_option(f"{form} [name=promptset]", "promptsets/planner@0.3.0")
+    page.fill(f"{form} [name=image]", "")
+    page.click(f"{form} button[type=submit]")
+    page.wait_for_selector("#agent-findings li.ok")
+    _status_includes(page, "저장됨")
+
+
+def _material_row(page, index: int):
+    return page.locator("#agent-materials tbody tr").nth(index)
+
+
+def _fail_a_build_and_read_why(page) -> None:
+    # --- 규칙을 어긴 경로는 저장 전에 보인다
+    page.click("#material-add")
+    _material_row(page, 0).locator("[name=material_path]").fill("src/../escape.py")
+    page.wait_for_function(
+        "(path) => document.querySelector('#material-findings').textContent.includes(path)",
+        arg="src/../escape.py",
+    )
+
+    # --- 규약은 지키지만 굽는 도중 실패하는 Dockerfile
+    _material_row(page, 0).locator("[name=material_path]").fill("Dockerfile")
+    _material_row(page, 0).locator("[name=material_content]").fill(
+        "FROM malkuth/agent-base:0.1.0\nRUN echo broken-on-purpose && exit 3\n"
+    )
+    page.click("#material-add")
+    _material_row(page, 1).locator("[name=material_path]").fill("src/marker.py")
+    _material_row(page, 1).locator("[name=material_content]").fill("MARK = 'clicked'\n")
+    assert page.locator("#material-findings li").count() == 0
+
+    page.click("#materials-form button[type=submit]")
+    _status_includes(page, "재료 저장됨")
+    page.click("#image-build")
+
+    page.wait_for_selector("#image-status.status-failed", timeout=UI_TIMEOUT_MS * 3)
+    log = page.locator("#image-log")
+    assert log.is_visible()
+    assert "broken-on-purpose" in log.inner_text(), log.inner_text()
+
+
+def _refuse_materials_for_an_unsaved_version(page) -> None:
+    """폼의 버전만 올리고 저장하지 않으면, 서버는 옛 버전에 재료를 넣는다 — 화면이 막는다."""
+    page.fill("#agent-form [name=version]", "0.1.1")
+    page.click("#materials-load")
+    _status_includes(page, "에이전트를 먼저 저장하세요")
+
+
+def _save_good_materials(page) -> None:
+    page.click("#materials-load")
+    page.wait_for_function(
+        "() => document.querySelector('#image-status').textContent.includes('재료 없음')"
+    )
+    page.click("#material-add")
+    _material_row(page, 0).locator("[name=material_path]").fill("src/marker.py")
+    _material_row(page, 0).locator("[name=material_content]").fill("MARK = 'clicked'\n")
+    page.click("#materials-form button[type=submit]")
+    _status_includes(page, "재료 저장됨: ui-custom@0.1.1")
+    page.wait_for_function(
+        "() => document.querySelector('#image-status').textContent.includes('아직 굽지 않음')"
+    )
+
+
+def _compose_custom_graph(page) -> None:
+    tab(page, "graph")
+    page.fill("#graph-form [name=name]", GRAPH_NAME)
+    page.fill("#graph-form [name=version]", "0.1.0")
+    page.fill("#graph-form [name=goal]", "run a custom agent made in the ui")
+    page.fill("#graph-form [name=state_schema]", "malkuth.graphs.schemas:ResearchState")
+    page.click("[data-add=node]")
+    row = page.locator("#graph-nodes tbody tr").first
+    row.locator("[name=node_id]").fill("planner")
+    row.locator("[name=node_agent]").select_option(label=f"{CUSTOM}@0.1.1")
+    page.wait_for_function(
+        "() => document.querySelector('#graph-nodes tbody tr [name=node_input]').value"
+        ".includes('query=state.query')"
+    )
+    row.locator("[name=node_output]").fill("plan=output.plan")
+    edges = page.locator("#graph-edges tbody tr")
+    edges.first.locator("[name=edge_to]").fill("planner")
+    page.click("[data-add=edge]")
+    edges.last.locator("[name=edge_from]").fill("planner")
+    edges.last.locator("[name=edge_to]").fill("END")
+    page.click("#graph-form button[type=submit]")
+    _status_includes(page, "저장됨")
+
+
+def _see_the_unbuilt_warning_before_deploying(page) -> None:
+    """누르고 409 를 받고 나서야 아는 것이 아니라, 고르는 순간 보인다."""
+    tab(page, "deployments")
+    page.select_option("#deploy-graph", GRAPH_NAME)
+    page.wait_for_function(
+        "() => document.querySelector('#deploy-warnings').textContent.includes('ui-custom@0.1.1')"
+    )
+    assert page.locator("#deploy-form button[type=submit]").is_disabled()
+
+
+def _build(page) -> None:
+    tab(page, "agent")
+    page.click("#image-build")
+    page.wait_for_selector("#image-status.status-built", timeout=UI_TIMEOUT_MS * 3)
+    assert "malkuth/agent-ui-custom:0.1.1" in page.locator("#image-status").inner_text()
+
+
+def _deploy_run_and_tear_down_custom(page) -> None:
+    tab(page, "deployments")
+    page.select_option("#deploy-graph", GRAPH_NAME)
+    page.wait_for_function(
+        "() => !document.querySelector('#deploy-form button[type=submit]').disabled"
+        " && document.querySelectorAll('#deploy-warnings li').length === 0"
+    )
+    page.click("#deploy-form button[type=submit]")
+    row = page.locator("#deployments tbody tr", has_text=GRAPH_NAME).first
+    row.locator("td.status-ready").wait_for(timeout=DEPLOY_TIMEOUT_MS)
+    image = docker("inspect", "--format", "{{.Config.Image}}", f"malkuth-{CUSTOM}-0")
+    assert image == "malkuth/agent-ui-custom:0.1.1", "구운 이미지가 아닌 것으로 돌았다"
+
+    _run(page)
+
+    tab(page, "deployments")
+    page.locator("#deployments tbody tr", has_text=GRAPH_NAME).first.get_by_text("해체").click()
+    page.wait_for_selector(
+        f"#deployments tbody tr:has-text('{GRAPH_NAME}') td.status-stopped",
+        timeout=UI_TIMEOUT_MS * 2,
+    )

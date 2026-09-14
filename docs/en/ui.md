@@ -69,16 +69,49 @@ reproducible.
 ### 에이전트 편집기 — manifests
 
 The same shape for agent manifests: metadata and group, the model, module references, and the
-runtime block (image, `env_allowlist`, whether A2A is exposed).
+runtime block (image, entrypoint, `env_allowlist`, whether A2A is exposed).
 
 Module references are dropdowns built from the catalog's published versions. There is no free
 text and no `latest` — every reference is pinned to a version that exists.
+
+#### 빌드 재료 — custom agents
+
+Below the manifest form is the material editor. It works on the **saved** agent named in the
+form, at its current version, so save the agent first.
+
+1. **재료 불러오기** loads what the store holds for that version and shows the build status.
+2. **+ 파일** adds a row: a path and its content. Paths must be `Dockerfile` or under `src/`.
+   A path that breaks the rule is listed in red **as you type**, and **재료 저장** refuses to
+   send anything while one is listed.
+3. **재료 저장** stores the rows. Leave the `Dockerfile` out to build on the skeleton, which
+   puts `src/` on the import path — set **entrypoint** to `agent:MyAgent` to run a class from
+   `src/agent.py`. Leave **image** empty: a custom agent runs as `malkuth/agent-<name>:<version>`,
+   and naming a different image makes deploys refuse it.
+4. **빌드** submits the build and follows it until it ends:
+
+| Status line | Meaning |
+|---|---|
+| 재료 없음 | no materials — a declarative agent, nothing to build |
+| 아직 굽지 않음 | materials saved, never built |
+| building | the build is running |
+| built | the image exists and deploys may use it |
+| failed | Docker's output tail opens below the line — the cause is at its end |
+
+A version's materials cannot change once saved. To fix a failed build, bump the version, save
+the agent, then save and build the new materials. When a graph already references the agent,
+change both together through `PUT /v1/declarations`, because saving either one alone breaks
+the reference.
 
 ### 배포 — containers
 
 Pick a graph, press **배포**, and the row appears with each agent's container id, ports, and
 the deployment status (`starting` → `ready`, or `failed` with the reason). **해체** drains
 and stops the containers; the record stays visible as `stopped`.
+
+Picking a graph also checks its agents' builds. If one of them has materials but no `built`
+image for its version, the tab lists it under the form and disables **배포** until it is
+built. The control plane enforces the same rule on its own (`409`, `RT_012`); the tab just
+shows it before you press the button.
 
 Two refusals show up here often, and both are the system protecting a live deployment:
 
@@ -104,7 +137,8 @@ from its last iteration, a mission run from its last checkpoint. See the
 Everything the main goal asks for is these five tabs in order:
 
 1. **카탈로그** — see which agents and modules exist.
-2. **에이전트 편집기** — add or adjust an agent; save.
+2. **에이전트 편집기** — add or adjust an agent; save. For a custom agent, save its build
+   materials and press **빌드** until it reads `built`.
 3. **그래프 편집기** — place the nodes, wire the edges, declare the A2A connections; validate
    until clean; save.
 4. **배포** — deploy the graph and watch the agents turn healthy.
@@ -131,6 +165,10 @@ agent (deletion is refused while anything still references it).
 | Save refused with a version message | the content changed but the version did not — bump it |
 | Save refused with "currently deployed" | tear the deployment down first |
 | A run ends immediately with `GRAPH_002` | an agent could not run the node; open its container logs |
+| 배포 is disabled with a build warning | an agent in the graph has materials but no `built` image — build it in the agent editor |
+| **빌드** answers "agent has no build materials" | save materials first; declarative agents do not build |
+| Material save refused with a version message | that version's materials are immutable — bump the agent's version |
+| No build status and **빌드** fails with `404` | `orchestrator.material_store` or `orchestrator.build_store` is not configured |
 
 For the exact status codes and payloads behind each screen, see the
 [Control Plane API](api.md).

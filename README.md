@@ -202,6 +202,12 @@ process then starts agent containers itself, drives runs submitted against them,
 resume a halted one. Without it those routes stay closed and the process only reports runs
 that other processes drive.
 
+Setting `orchestrator.material_store` lets the process store custom agents' build materials,
+and setting `orchestrator.build_store` as well opens image builds. With both set, the process
+bakes images on request, and a deploy refuses any custom agent whose image for its version is
+not built. Without a material store the material routes answer `CFG_001`; without both stores
+the image routes do not exist, and deploys use the image each manifest names.
+
 Open `http://127.0.0.1:8700/` for the Web UI — catalog, graph and agent editors, deployment,
 and runs. It is served from the same process and calls only the documented REST API
 ([API reference](docs/en/api.md), [UI guide](docs/en/ui.md)).

@@ -98,7 +98,8 @@
         </fieldset>
         <fieldset>
           <legend>런타임</legend>
-          <label>image <input name="image" placeholder="malkuth/agent-base:0.1.0" /></label>
+          <label>image <input name="image" placeholder="(비우면 base — 재료가 있으면 빌드 태그)" /></label>
+          <label>entrypoint <input name="entrypoint" placeholder="agent:MyAgent (커스텀 실행기)" /></label>
           <label>env_allowlist (쉼표) <input name="env_allowlist" value="ANTHROPIC_API_KEY" /></label>
           <label><input name="a2a" type="checkbox" /> A2A 노출</label>
         </fieldset>
@@ -110,6 +111,22 @@
         </div>
       </form>
       <ul id="agent-findings" class="findings"></ul>
+
+      <form id="materials-form">
+        <fieldset>
+          <legend>빌드 재료 <span class="hint">저장된 에이전트의 현재 버전에 묶입니다 — Dockerfile 또는 src/ 아래</span>
+            <button type="button" id="material-add">+ 파일</button></legend>
+          <table id="agent-materials"><thead><tr><th>경로</th><th>내용</th><th></th></tr></thead><tbody></tbody></table>
+          <ul id="material-findings" class="findings"></ul>
+        </fieldset>
+        <div class="actions">
+          <button type="button" id="materials-load">재료 불러오기</button>
+          <button type="submit">재료 저장</button>
+          <button type="button" id="image-build">빌드</button>
+          <span id="image-status" class="muted">빌드 상태를 보려면 재료를 불러오세요</span>
+        </div>
+        <pre id="image-log" class="detail" hidden></pre>
+      </form>
     </section>
 
     <section id="tab-deployments" class="tab">
@@ -117,6 +134,7 @@
         <label>그래프 <select id="deploy-graph"></select></label>
         <button type="submit">배포</button>
       </form>
+      <ul id="deploy-warnings" class="findings"></ul>
       <table id="deployments"><thead><tr><th>id</th><th>그래프</th><th>상태</th><th>에이전트</th><th></th></tr></thead><tbody></tbody></table>
     </section>
 

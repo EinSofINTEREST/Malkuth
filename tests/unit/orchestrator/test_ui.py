@@ -50,7 +50,8 @@ def test_the_ui_talks_rest_only():
     """
     for name in ("app.js", "client.js"):
         source = (UI_ROOT / name).read_text(encoding="utf-8").lower()
-        assert "docker" not in source
+        # `Dockerfile` 은 재료의 파일 **이름**이다 (#267) — 런타임 호출이 아니다
+        assert "docker" not in source.replace("dockerfile", "")
         # 파일 경로와 노드 런타임 API 만 막는다 — API 응답의 `manifest.spec` 같은
         # 필드 접근까지 걸면 오탐이 난다 (경로가 아니라 JSON 이다)
         for marker in (
@@ -78,5 +79,7 @@ def test_the_client_covers_every_ui_facing_route():
         "/v1/runs",
         "/drain",
         "/resume",
+        "/materials",
+        "/image",
     ):
         assert path in source, path

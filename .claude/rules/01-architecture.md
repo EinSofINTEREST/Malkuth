@@ -240,7 +240,7 @@ spec:
     ceiling:                     # 권한 에이전트가 이 그룹 멤버에게 줄 수 있는 최대 범위
       max_ttl_s: 3600            # 부여 만료 상한 — 만료 없는 부여 금지
       memory:
-        - {space: knowledge, mode: ro}
+        - {space: "group:research:knowledge", mode: ro}   # Memory Service space id
       egress:
         - api.search.example.com
       mcp_tool: []

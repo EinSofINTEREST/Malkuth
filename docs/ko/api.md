@@ -20,6 +20,7 @@ python -m malkuth.orchestrator
 | 배포·run 제출·재개 | `orchestrator.deployment_store` 가 설정된 경우 |
 | 빌드 재료 | `orchestrator.material_store` 가 설정된 경우 — 아니면 라우트가 `400` (`CFG_001`) 로 답한다 |
 | 이미지 빌드, 커스텀 에이전트의 배포 게이트 | `orchestrator.material_store` **와** `orchestrator.build_store` 가 모두 설정된 경우 — 아니면 이미지 라우트가 없다 (`404`) |
+| 권한 레지스트리 | `orchestrator.access_store` 가 설정된 경우 — 아니면 라우트가 없다 (`404`) |
 | `/ui` 의 Web UI | 항상 |
 
 `orchestrator.deployment_store` 가 없으면 컨테이너를 띄우지 않고
@@ -442,6 +443,150 @@ curl -X POST -H "Authorization: Bearer $TOKEN" -H 'content-type: application/jso
 
 `501` 은 이 control plane 에 배포 표면이 없다는 뜻이다 — run 을 읽기만 하고 구동하지 않는데
 `200` 을 주면 운영자가 재개됐다고 믿는다.
+
+## 권한 레지스트리
+
+에이전트가 도는 동안 바뀌는 권한은 **에이전트 컨테이너 밖에서, 요청마다** 판정한다 — 에이전트는
+자기 컨테이너 안에서 모든 권한을 가질 수 있으므로, 거기서 하는 검사는 편의일 뿐 경계가 아니다.
+레지스트리는 그 판정을 내리는 곳이고, 강제 지점(Memory Service, 이그레스 프록시, 피호출자의
+A2A 서버)이 여기에 묻고 답을 캐시한다.
+
+`orchestrator.access_store` 가 설정되면 열린다:
+
+```yaml
+orchestrator:
+  access_store: ./var/access.db          # 신원·부여·회수 — 재시작을 넘어 남는다
+  access_enforcer_token: ${ENFORCER}     # control_token 과 달라야 한다
+  access_stewards: [permission-agent]    # 부여할 수 있는 에이전트는 이들뿐
+```
+
+`access_store` 를 켜고 `access_enforcer_token` 없이 loopback 이 아닌 주소에 바인드하면 기동을
+거부한다 (`CFG_001`) — control plane 토큰을 요구하는 것과 같은 이유다.
+
+**강제는 지점별로 차례차례 들어온다.** 아래의 레지스트리·신원·기록은 갖춰져 있고, 강제 지점이
+레지스트리에 묻기 시작하는 것은 이후 릴리스다. 강제 지점이 묻기 전까지는 여기의 판정이 그
+에이전트가 닿을 수 있는 범위를 바꾸지 않는다.
+
+### 호출자 셋, 자격 셋
+
+토큰 하나로 묶으면 강제 지점이 운영자 권한을, 권한 에이전트가 모든 판정 조회 권한을 덤으로
+갖는다. 그래서 각자 자기 자격으로 인증한다:
+
+| 호출자 | 자격 | 라우트 |
+|---|---|---|
+| 운영자 | control plane 토큰 | 기록 조회, 회수, 기록 종료 |
+| 권한 에이전트 | **자기 에이전트 신원** | 부여 |
+| 강제 지점 | `access_enforcer_token` | 판정, 변경 알림 |
+
+### 에이전트 신원
+
+배포는 에이전트마다 신원을 하나씩 발급해 `MALKUTH_ACCESS_CREDENTIAL` 로 주입한다. 레지스트리는
+SHA-256 해시만 저장하며, 값은 어떤 API 응답에도 실리지 않는다. 신원은 control plane 재시작을
+넘어 유지되고, 감독이 컨테이너를 교체하면 다시 주입되며, 배포를 해체하거나 되감는 순간 통하지
+않게 된다.
+
+### 요청 판정 순서
+
+위에서부터, 먼저 맞는 것이 이긴다:
+
+1. 요청을 덮는 운영자 **회수**가 살아 있다 → `deny`
+2. 에이전트 **선언**이 허용한다 → `allow`, `decided_by: "declaration"`
+3. 요청을 덮는 **부여**가 살아 있다 → `allow`, `decided_by: <권한 에이전트>`
+4. 그 밖 → `deny`, `decided_by: "default"`
+
+따라서 회수는 선언과 부여를 모두 이긴다. 메모리에 `mode: "rw"` 로 회수하면 쓰기만 막고 읽기는
+남는다.
+
+### 확장 상한
+
+권한 에이전트는 운영자가 그 에이전트의 그룹이나 `global` 에 선언한 **상한** 안에서만 권한을
+넓힐 수 있다. 제한하는 것은 레지스트리다 — 권한 에이전트가 처리하는 요청은 untrusted input
+이므로, 한계를 그 판단에 맡기지 않는다.
+
+```yaml
+# groups/research.yaml
+spec:
+  access:
+    ceiling:
+      max_ttl_s: 3600                                   # 모든 부여는 늦어도 이만큼 뒤에 만료
+      memory:
+        - {space: "group:research:knowledge", mode: ro}
+      egress: [api.search.example.com]
+      mcp_tool: []
+      a2a: []
+```
+
+상한이 없는 그룹은 확장도 없다. 상한 변경은 선언 변경이며, 권한 에이전트는 자기 상한을 바꾸지
+못한다.
+
+### `POST /v1/access/grants` — 권한 에이전트
+
+```bash
+curl -X POST -H "Authorization: Bearer $MALKUTH_ACCESS_CREDENTIAL" \
+  -H 'content-type: application/json' \
+  -d '{"agent": "researcher", "kind": "egress", "target": "api.search.example.com",
+       "ttl_s": 600, "reason": "fetch sources for run r-12", "requested_by": "researcher"}' \
+  http://127.0.0.1:8700/v1/access/grants
+```
+
+`kind` 는 `memory`, `egress`, `mcp_tool`, `a2a` 중 하나다. `mode`(`ro`/`rw`)는 메모리에는 필수,
+나머지에는 없다. `201` 로 기록을 돌려준다:
+
+```json
+{
+  "rule_id": "rule-7c1e0a9b2d3f4e5a", "agent": "researcher", "kind": "egress",
+  "target": "api.search.example.com", "mode": null, "effect": "allow",
+  "decided_by": "permission-agent", "requested_by": "researcher",
+  "reason": "fetch sources for run r-12",
+  "created_at": 1789381200.0, "expires_at": 1789381800.0, "lifted_at": null
+}
+```
+
+거절은 `403` + `ACC_003` 이며 로그와 계측(`malkuth_access_grants_total{op="refuse"}`)에 남는다.
+호출자가 `access_stewards` 에 없을 때, 자기 자신에게 부여할 때, 메모리 권한에 mode 를 빠뜨렸을
+때, 상한이나 `max_ttl_s` 를 넘을 때, 운영자가 회수한 것을 요청할 때 거절한다 — 회수를 되돌리는
+것은 운영자뿐이다. 모르거나 폐기된 신원은 `403` + `ACC_001`, 없는 에이전트는 `404` 다.
+
+### `POST /v1/access/decisions` — 강제 지점
+
+```json
+{"credential": "<강제 지점에 제시된 신원>",
+ "kind": "egress", "target": "api.search.example.com"}
+```
+
+```json
+{"agent": "researcher", "decision": "allow", "decided_by": "permission-agent", "version": 42}
+```
+
+모르거나 폐기된 신원은 에러가 아니다: `200` 에
+`{"agent": null, "decision": "deny", "decided_by": "unknown-identity"}` 로 답해, 강제 지점이 다른
+답과 똑같이 거부를 캐시할 수 있게 한다.
+
+### `GET /v1/access/changes?after=<version>&wait_s=<seconds>` — 강제 지점
+
+긴 폴링. 레지스트리 버전이 `after` 를 넘는 즉시, 또는 `wait_s`(최대 30)가 지나면
+`{"version": N}` 으로 답한다. 부여·회수·기록 종료와 배포 해체(그 신원이 통하지 않게 된다)는 모두 버전을 올리며, 강제 지점은 새
+버전을 보면 캐시를 버린다.
+
+### `GET /v1/access/agents/{name}` — 운영자
+
+에이전트의 기록 — 살아 있는 것, 만료된 것, 종료된 것 — 과 현재 `version`. 기록은 지워지지 않으므로
+누가 무엇을 왜 결정했는지의 이력이다.
+
+### `POST /v1/access/revocations` — 운영자
+
+```json
+{"agent": "researcher", "kind": "memory", "target": "group:research:knowledge",
+ "mode": "rw", "reason": "incident 311", "expires_in_s": 3600}
+```
+
+`201` 로 `effect: "deny"`, `decided_by: "operator"` 인 기록을 돌려준다. `expires_in_s` 는
+선택이며, 없으면 종료할 때까지 유지된다.
+
+### `DELETE /v1/access/rules/{rule_id}` — 운영자
+
+회수를 되돌리거나 부여를 일찍 끝낸다. 기록은 `lifted_at` 이 채워진 채 남는다. 없는 id 는 `404`
+(`NF_001`).
 
 ## 운영 시 알아 둘 것
 

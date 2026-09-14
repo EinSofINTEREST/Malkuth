@@ -21,6 +21,7 @@ It reads `configs/{MALKUTH_ENV}.yaml`. Which surfaces open depends on that file:
 | Deployments, run submission, resume | `orchestrator.deployment_store` is set |
 | Build materials | `orchestrator.material_store` is set — otherwise the routes answer `400` (`CFG_001`) |
 | Image builds, and the deploy gate on custom agents | `orchestrator.material_store` **and** `orchestrator.build_store` are set — otherwise the image routes are absent (`404`) |
+| Access registry | `orchestrator.access_store` is set — otherwise the routes are absent (`404`) |
 | Web UI at `/ui` | always |
 
 Without `orchestrator.deployment_store` the process refuses to start containers and answers
@@ -457,6 +458,152 @@ Continues a run from where it stopped. What that means differs by mode:
 
 `501` means this control plane has no deployment surface: it can read runs but does not drive
 them, and answering `200` would leave an operator believing a resume happened.
+
+## Access registry
+
+Permissions that change while agents run are decided **outside the agent's container, per
+request** — an agent may hold every permission inside its own container, so a check there is
+a convenience, not a boundary. The registry is where those decisions are made; the enforcement
+points (Memory Service, egress proxy, a callee's A2A server) ask it and cache the answer.
+
+The surface opens when `orchestrator.access_store` is set:
+
+```yaml
+orchestrator:
+  access_store: ./var/access.db          # identities, grants, revocations — survives restarts
+  access_enforcer_token: ${ENFORCER}     # must differ from control_token
+  access_stewards: [permission-agent]    # the only agents that may grant
+```
+
+Binding a non-loopback address with `access_store` but no `access_enforcer_token` refuses to
+start (`CFG_001`), for the same reason the control token is required there.
+
+**Enforcement is being rolled out point by point.** The registry, identities and records
+below are in place; the enforcement points start consulting it in later releases. Until an
+enforcement point does, a decision here changes nothing that agent can reach.
+
+### Three callers, three credentials
+
+One token for everyone would hand the enforcement points operator powers, and the permission
+agent the ability to read every decision. So each audience authenticates as itself:
+
+| Caller | Credential | Routes |
+|---|---|---|
+| Operator | control plane token | read records, revoke, lift |
+| Permission agent | **its own agent identity** | grant |
+| Enforcement point | `access_enforcer_token` | decide, change feed |
+
+### Agent identity
+
+Every deployment issues one identity per agent and injects it as
+`MALKUTH_ACCESS_CREDENTIAL`. The registry stores only its SHA-256 hash; the value appears in no
+API response. Identities survive control plane restarts, are re-injected when supervision
+replaces a container, and stop working the moment the deployment is torn down or rolled back.
+
+### How a request is decided
+
+In order, first match wins:
+
+1. an active operator **revocation** covering the request → `deny`
+2. the agent's **declaration** allows it → `allow`, `decided_by: "declaration"`
+3. an active **grant** covering it → `allow`, `decided_by: <permission agent>`
+4. otherwise → `deny`, `decided_by: "default"`
+
+A revocation therefore beats both the declaration and any grant. For memory, revoking with
+`mode: "rw"` removes writing only — reading stays.
+
+### Expansion ceilings
+
+A permission agent can widen an agent's permissions only inside the **ceiling** the operator
+declared for that agent's group or for `global`. The registry enforces it; the permission
+agent's judgement is not the limit, because the request it acts on is untrusted input.
+
+```yaml
+# groups/research.yaml
+spec:
+  access:
+    ceiling:
+      max_ttl_s: 3600                                   # every grant expires, at most this late
+      memory:
+        - {space: "group:research:knowledge", mode: ro}
+      egress: [api.search.example.com]
+      mcp_tool: []
+      a2a: []
+```
+
+A group without a ceiling gets no expansion. Changing a ceiling is a declaration change; a
+permission agent cannot change its own.
+
+### `POST /v1/access/grants` — permission agent
+
+```bash
+curl -X POST -H "Authorization: Bearer $MALKUTH_ACCESS_CREDENTIAL" \
+  -H 'content-type: application/json' \
+  -d '{"agent": "researcher", "kind": "egress", "target": "api.search.example.com",
+       "ttl_s": 600, "reason": "fetch sources for run r-12", "requested_by": "researcher"}' \
+  http://127.0.0.1:8700/v1/access/grants
+```
+
+`kind` is `memory`, `egress`, `mcp_tool` or `a2a`; `mode` (`ro`/`rw`) is required for memory
+and absent otherwise. `201` returns the record:
+
+```json
+{
+  "rule_id": "rule-7c1e0a9b2d3f4e5a", "agent": "researcher", "kind": "egress",
+  "target": "api.search.example.com", "mode": null, "effect": "allow",
+  "decided_by": "permission-agent", "requested_by": "researcher",
+  "reason": "fetch sources for run r-12",
+  "created_at": 1789381200.0, "expires_at": 1789381800.0, "lifted_at": null
+}
+```
+
+A refusal is `403` with `ACC_003`, and it is logged and counted
+(`malkuth_access_grants_total{op="refuse"}`). It is refused when the caller is not listed in
+`access_stewards`, grants to itself, names a memory permission without a mode, exceeds the
+ceiling or its `max_ttl_s`, or asks for something an operator revoked — only an operator
+undoes a revocation. An unknown or revoked identity is `403` with `ACC_001`; an unknown agent
+is `404`.
+
+### `POST /v1/access/decisions` — enforcement point
+
+```json
+{"credential": "<the identity presented to the enforcement point>",
+ "kind": "egress", "target": "api.search.example.com"}
+```
+
+```json
+{"agent": "researcher", "decision": "allow", "decided_by": "permission-agent", "version": 42}
+```
+
+An unknown or revoked identity is not an error: it is answered `200` with
+`{"agent": null, "decision": "deny", "decided_by": "unknown-identity"}`, so the enforcement
+point can cache the refusal like any other answer.
+
+### `GET /v1/access/changes?after=<version>&wait_s=<seconds>` — enforcement point
+
+Long-poll. Answers `{"version": N}` as soon as the registry version moves past `after`, or when
+`wait_s` (at most 30) passes. Every grant, revocation and lift moves the version, and so does
+tearing down a deployment (its identities stop working); an enforcement point drops its cache when it sees a new one.
+
+### `GET /v1/access/agents/{name}` — operator
+
+The agent's records — active, expired and lifted — with the current `version`. Records are
+never deleted, so this is the history of who decided what and why.
+
+### `POST /v1/access/revocations` — operator
+
+```json
+{"agent": "researcher", "kind": "memory", "target": "group:research:knowledge",
+ "mode": "rw", "reason": "incident 311", "expires_in_s": 3600}
+```
+
+`201` with the record, `effect: "deny"`, `decided_by: "operator"`. `expires_in_s` is optional;
+without it the revocation lasts until lifted.
+
+### `DELETE /v1/access/rules/{rule_id}` — operator
+
+Lifts a revocation or ends a grant early. The record stays, with `lifted_at` set. `404`
+(`NF_001`) for an unknown id.
 
 ## Operational notes
 

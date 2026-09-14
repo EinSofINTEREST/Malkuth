@@ -130,7 +130,7 @@ class AccessRegistry:
         """배포를 해체하면 그 신원은 더 이상 아무 강제 지점도 통과하지 못한다."""
         revoked = self.store.revoke_identities(deployment_id, self.clock())
         if revoked:
-            self._changed_now()
+            self._wake_waiters()
             log.info("agent identities revoked", deployment_id=deployment_id, count=revoked)
         return revoked
 
@@ -360,7 +360,7 @@ class AccessRegistry:
 
     def _record(self, rule: Rule, *, op: str) -> Rule:
         self.store.put_rule(rule)
-        self._changed_now()
+        self._wake_waiters()
         self._count_grant(rule.kind, op, rule.decided_by)
         log.info(
             "access rule recorded",
@@ -374,8 +374,8 @@ class AccessRegistry:
         )
         return rule
 
-    def _changed_now(self) -> None:
-        self.store.bump()
+    def _wake_waiters(self) -> None:
+        """버전은 저장소가 기록과 함께 올렸다 — 여기서는 기다리는 쪽만 깨운다."""
         if self._changed is not None:
             # 기다리던 쪽을 모두 깨우고, 다음 대기는 새 이벤트로 — set 된 채 두면 계속 깨어난다
             self._changed.set()

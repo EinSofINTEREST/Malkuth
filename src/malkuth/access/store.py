@@ -9,6 +9,7 @@ Enforcement 4).
 
 from __future__ import annotations
 
+import contextlib
 import sqlite3
 import threading
 from dataclasses import dataclass, field, replace
@@ -19,7 +20,7 @@ from malkuth.access.model import Effect, Mode, ResourceKind, Rule
 from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterator, Sequence
 
 
 @dataclass(frozen=True)
@@ -37,11 +38,20 @@ class Identity:
 class AccessStore(Protocol):
     def put_identity(self, identity: Identity) -> None: ...
     def identity(self, credential_hash: str) -> Identity | None: ...
-    def revoke_identities(self, deployment_id: str, at: float) -> int: ...
-    def put_rule(self, rule: Rule) -> None: ...
+    def revoke_identities(self, deployment_id: str, at: float) -> int:
+        """Revoke a deployment's identities; bumps the version **in the same write** if any."""
+        ...
+
+    def put_rule(self, rule: Rule) -> int:
+        """Store a rule and bump the version **in the same write**; returns the new version.
+
+        기록과 버전을 따로 쓰면 그 사이에 죽었을 때 기록은 바뀌고 버전은 그대로 남는다 — 재시작한
+        레지스트리가 알림을 내지 않아 강제 지점이 옛 판정을 계속 쓴다.
+        """
+        ...
+
     def rule(self, rule_id: str) -> Rule | None: ...
     def rules(self, agent: str) -> Sequence[Rule]: ...
-    def bump(self) -> int: ...
     def version(self) -> int: ...
 
 
@@ -65,20 +75,20 @@ class InMemoryAccessStore:
             if found.deployment_id == deployment_id and found.revoked_at is None:
                 self._identities[key] = replace(found, revoked_at=at)
                 revoked += 1
+        if revoked:
+            self._version += 1
         return revoked
 
-    def put_rule(self, rule: Rule) -> None:
+    def put_rule(self, rule: Rule) -> int:
         self._rules[rule.rule_id] = rule
+        self._version += 1
+        return self._version
 
     def rule(self, rule_id: str) -> Rule | None:
         return self._rules.get(rule_id)
 
     def rules(self, agent: str) -> Sequence[Rule]:
         return sorted((r for r in self._rules.values() if r.agent == agent), key=_order)
-
-    def bump(self) -> int:
-        self._version += 1
-        return self._version
 
     def version(self) -> int:
         return self._version
@@ -167,18 +177,41 @@ class SqliteAccessStore:
             )
         return Identity(**dict(row)) if row else None
 
-    def revoke_identities(self, deployment_id: str, at: float) -> int:
+    @contextlib.contextmanager
+    def _transaction(self) -> Iterator[sqlite3.Connection]:
+        """한 번에 커밋하거나 아무것도 남기지 않는다 — 연결은 autocommit 이라 직접 연다."""
         with self._lock:
-            cursor = self._connect().execute(
+            conn = self._connect()
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                yield conn
+            except sqlite3.Error as err:
+                conn.execute("ROLLBACK")
+                raise MalkuthError(
+                    category=ErrorCategory.STORAGE,
+                    code=ErrorCode.STOR_003,
+                    message="access store write failed",
+                    details={"path": str(self.path)},
+                ) from err
+            except BaseException:
+                conn.execute("ROLLBACK")
+                raise
+            conn.execute("COMMIT")
+
+    def revoke_identities(self, deployment_id: str, at: float) -> int:
+        with self._transaction() as conn:
+            cursor = conn.execute(
                 "UPDATE identities SET revoked_at = ? "
                 "WHERE deployment_id = ? AND revoked_at IS NULL",
                 (at, deployment_id),
             )
+            if cursor.rowcount:
+                _bump(conn)
         return cursor.rowcount
 
-    def put_rule(self, rule: Rule) -> None:
-        with self._lock:
-            self._connect().execute(
+    def put_rule(self, rule: Rule) -> int:
+        with self._transaction() as conn:
+            conn.execute(
                 "INSERT OR REPLACE INTO rules VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     rule.rule_id,
@@ -195,6 +228,7 @@ class SqliteAccessStore:
                     rule.lifted_at,
                 ),
             )
+            return _bump(conn)
 
     def rule(self, rule_id: str) -> Rule | None:
         with self._lock:
@@ -216,13 +250,6 @@ class SqliteAccessStore:
             )
         return [_rule(row) for row in rows]
 
-    def bump(self) -> int:
-        with self._lock:
-            conn = self._connect()
-            conn.execute("UPDATE registry_version SET version = version + 1 WHERE id = 1")
-            row = conn.execute("SELECT version FROM registry_version WHERE id = 1").fetchone()
-        return int(row["version"])
-
     def version(self) -> int:
         with self._lock:
             row = (
@@ -231,6 +258,14 @@ class SqliteAccessStore:
                 .fetchone()
             )
         return int(row["version"])
+
+
+def _bump(conn: sqlite3.Connection) -> int:
+    updated = conn.execute("UPDATE registry_version SET version = version + 1 WHERE id = 1")
+    if updated.rowcount != 1:
+        raise sqlite3.DatabaseError("registry version row is missing")
+    row = conn.execute("SELECT version FROM registry_version WHERE id = 1").fetchone()
+    return int(row["version"])
 
 
 def _rule(row: sqlite3.Row) -> Rule:

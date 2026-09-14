@@ -138,6 +138,11 @@ class ErrorCode(StrEnum):
     CFG_001 = "CFG_001"  # 설정 파싱/검증 실패
     CFG_002 = "CFG_002"  # 그룹 정의 오류 / 스코프 해석 실패
 
+    # Access control — 01 Access Control. 메모리·A2A 거부는 MEM_001·A2A_004 를 쓴다
+    ACC_001 = "ACC_001"  # 권한 판정 거부 — 이그레스 목적지·원격 MCP 도구 (forbidden)
+    ACC_002 = "ACC_002"  # 판정 불가 — 레지스트리 도달 불가 + 캐시 없음 → 거부 (network, retryable)
+    ACC_003 = "ACC_003"  # 부여 거절 — 상한 초과·자기 부여·작업 에이전트의 부여 호출 (forbidden)
+
     # Internal — 분류되지 않은 프레임워크 내부 실패 (최상위 핸들러 변환 대상)
     INTERNAL_001 = "INTERNAL_001"
 

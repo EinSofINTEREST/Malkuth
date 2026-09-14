@@ -149,6 +149,16 @@ def test_metric_contract_snapshot():
         "malkuth_memory_index_lag_seconds": {"kind": "gauge", "labels": ["space"]},
         "malkuth_memory_recall_injected_tokens": {"kind": "gauge", "labels": ["agent"]},
         "malkuth_circuit_state": {"kind": "gauge", "labels": ["target"]},
+        "malkuth_access_decisions_total": {
+            "kind": "counter",
+            "labels": ["resource", "decision", "source"],
+        },
+        "malkuth_access_grants_total": {
+            "kind": "counter",
+            "labels": ["resource", "op", "decided_by"],
+        },
+        "malkuth_access_registry_reachable": {"kind": "gauge", "labels": ["component"]},
+        "malkuth_access_cache_invalidations_total": {"kind": "counter", "labels": ["component"]},
     }
 
 

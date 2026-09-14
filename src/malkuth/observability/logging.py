@@ -79,6 +79,13 @@ class LogField:
     ITERATION: Final = "iteration"
     MODE: Final = "mode"
     PORT: Final = "port"
+    # 권한 통제 — 01 Access Control
+    RESOURCE: Final = "resource"
+    TARGET: Final = "target"
+    DECISION: Final = "decision"
+    DECISION_SOURCE: Final = "decision_source"
+    GRANT_ID: Final = "grant_id"
+    DECIDED_BY: Final = "decided_by"
 
 
 STANDARD_FIELDS: Final[frozenset[str]] = frozenset(

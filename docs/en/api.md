@@ -668,6 +668,11 @@ In registry mode:
 The service follows the change feed while it runs. When the feed is lost but the registry still
 answers, cached decisions older than two seconds are asked again.
 
+**Turn both sides on together.** A control plane with `access_store` injects identities as memory
+tokens; a Memory Service still in token mode does not know them and refuses every agent. The
+reverse — a registry-mode Memory Service with a control plane that has no registry — refuses
+every agent too, because nothing issues identities.
+
 ## Operational notes
 
 - **One agent, one deployment.** Two graphs that share an agent cannot be deployed at the

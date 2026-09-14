@@ -60,7 +60,12 @@ def memory_tokens() -> dict[str, str]:
     return json.loads(raw)
 
 
-def write_config(directory: Path, *, agent_env: dict[str, str] | None = None) -> Path:
+def write_config(
+    directory: Path,
+    *,
+    agent_env: dict[str, str] | None = None,
+    orchestrator: dict[str, Any] | None = None,
+) -> Path:
     """E2E control plane 설정.
 
     재료·빌드 스토어를 **항상** 켠다 (#266): 켜 두면 배포 게이트가 모든 배포 앞에 선다.
@@ -85,6 +90,7 @@ def write_config(directory: Path, *, agent_env: dict[str, str] | None = None) ->
                     "build_store": str(directory / "builds.db"),
                     "control_port": CONTROL_PORT,
                     "control_token": CONTROL_TOKEN,
+                    **(orchestrator or {}),
                 },
             }
         ),

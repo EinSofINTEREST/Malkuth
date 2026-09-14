@@ -168,6 +168,10 @@ def test_a_failed_build_and_a_mismatched_image_are_refused_before_anything_start
         api("DELETE", "/v1/agents/planner/materials")
         api("DELETE", "/v1/graphs/e2e-broken")
         api("DELETE", "/v1/agents/e2e-broken")
+        # 삭제는 매니페스트만 지운다 (#258) — 테스트가 만든 빈 디렉토리는 테스트가 치운다
+        leftover = REPO_ROOT / "agents" / "e2e-broken"
+        if leftover.is_dir() and not any(leftover.iterdir()):
+            leftover.rmdir()
 
 
 def test_claude_code_bakes_from_its_seed_deploys_and_completes_a_run(plane):
@@ -227,3 +231,5 @@ def test_claude_code_bakes_from_its_seed_deploys_and_completes_a_run(plane):
         if deployment_id is not None:
             api("DELETE", f"/v1/deployments/{deployment_id}")
         api("DELETE", "/v1/graphs/e2e-code")
+        # 구운 이미지를 남기면 다음 실행이 **굽지 않고도** 태그를 찾는다 — 매번 시드에서 굽는다
+        docker("rmi", "-f", "malkuth/agent-claude-code:0.1.0", check=False)

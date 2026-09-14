@@ -261,9 +261,17 @@ def _agent_of(ref: str) -> str:
     return ref.split("/", 1)[1].split("@", 1)[0]
 
 
-MANIFEST_MOUNT_PATH = "/app/manifest.yaml"
+DECLARATION_MOUNT_PATH = "/app/declaration"
+"""에이전트 선언 **디렉토리**가 걸리는 자리 (#275).
+
+매니페스트 파일 하나를 바인드하면, 저작 경로의 원자적 교체(임시 파일 + rename)가 떠 있는
+컨테이너에 반영되지 않는다 — 바인드는 inode 에 묶여 옛 파일을 계속 보인다. 디렉토리를 걸면
+경로 조회가 새 파일을 찾는다 (02 Volumes)."""
+MANIFEST_MOUNT_PATH = f"{DECLARATION_MOUNT_PATH}/manifest.yaml"
+MANIFEST_ENV = "MALKUTH_MANIFEST"
+"""agentd 가 매니페스트를 찾는 env — 마운트 자리를 가리키게 주입한다."""
 MODULES_MOUNT_PATH = "/app/modules"
-"""agentd 의 기본 `MALKUTH_MANIFEST` / `MALKUTH_ROOT` 위치 — base 이미지 계약."""
+"""agentd 의 기본 `MALKUTH_ROOT` 아래 모듈 자리 — base 이미지 계약."""
 
 MODULE_TYPES = ("skillsets", "promptsets", "memorysets")
 
@@ -619,7 +627,8 @@ class DeploymentManager:
 
         provisions: dict[str, Provision] = {}
         for manifest in manifests:
-            env: dict[str, str] = {}
+            # base 이미지 기본값(/app/manifest.yaml)이 아니라 디렉토리 마운트 안을 읽게 한다
+            env: dict[str, str] = {MANIFEST_ENV: MANIFEST_MOUNT_PATH}
             credential = (credentials or {}).get(manifest.name)
             if credential:
                 # 강제 지점에 내미는 에이전트 신원 (01 Access Control 6) — 배선이라 provision 에
@@ -729,16 +738,17 @@ class DeploymentManager:
         }
 
     def _mounts(self, agent: str) -> tuple[Mapping[str, Any], ...]:
-        """base 이미지에 선언을 들여보낸다 — manifest 하나와 모듈 루트들, 전부 읽기 전용.
+        """base 이미지에 선언을 들여보낸다 — 선언 디렉토리와 모듈 루트들, 전부 읽기 전용.
 
-        없는 모듈 루트는 걸지 않는다: Docker 는 없는 호스트 경로를 root 소유
-        디렉토리로 만들어 버린다.
+        전부 **디렉토리** 마운트다 (#275). 없는 모듈 루트는 걸지 않는다: Docker 는 없는
+        호스트 경로를 root 소유 디렉토리로 만들어 버린다.
         """
         roots = self.catalog.roots
         mounts: list[Mapping[str, Any]] = [
             {
-                "name": str(self.catalog.agent_path(agent).resolve()),
-                "mount_path": MANIFEST_MOUNT_PATH,
+                # 경로 검증을 거친 매니페스트의 디렉토리 — 루트 밖을 걸지 않는다 (#273)
+                "name": str(self.catalog.agent_path(agent).parent),
+                "mount_path": DECLARATION_MOUNT_PATH,
                 "read_only": True,
             }
         ]

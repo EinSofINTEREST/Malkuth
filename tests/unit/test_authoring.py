@@ -598,3 +598,25 @@ def test_without_a_store_the_surface_is_refused(author):
         author.save_materials("alpha", {})
 
     assert exc_info.value.code == ErrorCode.CFG_001
+
+
+# --- 리뷰 반영 (#275) --------------------------------------------------------------
+
+
+def test_a_new_declaration_is_readable_by_other_users(author, workspace):
+    """``mkstemp`` 의 0600 을 그대로 두면 다른 uid 로 도는 에이전트 컨테이너가 선언을 못 읽는다."""
+    author.save_graph("pipeline", graph("pipeline"))
+
+    assert (workspace / "graphs" / "pipeline.yaml").stat().st_mode & 0o777 == 0o644
+
+
+def test_replacing_a_declaration_keeps_its_permissions(author, workspace):
+    """운영자가 정한 권한을 저장이 조용히 바꾸지 않는다 — 넓히지도, 좁히지도."""
+    author.save_graph("pipeline", graph("pipeline"))
+    path = workspace / "graphs" / "pipeline.yaml"
+    path.chmod(0o640)
+
+    author.save_graph("pipeline", graph("pipeline", "1.1.0"))
+
+    assert path.stat().st_mode & 0o777 == 0o640
+    assert Catalog.under(workspace).graph("pipeline").metadata.version == "1.1.0"

@@ -503,13 +503,17 @@ async def test_declarations_are_mounted_read_only_into_the_base_image(workspace,
     await manager.deploy("wired")
 
     volumes = next(c for c in docker.created if c["name"] == "malkuth-alpha-0")["volumes"]
-    manifest = str((workspace / "agents" / "alpha" / "manifest.yaml").resolve())
+    declaration = str((workspace / "agents" / "alpha").resolve())
     promptsets = str((workspace / "modules" / "promptsets").resolve())
-    assert volumes[manifest] == {"bind": "/app/manifest.yaml", "mode": "ro"}
+    assert volumes[declaration] == {"bind": "/app/declaration", "mode": "ro"}
     assert volumes[promptsets] == {"bind": "/app/modules/promptsets", "mode": "ro"}
     # 없는 모듈 루트는 걸지 않는다 — Docker 가 root 소유 디렉토리를 만들어 버린다
     assert not any(v["bind"].endswith("/memorysets") for v in volumes.values())
     assert all(v["mode"] == "ro" for v in volumes.values())
+    # 파일 하나를 바인드하지 않는다 — 원자적 교체가 떠 있는 컨테이너에 반영되지 않는다 (#275)
+    assert not any(v["bind"].endswith(".yaml") for v in volumes.values())
+    created = next(c for c in docker.created if c["name"] == "malkuth-alpha-0")
+    assert created["environment"]["MALKUTH_MANIFEST"] == "/app/declaration/manifest.yaml"
     await manager.launcher.stop_all()
 
 
@@ -560,7 +564,8 @@ async def test_reattach_hands_the_launcher_what_a_restart_needs(workspace, docke
     assert args["manifest"].name == "beta"
     assert args["secrets"][A2A_SECRET_ENV] == record.a2a_secret
     assert args["secrets"][A2A_PEERS_ENV].endswith(f":{record.agents[0].a2a_port}")
-    assert args["mounts"][0]["mount_path"] == "/app/manifest.yaml"
+    assert args["mounts"][0]["mount_path"] == "/app/declaration"
+    assert args["secrets"]["MALKUTH_MANIFEST"] == "/app/declaration/manifest.yaml"
     # 기록된 포트를 그대로 잡는다 — 컨테이너 안의 env 는 이미 그 포트로 굳어 있다
     assert adopted.a2a_port == next(a.a2a_port for a in record.agents if a.name == "beta")
     await second.launcher.stop_all()
@@ -1026,3 +1031,11 @@ async def test_reattach_revokes_identities_of_a_deployment_interrupted_while_sta
     with pytest.raises(MalkuthError) as exc_info:
         registry.identify(credential)
     assert exc_info.value.code == ErrorCode.ACC_001
+
+
+def test_the_manifest_env_names_what_agentd_reads():
+    """runtime 이 주입하는 env 이름과 agentd 가 읽는 이름이 어긋나면 base 기본값으로 떨어진다."""
+    from malkuth.agentd.__main__ import MANIFEST_ENV as AGENTD_MANIFEST_ENV
+    from malkuth.runtime.deployments import MANIFEST_ENV
+
+    assert MANIFEST_ENV == AGENTD_MANIFEST_ENV

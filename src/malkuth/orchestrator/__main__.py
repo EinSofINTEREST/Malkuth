@@ -118,6 +118,10 @@ def main() -> None:
         deployments.author = author
     runs = None if deployments is None else _run_service(config, catalog, deployments, store=store)
     builder = _image_builder(orchestrator, catalog, author)
+    if deployments is not None:
+        # 배포는 굽지 않는다 — 굽혔는지 **묻기만** 한다 (#266). 빌더가 없으면 빌드 표면이
+        # 꺼진 것이고, 매니페스트의 이미지를 그대로 쓴다
+        deployments.images = builder
     log.info(
         "control plane starting",
         port=orchestrator.control_port,

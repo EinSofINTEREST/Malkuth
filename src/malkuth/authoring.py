@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import stat
 import tempfile
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -31,6 +32,9 @@ from malkuth.orchestrator.topology import GraphTopology
 
 InUse = Callable[[str, str], bool]
 """``(kind, name)`` 이 지금 배포 중인가 — 배포 lifecycle(#243) 이 채운다. 없으면 항상 False."""
+
+DECLARATION_MODE = 0o644
+"""새로 쓰는 선언 파일의 권한 — 다른 uid 로 도는 에이전트 컨테이너도 읽을 수 있어야 한다."""
 
 
 def _version_tuple(version: str) -> tuple[int, ...]:
@@ -480,10 +484,19 @@ class Author:
 
         ``write_text`` 는 먼저 비우고 쓴다 — 중간에 죽으면 잘린 파일이 남고 마지막
         정상 버전은 사라진다. 이 API 가 선언을 바꾸는 주 경로이므로 원자적이어야 한다.
+
+        ``mkstemp`` 는 0600 으로 만든다 — 그대로 바꿔 넣으면 다른 uid 로 도는 에이전트
+        컨테이너가 읽기 전용 마운트로 보던 선언을 더는 읽지 못한다. 교체되는 파일의 권한을
+        잇고, 새 파일은 ``DECLARATION_MODE`` 로 둔다. 선언에는 secret 이 없다 (env 로 주입).
         """
         path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            mode = stat.S_IMODE(path.stat().st_mode)
+        except FileNotFoundError:
+            mode = DECLARATION_MODE
         fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
         try:
+            os.fchmod(fd, mode)
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 handle.write(_serialize(model))
             Path(tmp).replace(path)

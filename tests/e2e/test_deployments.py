@@ -69,7 +69,7 @@ def test_deploy_reattach_and_teardown(plane):
         "--format",
         "{{range .Mounts}}{{.Destination}}:{{.RW}} {{end}}",
     )
-    assert "/app/manifest.yaml:false" in mounts and "/app/modules/promptsets:false" in mounts
+    assert "/app/declaration:false" in mounts and "/app/modules/promptsets:false" in mounts
 
     # --- UI (#245): 같은 프로세스가 화면을 서빙하고, 화면이 만드는 모양의 문서로 저작이 된다
     page = urllib.request.urlopen(f"{plane_url()}/ui/", timeout=10).read().decode()  # noqa: S310

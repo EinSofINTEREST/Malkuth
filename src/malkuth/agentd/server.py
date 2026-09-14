@@ -54,7 +54,7 @@ class AgentRuntime:
         executor: Any,
         card: dict[str, Any] | None = None,
         health: Callable[[], HealthStatus] | None = None,
-        reload: Callable[[], Awaitable[None]] | None = None,
+        reload: Callable[[], Awaitable[dict[str, Any] | None]] | None = None,
         max_concurrent_tasks: int = DEFAULT_MAX_CONCURRENT_TASKS,
     ) -> None:
         self.agent = agent
@@ -81,10 +81,19 @@ class AgentRuntime:
             )
         return status_
 
-    async def reload(self) -> None:
-        """promptset/skillset 무중단 리로드."""
-        if self._reload is not None:
-            await self._reload()
+    async def reload(self) -> bool:
+        """promptset/skillset 무중단 리로드 — 리로드할 것이 없는 실행기면 False.
+
+        훅이 새 AgentCard 를 돌려주면 그것으로 바꾼다: card 의 skill 목록은 실제로 로드된
+        도구와 일치해야 한다 (03 AgentCard 1). 훅이 실패하면 예외가 그대로 올라가고 card 도
+        실행기도 이전 상태로 남는다.
+        """
+        if self._reload is None:
+            return False
+        card = await self._reload()
+        if card is not None:
+            self._card = dict(card)
+        return True
 
     def track(self, task_id: str, task: asyncio.Task[Any]) -> None:
         """진행 중 태스크를 등록한다 — 취소 대상 추적용."""
@@ -198,9 +207,13 @@ def create_app(runtime: AgentRuntime, *, token: str | None = None) -> FastAPI:
 
     @router.post("/reload", response_model=Acknowledgement, dependencies=[guard])
     async def reload() -> Acknowledgement:
-        """promptset/skillset 을 리로드한다 (신규 태스크부터 적용)."""
-        await runtime.reload()
-        return Acknowledgement(status="reloaded")
+        """promptset/skillset 을 리로드한다 (신규 태스크부터 적용).
+
+        리로드할 모듈이 없는 실행기(커스텀 실행기, echo)는 ``unsupported`` 로 답한다 —
+        아무것도 하지 않고 ``reloaded`` 로 답하면 호출자가 반영된 줄 안다 (#274).
+        """
+        reloaded = await runtime.reload()
+        return Acknowledgement(status="reloaded" if reloaded else "unsupported")
 
     @router.post("/drain", response_model=Acknowledgement, dependencies=[guard])
     async def drain() -> Acknowledgement:

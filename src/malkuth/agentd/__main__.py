@@ -35,7 +35,7 @@ from malkuth.protocols.a2a.card import build_card
 from malkuth.protocols.a2a.tool import ASK_PEER_TOOL
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Awaitable, Callable, Sequence
 
     from fastapi import FastAPI
 
@@ -118,6 +118,7 @@ def build_app(
     *,
     token: str | None = None,
     tools: Sequence[Any] = (),
+    reload: Callable[[], Awaitable[dict[str, Any] | None]] | None = None,
 ) -> FastAPI:
     """Build the Control API app for a manifest.
 
@@ -140,6 +141,7 @@ def build_app(
         card=build_card(manifest, tools).model_dump(mode="json"),
         health=lambda: HealthStatus(status=HealthState.HEALTHY),
         max_concurrent_tasks=manifest.spec.runtime.max_concurrent_tasks,
+        reload=reload,
     )
     return create_app(runtime, token=token)
 
@@ -260,7 +262,6 @@ async def build_executor(manifest: AgentManifest, *, metrics: Metrics | None = N
             details={"provider": manifest.spec.model.provider},
         )
 
-    from malkuth.agentd.bootstrap import Bootstrap
     from malkuth.agentd.executor import (
         MODEL_RETRY_POLICIES,
         Executor,
@@ -268,20 +269,12 @@ async def build_executor(manifest: AgentManifest, *, metrics: Metrics | None = N
         ExecutorServices,
     )
     from malkuth.agentd.providers.anthropic import AnthropicModel
-    from malkuth.modules.promptset import PromptsetLoader
     from malkuth.modules.registry import ModuleRegistry
-    from malkuth.modules.skillset import SkillsetLoader
 
     registry = ModuleRegistry.under(Path(os.environ.get(ROOT_ENV, DEFAULT_ROOT)))
-    result = await Bootstrap(
+    binding = await load_modules(
         manifest,
-        promptset_loader=PromptsetLoader(registry),
-        skillset_loader=SkillsetLoader(registry),
-    ).run()
-
-    registry_tools = AgentToolRegistry(
-        agent=manifest.name,
-        skillsets=result.skillsets,
+        registry,
         memory=_memory_access(manifest.name),
         # 03 은 "실행 중 peer 에게 위임한다" 를 규정하는데, 이 조립이 없어
         # 에이전트는 **받을 수는 있고 걸 수는 없었다** (#193)
@@ -291,9 +284,9 @@ async def build_executor(manifest: AgentManifest, *, metrics: Metrics | None = N
     return Executor(
         agent=manifest.name,
         model=AnthropicModel(config=manifest.spec.model, agent=manifest.name),
-        tools=registry_tools,
-        render=lambda task: _render(result, task),
-        tool_schemas=_executable_schemas(result, registry_tools),
+        tools=binding.tools,
+        render=binding.render,
+        tool_schemas=binding.tool_schemas,
         # 05 Retry Layering — 모델 호출의 재시도 주체는 agentd 다.
         # 여기서 켜지 않으면 정책은 정의만 되고 아무 일도 하지 않는다
         config=ExecutorConfig(retry_policies=MODEL_RETRY_POLICIES),
@@ -302,10 +295,68 @@ async def build_executor(manifest: AgentManifest, *, metrics: Metrics | None = N
             artifacts=_artifact_store(manifest),
             # 09 Context Assembly — 태스크 진입 시 1회 회상해 프롬프트에 붙인다.
             # 이것이 없으면 memoryset 의 recall 선언이 아무 일도 하지 않는다
-            recall=_task_recall(manifest, registry, registry_tools.memory),
-            output_keys=lambda task: _template_output_keys(result, task),
+            recall=_task_recall(manifest, registry, binding.tools.memory),
+            output_keys=binding.output_keys,
         ),
     )
+
+
+async def load_modules(
+    manifest: AgentManifest, registry: Any, *, memory: Any, peers: Any, mcp: Any = None
+) -> Any:
+    """Load the promptset and skillsets a manifest declares into one binding.
+
+    기동과 리로드가 **같은 조립**을 탄다 — 두 벌이면 리로드만 다른 도구 목록을 만든다.
+    메모리·peer·MCP 연결은 모듈이 아니라 배선이라 호출자가 넘긴다: 리로드가 그것을 새로
+    만들면 토큰과 세션이 바뀐다.
+
+    Raises:
+        MalkuthError: MODULE 계열 — 모듈을 해석하거나 로드하지 못함.
+    """
+    from malkuth.agentd.bootstrap import Bootstrap
+    from malkuth.agentd.executor import ModuleBinding
+    from malkuth.modules.promptset import PromptsetLoader
+    from malkuth.modules.skillset import SkillsetLoader
+
+    result = await Bootstrap(
+        manifest,
+        promptset_loader=PromptsetLoader(registry),
+        skillset_loader=SkillsetLoader(registry),
+    ).run()
+    tools = AgentToolRegistry(
+        agent=manifest.name, skillsets=result.skillsets, memory=memory, peers=peers, mcp=mcp
+    )
+    return ModuleBinding(
+        tools=tools,
+        render=lambda task: _render(result, task),
+        tool_schemas=tuple(_executable_schemas(result, tools)),
+        output_keys=lambda task: _template_output_keys(result, task),
+    )
+
+
+def build_reload(manifest: AgentManifest, executor: Any) -> Callable[[], Awaitable[dict[str, Any]]]:
+    """The reload hook for the standard executor (#274).
+
+    02 Hot Reload 는 무중단 리로드를 약속하는데, 이 훅이 런타임에 넘어가지 않아 엔드포인트가
+    아무것도 다시 읽지 않고 ``reloaded`` 로 답했다.
+
+    새 묶음을 **먼저 끝까지 조립한 뒤** 갈아 끼운다. 조립이 실패하면 예외가 올라가고 실행기는
+    이전 묶음 그대로다 — 반쯤 로드된 도구 목록으로 태스크를 받지 않는다.
+    """
+    from malkuth.modules.registry import ModuleRegistry
+
+    async def reload() -> dict[str, Any]:
+        current = executor.binding.tools
+        registry = ModuleRegistry.under(Path(os.environ.get(ROOT_ENV, DEFAULT_ROOT)))
+        binding = await load_modules(
+            manifest, registry, memory=current.memory, peers=current.peers, mcp=current.mcp
+        )
+        executor.rebind(binding)
+        log.info("agent modules reloaded", agent=manifest.name, tools=len(binding.tool_schemas))
+        card: dict[str, Any] = build_card(manifest, binding.tool_schemas).model_dump(mode="json")
+        return card
+
+    return reload
 
 
 def _artifact_store(manifest: AgentManifest) -> Any:
@@ -548,12 +599,16 @@ def main() -> None:
     manifest = load_manifest(Path(os.environ.get(MANIFEST_ENV, DEFAULT_MANIFEST_PATH)))
     metrics = _setup_observability()
     executor = asyncio.run(build_executor(manifest, metrics=metrics))
+    from malkuth.agentd.executor import Executor
+
     app = build_app(
         manifest,
         executor,
         token=os.environ.get(TOKEN_ENV),
         # 광고와 실행이 같은 목록을 봐야 peer 가 부를 수 없는 skill 을 보지 않는다
-        tools=getattr(executor, "_tool_schemas", ()),
+        tools=getattr(executor, "tool_schemas", ()),
+        # 모듈에서 도구를 만드는 표준 실행기만 리로드할 것이 있다
+        reload=build_reload(manifest, executor) if isinstance(executor, Executor) else None,
     )
 
     log.info(

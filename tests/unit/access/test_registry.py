@@ -15,86 +15,18 @@ import sqlite3
 from pathlib import Path
 
 import pytest
-import yaml
 
 from malkuth.access.model import DECLARATION, OPERATOR, Mode, Outcome, ResourceKind
 from malkuth.access.registry import AccessRegistry, credential_hash
 from malkuth.access.store import InMemoryAccessStore, SqliteAccessStore
 from malkuth.catalog import Catalog
 from malkuth.core.errors import ErrorCode, MalkuthError
-
-KNOWLEDGE = "group:research:knowledge"
-STEWARD = "permission-agent"
-
-
-def write(path: Path, document: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
-
-
-def agent(name: str, group: str | None = None) -> dict:
-    metadata = {"name": name, "version": "0.1.0"}
-    if group:
-        metadata["group"] = group
-    return {
-        "apiVersion": "malkuth/v1",
-        "kind": "Agent",
-        "metadata": metadata,
-        "spec": {
-            "model": {"provider": "anthropic", "name": "claude-sonnet-5"},
-            "promptset": {"ref": "promptsets/solo@0.1.0"},
-        },
-    }
-
-
-def group(name: str, spec: dict) -> dict:
-    return {
-        "apiVersion": "malkuth/v1",
-        "kind": "Group",
-        "metadata": {"name": name, "version": "0.1.0"},
-        "spec": spec,
-    }
+from tests.fixtures.access import KNOWLEDGE, STEWARD, access_workspace
 
 
 @pytest.fixture
 def workspace(tmp_path: Path) -> Path:
-    write(
-        tmp_path / "modules" / "promptsets" / "solo" / "0.1.0" / "promptset.yaml",
-        {
-            "apiVersion": "malkuth/v1",
-            "kind": "Promptset",
-            "metadata": {"name": "solo", "version": "0.1.0"},
-            "spec": {"engine": "jinja2", "templates": {"default": {"file": "t.j2"}}},
-        },
-    )
-    write(tmp_path / "agents" / "worker" / "manifest.yaml", agent("worker", "research"))
-    write(tmp_path / "agents" / "peer" / "manifest.yaml", agent("peer", "research"))
-    write(tmp_path / "agents" / "loner" / "manifest.yaml", agent("loner"))
-    write(tmp_path / "agents" / STEWARD / "manifest.yaml", agent(STEWARD, "research"))
-    write(
-        tmp_path / "groups" / "research.yaml",
-        group(
-            "research",
-            {
-                "access": {
-                    "ceiling": {
-                        "max_ttl_s": 600,
-                        "memory": [{"space": KNOWLEDGE, "mode": "ro"}],
-                        "egress": ["api.search.example.com"],
-                        "a2a": ["loner"],
-                    }
-                }
-            },
-        ),
-    )
-    write(
-        tmp_path / "groups" / "global.yaml",
-        group(
-            "global", {"access": {"ceiling": {"max_ttl_s": 60, "egress": ["status.example.com"]}}}
-        ),
-    )
-    (tmp_path / "graphs").mkdir()
-    return tmp_path
+    return access_workspace(tmp_path)
 
 
 class Clock:

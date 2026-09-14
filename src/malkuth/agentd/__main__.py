@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import inspect
+import itertools
 import json
 import os
 from pathlib import Path
@@ -302,7 +303,13 @@ async def build_executor(manifest: AgentManifest, *, metrics: Metrics | None = N
 
 
 async def load_modules(
-    manifest: AgentManifest, registry: Any, *, memory: Any, peers: Any, mcp: Any = None
+    manifest: AgentManifest,
+    registry: Any,
+    *,
+    memory: Any,
+    peers: Any,
+    mcp: Any = None,
+    generation: int = 0,
 ) -> Any:
     """Load the promptset and skillsets a manifest declares into one binding.
 
@@ -321,7 +328,7 @@ async def load_modules(
     result = await Bootstrap(
         manifest,
         promptset_loader=PromptsetLoader(registry),
-        skillset_loader=SkillsetLoader(registry),
+        skillset_loader=SkillsetLoader(registry, generation=generation),
     ).run()
     tools = AgentToolRegistry(
         agent=manifest.name, skillsets=result.skillsets, memory=memory, peers=peers, mcp=mcp
@@ -345,11 +352,20 @@ def build_reload(manifest: AgentManifest, executor: Any) -> Callable[[], Awaitab
     """
     from malkuth.modules.registry import ModuleRegistry
 
+    generations = itertools.count(1)
+
     async def reload() -> dict[str, Any]:
         current = executor.binding.tools
         registry = ModuleRegistry.under(Path(os.environ.get(ROOT_ENV, DEFAULT_ROOT)))
         binding = await load_modules(
-            manifest, registry, memory=current.memory, peers=current.peers, mcp=current.mcp
+            manifest,
+            registry,
+            memory=current.memory,
+            peers=current.peers,
+            mcp=current.mcp,
+            # 세대를 올려야 고친 스킬 코드가 다시 실행된다 — 같은 세대면 import 캐시가
+            # 옛 함수를 준다
+            generation=next(generations),
         )
         executor.rebind(binding)
         log.info("agent modules reloaded", agent=manifest.name, tools=len(binding.tool_schemas))
@@ -607,8 +623,13 @@ def main() -> None:
         token=os.environ.get(TOKEN_ENV),
         # 광고와 실행이 같은 목록을 봐야 peer 가 부를 수 없는 skill 을 보지 않는다
         tools=getattr(executor, "tool_schemas", ()),
-        # 모듈에서 도구를 만드는 표준 실행기만 리로드할 것이 있다
-        reload=build_reload(manifest, executor) if isinstance(executor, Executor) else None,
+        # 모듈에서 도구를 만드는 표준 실행기만 리로드할 것이 있다. 커스텀 entrypoint 가
+        # Executor 를 돌려주더라도 그 배선은 표준 조립과 다를 수 있으므로 리로드하지 않는다
+        reload=(
+            build_reload(manifest, executor)
+            if manifest.spec.entrypoint is None and isinstance(executor, Executor)
+            else None
+        ),
     )
 
     log.info(

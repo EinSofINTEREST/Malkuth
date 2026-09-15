@@ -1111,3 +1111,17 @@ async def test_without_an_egress_proxy_the_model_key_is_injected_as_before(manag
 
     assert all(env_of(docker, a.name)["ANTHROPIC_API_KEY"] == "k" for a in record.agents)
     await manager.launcher.stop_all()
+
+
+def test_a_proxy_terminated_key_never_leaves_even_without_an_identity_override(manager):
+    """배선이 신원으로 덮어쓰지 않아도 프록시가 종단하는 키는 에이전트 env 로 나가지 않는다."""
+    from malkuth.runtime.deployments import EgressEndpoints, Provision
+
+    manager.egress = EgressEndpoints(
+        connect_url="http://malkuth-egress:8080", providers_url="http://malkuth-egress:8081"
+    )
+    manifest = manager.catalog.agent("alpha")
+
+    env = manager._env_for(manifest, Provision(env={}, mounts=(), a2a_port=None, image=None))  # noqa: SLF001
+
+    assert "ANTHROPIC_API_KEY" not in env

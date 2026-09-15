@@ -110,6 +110,7 @@ class SdkPeerTransport:
     addresses: Mapping[str, str]
     timeout_s: float = 120.0
     _clients: dict[str, Client] = field(default_factory=dict, init=False)
+    _peer_http: dict[str, httpx.AsyncClient] = field(default_factory=dict, init=False)
 
     def call_headers(self, token: str, headers: Mapping[str, str]) -> dict[str, str]:
         """peer 호출에 실을 헤더.
@@ -141,6 +142,10 @@ class SdkPeerTransport:
                 ``A2A_003`` if the peer reports failure.
         """
         client = await self._client(callee, token=token, headers=headers)
+        # 표는 만료되어 새로 받는다 — 클라이언트를 만들 때 한 번 실은 헤더로는 옛 표가 나간다
+        http = self._peer_http.get(callee)
+        if http is not None:
+            http.headers.update(self.call_headers(token, headers))
         request = pb.SendMessageRequest(message=build_message(task))
 
         final: pb.Task | None = None
@@ -192,6 +197,7 @@ class SdkPeerTransport:
             http = httpx.AsyncClient(
                 timeout=self.timeout_s, headers=self.call_headers(token, headers)
             )
+            self._peer_http[callee] = http
             factory = ClientFactory(ClientConfig(httpx_client=http, streaming=True))
             self._clients[callee] = await factory.create_from_url(address)
         return self._clients[callee]

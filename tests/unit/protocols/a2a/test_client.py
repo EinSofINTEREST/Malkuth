@@ -310,3 +310,15 @@ async def test_peer_rejection_does_not_open_the_circuit():
 
     # 6회 거부에도 회로는 닫혀 있어야 한다
     assert client._breaker("planner").can_attempt() is True
+
+
+async def test_a_refusal_the_transport_already_classified_is_not_rewritten():
+    """피호출자의 A2A_004 를 A2A_001 로 뭉개면 연결 회수와 제출 실패가 구분되지 않는다 (#281)."""
+    from malkuth.protocols.a2a.errors import not_allowed
+
+    client = make_client(FakePeer(error=not_allowed("researcher", "planner", owner="planner")))
+
+    with pytest.raises(MalkuthError) as exc_info:
+        await client.call("planner", make_task())
+
+    assert exc_info.value.code == "A2A_004"

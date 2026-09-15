@@ -160,6 +160,10 @@ class OrchestratorConfig(BaseModel):
     access_enforcer_token: str | None = Field(default=None, min_length=1)
     """강제 지점(Memory Service, 이그레스 프록시, A2A 서버)이 판정 라우트에 내미는 토큰. control
     plane 토큰과 **달라야** 한다 — 같으면 강제 지점이 운영자 권한을 덤으로 갖는다."""
+    access_agent_url: str | None = Field(default=None, min_length=1)
+    """에이전트 컨테이너에서 닿는 control plane 주소 — A2A 호출자가 표를 받고 피호출자가 확인하는 곳
+    (#281). 레지스트리를 켜면 필수다: 없으면 에이전트가 공유 서명 키로 되돌아가야 하는데, 그 키는
+    그래프의 모든 에이전트가 쥐어 경계가 되지 못한다."""
     access_stewards: tuple[str, ...] = ()
     """권한 에이전트로 지정된 에이전트 이름 — 운영자 설정이다. 에이전트가 스스로 지정할 수 없다."""
     max_concurrent_runs: int = Field(default=10, gt=0)

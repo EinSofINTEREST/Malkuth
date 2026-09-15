@@ -550,6 +550,168 @@ async def test_a_failed_deploy_returns_the_preallocated_ports(
     assert running(docker) == []
 
 
+async def test_an_isolated_control_plane_reattaches_by_network_address(workspace, healthy):
+    """내부 네트워크에는 게시 포트가 없다 — 재부착도 네트워크 안 주소로 붙어야 한다 (#280)."""
+    docker = TrackingDocker(address="172.30.0.9")
+    catalog = Catalog.under(workspace)
+    store = InMemoryDeploymentStore()
+
+    def manager_on_internal_network() -> DeploymentManager:
+        return DeploymentManager(
+            catalog=catalog,
+            author=Author(catalog=catalog),
+            store=store,
+            secrets_env={"ANTHROPIC_API_KEY": "k"},
+            launcher=AgentLauncher(
+                engine=DockerEngine(client=docker, network="agents", internal=True),
+                health_interval_s=10.0,
+                health_sleep=Tick(),
+            ),
+            ready_poll_s=0.0,
+            sleep=NoSleep(),
+        )
+
+    first = manager_on_internal_network()
+    await first.deploy("two")
+    second = manager_on_internal_network()
+    touched = await second.reattach()
+
+    assert [r.status for r in touched] == [DeploymentStatus.READY]
+    for launched in second.launcher.launched.values():
+        # 핸들만이 아니라 실제로 부르는 클라이언트가 그 주소를 써야 한다
+        assert launched.client.base_url == launched.handle.control_url == "http://172.30.0.9:8080"
+    await first.launcher.stop_all()
+    await second.launcher.stop_all()
+
+
+@pytest.mark.parametrize(
+    ("network_error", "attached"),
+    [
+        # 프록시를 켜기 전 일반 네트워크로 뜬 배포
+        ("not internal", None),
+        # 내부 네트워크에 있지만 누가 외부 네트워크를 더 붙인 컨테이너
+        (None, ("agents", "bridge")),
+    ],
+)
+async def test_reattach_refuses_containers_that_are_not_isolated(
+    workspace, healthy, network_error, attached
+):
+    """재부착은 기동을 거치지 않는다 — 외부 경로가 남은 컨테이너를 격리된 것으로 붙이면 안 된다."""
+    from malkuth.runtime.docker.errors import NetworkIsolationError
+
+    catalog = Catalog.under(workspace)
+    store = InMemoryDeploymentStore()
+    first_docker = TrackingDocker()
+    first = DeploymentManager(
+        catalog=catalog,
+        author=Author(catalog=catalog),
+        store=store,
+        secrets_env={"ANTHROPIC_API_KEY": "k"},
+        launcher=AgentLauncher(
+            engine=DockerEngine(client=first_docker, network="agents"),
+            health_interval_s=10.0,
+            health_sleep=Tick(),
+        ),
+        ready_poll_s=0.0,
+        sleep=NoSleep(),
+    )
+    registry = with_access(first)
+    record = await first.deploy("two")
+    await first.launcher.stop_all()
+
+    later = TrackingDocker(
+        network_error=(
+            NetworkIsolationError("agents", expected=True, actual=False) if network_error else None
+        ),
+        attached=attached,
+    )
+    later.created = list(first_docker.created)
+    second = DeploymentManager(
+        catalog=catalog,
+        author=Author(catalog=catalog),
+        store=store,
+        secrets_env={"ANTHROPIC_API_KEY": "k"},
+        launcher=AgentLauncher(
+            engine=DockerEngine(client=later, network="agents", internal=True),
+            health_interval_s=10.0,
+            health_sleep=Tick(),
+        ),
+        ready_poll_s=0.0,
+        sleep=NoSleep(),
+    )
+    second.access = registry
+
+    touched = await second.reattach()
+
+    assert [(r.status, r.error) for r in touched] == [
+        (DeploymentStatus.LOST, "network isolation mismatch: alpha")
+    ]
+    assert second.launcher.launched == {}, "격리되지 않은 컨테이너를 붙였다"
+    for agent in record.agents:
+        with pytest.raises(MalkuthError):
+            registry.identify(agent.access_credential)  # 외부 경로가 남은 컨테이너의 신원은 회수
+
+
+class VanishingDocker(TrackingDocker):
+    """찾은 뒤 조회하는 사이 컨테이너가 사라진다 — SDK 는 NotFound 같은 자기 예외를 던진다."""
+
+    def __init__(self, vanishing: str, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.vanishing = vanishing
+
+    def networks_of(self, container_id: str) -> tuple[str, ...]:
+        if container_id == self.find(self.vanishing):
+            raise RuntimeError("404 container not found")
+        return super().networks_of(container_id)
+
+
+async def test_a_docker_failure_during_the_isolation_check_fails_closed_and_moves_on(
+    workspace, healthy
+):
+    """확인하지 못한 배포는 lost + 신원 회수, 뒤의 배포는 계속 재부착한다 (#296 리뷰)."""
+    catalog = Catalog.under(workspace)
+    store = InMemoryDeploymentStore()
+    first_docker = TrackingDocker()
+
+    def manager_with(client, *, internal: bool) -> DeploymentManager:
+        return DeploymentManager(
+            catalog=catalog,
+            author=Author(catalog=catalog),
+            store=store,
+            secrets_env={"ANTHROPIC_API_KEY": "k"},
+            launcher=AgentLauncher(
+                engine=DockerEngine(client=client, network="agents", internal=internal),
+                health_interval_s=10.0,
+                health_sleep=Tick(),
+            ),
+            ready_poll_s=0.0,
+            sleep=NoSleep(),
+        )
+
+    first = manager_with(first_docker, internal=True)
+    registry = with_access(first)
+    broken = await first.deploy("two")
+    await first.launcher.stop_all()
+    write(workspace / "agents" / "gamma" / "manifest.yaml", agent_doc("gamma"))
+    write(workspace / "graphs" / "other.yaml", graph_doc("other", ["gamma"]))
+    healthy_record = await manager_with(first_docker, internal=True).deploy("other")
+
+    later = VanishingDocker("malkuth-alpha-0", attached=("agents",))
+    later.created = list(first_docker.created)
+    second = manager_with(later, internal=True)
+    second.access = registry
+
+    touched = {r.deployment_id: r for r in await second.reattach()}
+
+    assert touched[broken.deployment_id].status == DeploymentStatus.LOST
+    assert touched[broken.deployment_id].error == "network isolation unverifiable: alpha"
+    with pytest.raises(MalkuthError):
+        registry.identify(broken.agents[0].access_credential)
+    assert touched[healthy_record.deployment_id].status == DeploymentStatus.READY
+    assert sorted(second.launcher.launched) == [("gamma", 0)]
+    await second.launcher.stop_all()
+
+
 async def test_reattach_hands_the_launcher_what_a_restart_needs(workspace, docker, healthy):
     wired_workspace(workspace)
     store = InMemoryDeploymentStore()

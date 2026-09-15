@@ -22,7 +22,7 @@ from malkuth.runtime.control import ControlClient
 from malkuth.runtime.docker.engine import DEFAULT_DRAIN_TIMEOUT_S, ContainerHandle
 from malkuth.runtime.lifecycle import AgentLifecycle, AgentState
 from malkuth.runtime.ports import A2APortAllocator
-from malkuth.runtime.spec import build_container_spec
+from malkuth.runtime.spec import LOOPBACK, build_container_spec
 from malkuth.runtime.tokens import TokenIssuer, authenticated_env
 
 if TYPE_CHECKING:
@@ -195,7 +195,7 @@ class AgentLauncher:
 
         handle = await self.engine.start(spec)
         client = ControlClient(
-            f"http://127.0.0.1:{handle.control_port}",
+            handle.control_url,
             agent=agent,
             # 05 Retry Layering — runtime 이 재시도 주체다 (읽기만)
             retry=NETWORK_RETRY,
@@ -397,6 +397,7 @@ class AgentLauncher:
         image: str,
         control_port: int,
         token: str,
+        control_host: str = LOOPBACK,
         a2a_port: int | None = None,
         restart_args: Mapping[str, Any] | None = None,
     ) -> bool:
@@ -422,12 +423,14 @@ class AgentLauncher:
             return False
 
         handle = ContainerHandle(
-            agent=agent, container_id=container_id, image=image, control_port=control_port
+            agent=agent,
+            container_id=container_id,
+            image=image,
+            control_port=control_port,
+            control_host=control_host,
         )
         self.issuer.remember(agent, token)
-        client = ControlClient(
-            f"http://127.0.0.1:{control_port}", agent=agent, retry=NETWORK_RETRY, token=token
-        )
+        client = ControlClient(handle.control_url, agent=agent, retry=NETWORK_RETRY, token=token)
         # Ready 는 **선언하지 않는다** — 살아 있다는 것과 태스크를 받을 수 있다는
         # 것은 다르다. 첫 health 성공이 올린다 (02 Rule 2, `_promote`)
         lifecycle = AgentLifecycle(agent=agent)

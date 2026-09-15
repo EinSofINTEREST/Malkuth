@@ -517,6 +517,8 @@ class DeploymentManager:
                 # 운영자에게 보인다. 조용히 붙이면 첫 재시작에서 넘어진다
                 self._mark_lost(record, f"cannot rebuild from declarations: {err.message}", touched)
                 continue
+            if not await self._isolated(record, touched):
+                continue
             missing = []
             for agent in record.agents:
                 # 이름으로 찾는다 — launcher 의 재시작이 컨테이너를 갈아 끼우면
@@ -527,7 +529,8 @@ class DeploymentManager:
                     replica=agent.replica,
                     container_id=live[0],
                     image=agent.image,
-                    control_port=live[1],
+                    control_host=live[1],
+                    control_port=live[2],
                     token=agent.token,
                     a2a_port=agent.a2a_port,
                     restart_args=restart_args[agent.name],
@@ -539,19 +542,54 @@ class DeploymentManager:
                 touched.append(self._refresh(record))
         return touched
 
-    async def _live(self, agent: DeployedAgent) -> tuple[str, int] | None:
-        """이 자리에 지금 서 있는 컨테이너의 (id, control 포트) — 없으면 None."""
-        client = self.launcher.engine.client
+    async def _isolated(self, record: DeploymentRecord, touched: list[DeploymentRecord]) -> bool:
+        """재부착 전에 배포의 모든 컨테이너가 runtime 의 격리대로 서 있는지 본다 (#280).
+
+        하나라도 아니면 아무것도 붙이지 않고 lost 로 두며 그 배포의 신원을 회수한다 — 외부 경로가
+        남은 컨테이너가 신원으로 메모리·peer·모델에 계속 닿지 못하게. 컨테이너는 지우지 않는다:
+        운영자가 원인을 보고 해체한다.
+        """
+        engine = self.launcher.engine
+        for agent in record.agents:
+            try:
+                container_id = await asyncio.to_thread(
+                    engine.client.find, container_name(agent.name, agent.replica)
+                )
+                if container_id is None:
+                    continue  # 없는 컨테이너는 아래 대조가 missing 으로 보고한다
+                await engine.verify_isolation(agent.name, agent.image, container_id)
+            except MalkuthError as err:
+                reason, code = "network isolation mismatch", err.code
+            except Exception as err:  # noqa: BLE001 — 격리를 확인하지 못했다: 붙이지 않는 쪽으로 닫는다
+                # 조회 사이에 컨테이너가 사라지거나 daemon 이 답하지 않으면 SDK 예외가 온다. 여기서
+                # 새면 이 배포는 lost 도 신원 회수도 없이 남고, 뒤의 배포는 재부착조차 되지 않는다
+                reason, code = "network isolation unverifiable", type(err).__name__
+            else:
+                continue
+            self._bind_log(record).error(
+                "deployment not reattached — agent network isolation not confirmed",
+                agent=agent.name,
+                reason=reason,
+                error_code=code,
+            )
+            self._mark_lost(record, f"{reason}: {agent.name}", touched)
+            self._revoke_orphaned_identities(record)
+            return False
+        return True
+
+    async def _live(self, agent: DeployedAgent) -> tuple[str, str, int] | None:
+        """이 자리에 지금 서 있는 컨테이너의 (id, control 주소, control 포트) — 없으면 None."""
+        engine = self.launcher.engine
         container_id = await asyncio.to_thread(
-            client.find, container_name(agent.name, agent.replica)
+            engine.client.find, container_name(agent.name, agent.replica)
         )
         if container_id is None:
             return None
         try:
-            port = await asyncio.to_thread(client.port_of, container_id, DEFAULT_CONTROL_PORT)
-        except Exception:  # noqa: BLE001 — 포트가 없으면 붙을 수 없는 컨테이너다
+            host, port = await engine.control_address(container_id, DEFAULT_CONTROL_PORT)
+        except Exception:  # noqa: BLE001 — 주소가 없으면 붙을 수 없는 컨테이너다
             return None
-        return container_id, port
+        return container_id, host, port
 
     def _refresh(self, record: DeploymentRecord) -> DeploymentRecord:
         """launcher 가 아는 현재 컨테이너로 기록을 맞춘다 — 재시작이 id/포트를 바꾼다."""

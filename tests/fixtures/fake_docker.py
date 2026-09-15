@@ -24,6 +24,8 @@ class FakeDockerClient:
         build_error: Exception | None = None,
         state: dict[str, Any] | None = None,
         host_port: int = 49152,
+        address: str = "172.30.0.7",
+        attached: tuple[str, ...] | None = None,
     ) -> None:
         self._image_error = image_error
         self._network_error = network_error
@@ -34,9 +36,13 @@ class FakeDockerClient:
         self._build_error = build_error
         self._state = state or {"Running": True, "ExitCode": 0, "OOMKilled": False}
         self._host_port = host_port
+        self._address = address
+        self._attached = attached
 
         self.images: list[str] = []
         self.networks: list[str] = []
+        self.internal_requests: list[bool] = []
+        self.addressed: list[tuple[str, str]] = []
         self.created: list[dict[str, Any]] = []
         self.started: list[str] = []
         self.stopped: list[tuple[str, float]] = []
@@ -49,10 +55,18 @@ class FakeDockerClient:
             raise self._image_error
         self.images.append(image)
 
-    def ensure_network(self, name: str) -> None:
+    def ensure_network(self, name: str, *, internal: bool = False) -> None:
         if self._network_error is not None:
             raise self._network_error
         self.networks.append(name)
+        self.internal_requests.append(internal)
+
+    def networks_of(self, container_id: str) -> tuple[str, ...]:
+        return self._attached if self._attached is not None else tuple(self.networks[-1:])
+
+    def address_of(self, container_id: str, network: str) -> str:
+        self.addressed.append((container_id, network))
+        return self._address
 
     def create(self, **kwargs: Any) -> str:
         if self._create_error is not None:

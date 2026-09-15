@@ -59,6 +59,32 @@ def image_unavailable(agent: str, image: str, **details: Any) -> MalkuthError:
     )
 
 
+class NetworkIsolationError(Exception):
+    """An existing network's isolation differs from what the runtime needs."""
+
+    def __init__(self, name: str, *, expected: bool, actual: bool) -> None:
+        want = "internal" if expected else "not internal"
+        super().__init__(f"network {name} must be {want}")
+        self.name = name
+        self.expected = expected
+        self.actual = actual
+
+
+def network_mismatch(
+    agent: str, image: str, err: NetworkIsolationError, **details: Any
+) -> MalkuthError:
+    """에이전트 네트워크의 격리가 runtime 과 다르다 — 설정 문제라 재시도해도 같다."""
+    return runtime_error(
+        ErrorCode.RT_001,
+        "agent network isolation does not match the runtime",
+        agent=agent,
+        image=image,
+        network=err.name,
+        reason=str(err),
+        **details,
+    )
+
+
 def start_failed(agent: str, image: str, **details: Any) -> MalkuthError:
     """컨테이너 기동 실패 — 일시적 자원 부족일 수 있어 재시도 가능."""
     return runtime_error(

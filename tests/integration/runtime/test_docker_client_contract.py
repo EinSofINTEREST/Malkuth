@@ -113,3 +113,33 @@ def test_remove_is_idempotent(client, container):
     client.remove(container)
 
     client.remove(container)  # 두 번째도 조용히 성공해야 정리 경로가 안전하다
+
+
+INTERNAL = "malkuth-contract-internal"
+
+
+def test_network_isolation_is_created_and_a_mismatch_is_refused(client):
+    """두 구현이 같아야 통합 테스트가 격리 불일치를 실제로 검증한다 (#280)."""
+    from malkuth.runtime.docker.errors import NetworkIsolationError
+
+    docker("network", "rm", INTERNAL, check=False)
+    try:
+        client.ensure_network(INTERNAL, internal=True)
+        assert docker("network", "inspect", "-f", "{{.Internal}}", INTERNAL) == "true"
+        client.ensure_network(INTERNAL, internal=True)  # 같은 격리면 그대로 쓴다
+        with pytest.raises(NetworkIsolationError):
+            client.ensure_network(INTERNAL, internal=False)
+        client.ensure_network(NETWORK)
+        with pytest.raises(NetworkIsolationError):
+            client.ensure_network(NETWORK, internal=True)
+    finally:
+        docker("network", "rm", INTERNAL, check=False)
+
+
+def test_networks_and_address_are_read_from_the_container(client, container):
+    client.start(container)
+
+    assert client.networks_of(container) == (NETWORK,)
+    assert client.address_of(container, NETWORK).count(".") == 3
+    with pytest.raises(LookupError):
+        client.address_of(container, "malkuth-not-attached")

@@ -491,9 +491,9 @@ else — credentials, paths and queries in it are refused (`CFG_001`).
 **Enforcement is being rolled out point by point.** Memory, A2A calls and egress through the proxy
 are enforced today — the Memory Service in registry mode, each callee's A2A server and the egress
 proxy ask for every request (see [Memory enforcement](#memory-enforcement),
-[A2A enforcement](#a2a-enforcement) and [Egress enforcement](#egress-enforcement)). Two gaps
-remain: agents are not yet on a network without an external route, so a call that ignores
-`HTTPS_PROXY` still leaves unchecked; and remote MCP tools are not yet decided per tool.
+[A2A enforcement](#a2a-enforcement) and [Egress enforcement](#egress-enforcement)). With the proxy
+on, agents sit on a network with no external route, so the proxy is the only way out. One gap
+remains: remote MCP tools are not yet decided per tool.
 
 ### Three callers, three credentials
 
@@ -770,6 +770,36 @@ Deployments then give each agent `HTTPS_PROXY` (its own identity as credentials)
 `ANTHROPIC_BASE_URL` pointing at the proxy, and its identity where `ANTHROPIC_API_KEY` was. Plain
 `http` is not proxied — framework services on the agent network stay direct. `runtime.egress_proxy`
 without `orchestrator.access_store` refuses to start (`CFG_001`).
+
+#### Network isolation
+
+A proxy that agents can walk around decides nothing, so **turning the proxy on isolates the agent
+network**. `runtime.network` becomes an internal Docker network (`--internal`) with no route out:
+inside an agent container, a name outside that network does not resolve and a direct connection to an
+outside address fails. The proxy is the only way out.
+
+- **Only the proxy and the framework services join both networks.** Attach the egress proxy, the
+  Memory Service, and whatever answers `orchestrator.access_agent_url` to the agent network and to a
+  network with a route out. Agents reach them by name on the agent network.
+- **An existing network must already be internal.** The control plane creates the network when it
+  is missing. It refuses to start an agent on an existing network whose isolation differs (`RT_001`,
+  not retryable) instead of reusing it: a network with a route out would let agents bypass the proxy.
+  Remove or recreate that network.
+- **Reattaching checks isolation too.** After a restart, a deployment is reattached only when the
+  agent network is internal and each of its containers is attached to that network alone. Otherwise
+  the deployment becomes `lost` ("network isolation mismatch"), nothing is attached, and its agent
+  identities are revoked, so containers with a route out lose their memory, peer and model access.
+  The containers are left running for you to inspect and tear down.
+- **Agents publish no ports.** Ports cannot be published from an internal network, so the control
+  plane reaches each agent's Control API at the container's address on that network, and reattaching
+  after a restart looks the address up again. The control plane must be able to reach that
+  address: run it on the agent network, or on the Linux host that owns the network's bridge.
+- **The host is still reachable from agents** at the agent network's gateway address, like any
+  bridge network. A host service listening on all interfaces is reachable from agents. Bind host
+  services to loopback or to the address they serve, or firewall the bridge.
+
+Without `runtime.egress_proxy`, agents stay on a regular network with ports published on loopback, as
+before.
 
 Declare destinations in the manifest — host or `host:port`, no wildcards, schemes or paths:
 

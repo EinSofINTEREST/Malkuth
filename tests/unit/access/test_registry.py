@@ -43,7 +43,7 @@ class Declared:
     def __init__(self, allowed: dict[str, set[tuple[str, Mode | None]]]) -> None:
         self.allowed = allowed
 
-    def allows(self, agent: str, target: str, mode: Mode | None) -> bool:
+    def allows(self, agent: str, target: str, mode: Mode | None, identity=None) -> bool:
         entries = self.allowed.get(agent, set())
         return (target, mode) in entries or (target, Mode.RW) in entries
 

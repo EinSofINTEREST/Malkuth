@@ -10,7 +10,10 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import os
+import secrets
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -50,6 +53,21 @@ PEERS_ENV = "MALKUTH_A2A_PEERS"
 """
 
 log = structlog.get_logger(__name__)
+
+
+def registry_identity() -> tuple[str, str] | None:
+    """(레지스트리 주소, 이 에이전트의 신원) — 둘 다 주입됐을 때만 레지스트리 모드다 (#281)."""
+    from malkuth.access.client import ACCESS_URL_ENV
+    from malkuth.access.registry import ACCESS_CREDENTIAL_ENV
+
+    url = os.environ.get(ACCESS_URL_ENV, "").strip()
+    credential = os.environ.get(ACCESS_CREDENTIAL_ENV, "").strip()
+    return (url, credential) if url and credential else None
+
+
+def _local_secret() -> bytes:
+    """레지스트리 모드의 allowlist 는 호출자 쪽 편의 검사에만 쓴다 — 토큰을 만들 일이 없다."""
+    return secrets.token_bytes(32)
 
 
 def parse_edges(declared: str) -> frozenset[Edge]:
@@ -111,9 +129,10 @@ def build_peer_client(manifest: AgentManifest) -> Any:
         The client, or None when nothing is wired (주소나 서명 키 부재).
     """
     secret = os.environ.get(SECRET_ENV, "")
+    registry = registry_identity()
     edges = parse_edges(os.environ.get(EDGES_ENV, ""))
     reachable = reachable_peers(manifest.name, edges, parse_peers(os.environ.get(PEERS_ENV, "")))
-    if not reachable or not secret:
+    if not reachable or not (secret or registry):
         # 부를 수 있는 peer 가 없으면 창구를 열지 않는다: A2A 를 켜도 **나가는**
         # 방향이 없는 에이전트가 있고(받기만 하는 노드), 그런 에이전트에게
         # ask_peer 를 광고하면 모델이 고를 때마다 A2A_004 로 거부된다.
@@ -122,15 +141,21 @@ def build_peer_client(manifest: AgentManifest) -> Any:
 
     from malkuth.protocols.a2a.client import A2AClient
     from malkuth.protocols.a2a.sdk import SdkPeerTransport
+    from malkuth.protocols.a2a.tickets import TicketSource
 
     return A2AClient(
         agent=manifest.name,
         allowlist=Allowlist(
             edges=edges,
-            secret=secret.encode("utf-8"),
+            secret=_local_secret() if registry else secret.encode("utf-8"),
             max_depth=int(os.environ.get(MAX_DEPTH_ENV, str(_default_max_depth()))),
         ),
         transport=SdkPeerTransport(agent=manifest.name, addresses=reachable),
+        tickets=(
+            TicketSource(agent=manifest.name, base_url=registry[0], credential=registry[1])
+            if registry
+            else None
+        ),
     )
 
 
@@ -162,13 +187,12 @@ def build_a2a_app(
         return None
 
     secret = os.environ.get(SECRET_ENV, "")
-    if not secret:
-        # 서명 키가 없으면 token 이 공개된 키로 HMAC 되어 callee 측 방어가
-        # 통째로 무력화된다 (allowlist.py 의 같은 이유)
-        log.warning("a2a disabled: no signing secret injected", agent=manifest.name)
+    registry = registry_identity()
+    if not (secret or registry):
+        # 서명 키도 레지스트리도 없으면 호출자를 확인할 방법이 없다 — 창구를 열지 않는다
+        log.warning("a2a disabled: no signing secret or access registry", agent=manifest.name)
         return None
 
-    from a2a.server.request_handlers import DefaultRequestHandler
     from a2a.server.routes.agent_card_routes import create_agent_card_routes
     from a2a.server.routes.fastapi_routes import add_a2a_routes_to_fastapi
     from a2a.server.routes.jsonrpc_routes import create_jsonrpc_routes
@@ -176,24 +200,39 @@ def build_a2a_app(
     from fastapi import FastAPI
 
     from malkuth.protocols.a2a.client import A2AServer
-    from malkuth.protocols.a2a.server import DEFAULT_MAX_DEPTH, GuardedExecutor, InboundGuard
+    from malkuth.protocols.a2a.server import (
+        DEFAULT_MAX_DEPTH,
+        GuardedExecutor,
+        GuardedRequestHandler,
+        InboundGuard,
+    )
 
     allowlist = Allowlist(
         edges=parse_edges(os.environ.get(EDGES_ENV, "")),
-        secret=secret.encode("utf-8"),
+        secret=_local_secret() if registry else secret.encode("utf-8"),
     )
+    verifier = None
+    if registry:
+        from malkuth.access.client import AccessClient
+
+        # 피호출자는 **자기 신원**으로 받은 표를 확인한다 — 강제 지점 토큰을 컨테이너에 넣지 않는다
+        verifier = AccessClient(base_url=registry[0], enforcer_token=registry[1], component="a2a")
     guard = InboundGuard(
         server=A2AServer(agent=manifest.name, allowlist=allowlist),
         max_depth=int(os.environ.get(MAX_DEPTH_ENV, str(DEFAULT_MAX_DEPTH))),
+        verifier=verifier,
     )
 
     card = _protobuf_card(manifest)
-    handler = DefaultRequestHandler(
+    handler = GuardedRequestHandler(
+        guard=guard,
         agent_executor=GuardedExecutor(guard, invoke),
         task_store=InMemoryTaskStore(),
         agent_card=card,
     )
-    app = FastAPI()
+    app = FastAPI(lifespan=_following(verifier))
+    # 조립 결과를 드러낸다 — 어느 검사가 물렸는지는 진단과 테스트가 봐야 할 사실이다
+    app.state.guard = guard
     add_a2a_routes_to_fastapi(
         app,
         agent_card_routes=create_agent_card_routes(card),
@@ -201,6 +240,26 @@ def build_a2a_app(
     )
     log.info("a2a server ready", agent=manifest.name, port=a2a_port())
     return app
+
+
+def _following(verifier: Any) -> Any:
+    """판정 캐시가 회수를 놓치지 않도록 서버가 도는 동안 변경 알림을 따라간다."""
+
+    @contextlib.asynccontextmanager
+    async def lifespan(_app: Any) -> Any:
+        if verifier is None:
+            yield
+            return
+        watching = asyncio.create_task(verifier.watch())
+        try:
+            yield
+        finally:
+            watching.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await watching
+            await verifier.aclose()
+
+    return lifespan
 
 
 def a2a_port() -> int | None:

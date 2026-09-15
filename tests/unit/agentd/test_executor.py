@@ -478,3 +478,99 @@ async def test_stream_max_turns_carries_the_same_details():
     events = [e async for e in executor.stream(make_task())]
 
     assert events[-1].error.details["max_turns"] == 2
+
+
+# --- 태스크 결과 로그 (#290) ---------------------------------------------------------
+
+
+def outcome_logs(logs: list[dict]) -> list[dict]:
+    return [e for e in logs if e["event"] in ("agent task failed", "agent task completed")]
+
+
+async def test_a_failed_task_is_logged_as_an_error_with_its_code():
+    """실패를 결과로만 돌려주면 원인이 컨테이너 로그에서 사라진다."""
+    from structlog.testing import capture_logs
+
+    tools = FakeTools().script("search")
+    executor, _, _ = make_executor([calls("search")], tools, max_turns=2)
+
+    with capture_logs() as logs:
+        await executor.execute(make_task())
+
+    [entry] = outcome_logs(logs)
+    assert entry["log_level"] == "error"
+    assert entry["error_code"] == "LLM_005"
+    assert (entry["agent"], entry["task_id"], entry["run_id"], entry["node_id"]) == (
+        "researcher",
+        "task-0001",
+        "run-0001",
+        "planner",
+    )
+    assert entry["graph"] == "direct" and isinstance(entry["duration_ms"], int)
+
+
+async def test_a_completed_task_is_logged_with_its_usage():
+    from structlog.testing import capture_logs
+
+    executor, _, _ = make_executor([text("done")])
+
+    with capture_logs() as logs:
+        await executor.execute(make_task(node_id=None))
+
+    [entry] = outcome_logs(logs)
+    assert entry["log_level"] == "info" and entry["status"] == "completed"
+    assert "node_id" not in entry, "direct 태스크에 노드 id 를 지어내면 안 된다"
+    assert {"input_tokens", "output_tokens"} <= entry.keys()
+
+
+async def test_a_replayed_task_is_not_logged_twice():
+    """같은 task_id 재호출은 캐시 응답이다 — 한 번 실행을 두 번 기록하면 집계가 틀어진다."""
+    from structlog.testing import capture_logs
+
+    executor, _, _ = make_executor([text("done")])
+    task = make_task()
+
+    with capture_logs() as logs:
+        await executor.execute(task)
+        await executor.execute(task)
+
+    assert len(outcome_logs(logs)) == 1
+
+
+async def test_a_streamed_task_logs_its_outcome_too():
+    from structlog.testing import capture_logs
+
+    tools = FakeTools().script("search")
+    failing, _, _ = make_executor([calls("search")], tools, max_turns=2)
+    passing, _, _ = make_executor([text("done")])
+
+    with capture_logs() as logs:
+        [e async for e in failing.stream(make_task(task_id="fails"))]
+        [e async for e in passing.stream(make_task(task_id="passes"))]
+
+    by_task = {e["task_id"]: e for e in outcome_logs(logs)}
+    assert by_task["fails"]["log_level"] == "error" and by_task["fails"]["error_code"] == "LLM_005"
+    assert by_task["passes"]["log_level"] == "info"
+
+
+async def test_a_streamed_timeout_is_logged():
+    from structlog.testing import capture_logs
+
+    class Stuck:
+        turns = 0
+
+        async def run(self, *args, **kwargs):
+            await asyncio.Event().wait()
+
+    executor = Executor(
+        agent="researcher",
+        model=Stuck(),
+        tools=FakeTools(),
+        render=lambda task: "prompt",
+    )
+
+    with capture_logs() as logs:
+        [e async for e in executor.stream(make_task(config=TaskConfig(timeout_s=0.01)))]
+
+    [entry] = outcome_logs(logs)
+    assert entry["error_code"] == "TO_001"

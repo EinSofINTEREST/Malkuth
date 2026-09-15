@@ -9,7 +9,9 @@ SDK 의 ``send_message`` 는 protobuf 를 요구하고 **스트림**을 돌려�
 
 from __future__ import annotations
 
+import asyncio
 import json
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -28,6 +30,19 @@ if TYPE_CHECKING:
     from a2a.client import Client
 
     from malkuth.core.agent import TaskRequest
+
+_CALL_HEADERS: ContextVar[dict[str, str]] = ContextVar("malkuth_a2a_call_headers")
+"""이 호출에 실을 헤더 — 태스크마다 따로다. peer 클라이언트는 공유하지만 표는 호출마다 다르다."""
+
+
+async def apply_call_headers(request: httpx.Request) -> None:
+    """httpx 요청 훅 — 지금 태스크의 호출 헤더를 싣는다.
+
+    공유 클라이언트의 헤더를 바꾸면 동시 호출이 서로의 표를 싣는다. 컨텍스트 변수는 태스크마다
+    독립이므로 같은 peer 에 동시에 보내도 섞이지 않는다.
+    """
+    request.headers.update(_CALL_HEADERS.get({}))
+
 
 TOKEN_HEADER = "x-malkuth-a2a-token"  # noqa: S105 — 헤더 이름이지 값이 아니다
 CALLER_HEADER = "x-malkuth-a2a-caller"
@@ -110,6 +125,7 @@ class SdkPeerTransport:
     addresses: Mapping[str, str]
     timeout_s: float = 120.0
     _clients: dict[str, Client] = field(default_factory=dict, init=False)
+    _creating: dict[str, asyncio.Lock] = field(default_factory=dict, init=False)
 
     def call_headers(self, token: str, headers: Mapping[str, str]) -> dict[str, str]:
         """peer 호출에 실을 헤더.
@@ -141,6 +157,14 @@ class SdkPeerTransport:
                 ``A2A_003`` if the peer reports failure.
         """
         client = await self._client(callee, token=token, headers=headers)
+        # 표는 만료되어 새로 받는다 — 헤더는 이 호출의 것으로, 이 태스크 안에서만 싣는다
+        scoped = _CALL_HEADERS.set(self.call_headers(token, headers))
+        try:
+            return await self._exchange(client, callee, task)
+        finally:
+            _CALL_HEADERS.reset(scoped)
+
+    async def _exchange(self, client: Client, callee: str, task: TaskRequest) -> TaskResult:
         request = pb.SendMessageRequest(message=build_message(task))
 
         final: pb.Task | None = None
@@ -185,16 +209,29 @@ class SdkPeerTransport:
 
     async def _client(self, callee: str, *, token: str, headers: Mapping[str, str]) -> Client:
         """peer 별 클라이언트 — 토큰을 헤더에 실어 둔다."""
-        if callee not in self._clients:
+        if callee in self._clients:
+            return self._clients[callee]
+        # 동시에 처음 부르면 둘이 따로 만들어 하나를 덮어쓴다 — peer 마다 한 번만 만든다
+        async with self._creating.setdefault(callee, asyncio.Lock()):
+            if callee in self._clients:
+                return self._clients[callee]
             address = self.addresses.get(callee)
             if address is None:
                 raise unreachable(self.agent, callee, reason="peer address was not injected")
-            http = httpx.AsyncClient(
-                timeout=self.timeout_s, headers=self.call_headers(token, headers)
-            )
-            factory = ClientFactory(ClientConfig(httpx_client=http, streaming=True))
+            factory = ClientFactory(ClientConfig(httpx_client=self._new_http(), streaming=True))
             self._clients[callee] = await factory.create_from_url(address)
-        return self._clients[callee]
+            return self._clients[callee]
+
+    def _new_http(self) -> httpx.AsyncClient:
+        """peer 하나의 HTTP 클라이언트.
+
+        호출마다 달라지는 것(표·토큰)은 싣지 않는다 — 요청 훅이 호출마다 이 태스크의 것을 싣는다.
+        """
+        return httpx.AsyncClient(
+            timeout=self.timeout_s,
+            headers={CALLER_HEADER: self.agent},
+            event_hooks={"request": [apply_call_headers]},
+        )
 
     async def close(self) -> None:
         """열어둔 peer 클라이언트를 정리한다."""
@@ -205,6 +242,7 @@ class SdkPeerTransport:
 
 __all__ = [
     "CALLER_HEADER",
+    "apply_call_headers",
     "STATE_NAMES",
     "TOKEN_HEADER",
     "SdkPeerTransport",

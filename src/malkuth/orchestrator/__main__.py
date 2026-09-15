@@ -109,6 +109,8 @@ def main() -> None:
     if config.runtime.egress_proxy is not None and orchestrator.access_store is None:
         # 프록시는 에이전트 신원으로 판정한다 — 레지스트리 없이 켜면 외부 호출이 전부 막힌다
         raise config_egress_without_registry()
+    if orchestrator.access_store is not None and orchestrator.access_agent_url is None:
+        raise config_missing_agent_url()
 
     store = SqliteRunStore(path=orchestrator.run_store)
     # 설정의 registry.roots 는 상대 경로다 — 작업 디렉토리가 아니라 레포 루트 기준
@@ -119,6 +121,7 @@ def main() -> None:
     if deployments is not None:
         # 배포가 에이전트마다 신원을 발급해 주입한다 (#277)
         deployments.access = access
+        deployments.access_url = orchestrator.access_agent_url
         if config.runtime.egress_proxy is not None:
             from malkuth.runtime.deployments import EgressEndpoints
 
@@ -280,19 +283,21 @@ def _access_registry(orchestrator: Any, catalog: Catalog, *, metrics: Any = None
     if orchestrator.access_store is None:
         log.warning("access control disabled — orchestrator.access_store is not set")
         return None
-    from malkuth.access.baselines import EgressBaseline, MemoryBaseline
+    from malkuth.access.baselines import A2ABaseline, EgressBaseline, MemoryBaseline
     from malkuth.access.model import ResourceKind
     from malkuth.access.registry import AccessRegistry
     from malkuth.access.store import SqliteAccessStore
 
+    store = SqliteAccessStore(path=orchestrator.access_store)
     return AccessRegistry(
-        store=SqliteAccessStore(path=orchestrator.access_store),
+        store=store,
         catalog=catalog,
         stewards=frozenset(orchestrator.access_stewards),
         # 선언 판정은 그것을 쓰는 강제 지점과 함께 연결한다 — memory 는 Memory Service (#278),
-        # egress 는 이그레스 프록시 (#293)
+        # a2a 는 피호출자의 A2A 서버 (#281), egress 는 이그레스 프록시 (#293)
         baselines={
             ResourceKind.MEMORY: MemoryBaseline(catalog),
+            ResourceKind.A2A: A2ABaseline(catalog, store),
             ResourceKind.EGRESS: EgressBaseline(catalog),
         },
         metrics=metrics,
@@ -307,6 +312,18 @@ def config_egress_without_registry() -> Exception:
         code=ErrorCode.CFG_001,
         message="runtime.egress_proxy requires the access registry (orchestrator.access_store)",
         details={"setting": "runtime.egress_proxy"},
+    )
+
+
+def config_missing_agent_url() -> Exception:
+    """레지스트리를 켜면 에이전트가 닿을 주소가 있어야 한다 — 없으면 A2A 가 공유 키로 되돌아간다."""
+    from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
+
+    return MalkuthError(
+        category=ErrorCategory.CONFIG,
+        code=ErrorCode.CFG_001,
+        message="access registry requires orchestrator.access_agent_url for agents to reach it",
+        details={"setting": "orchestrator.access_agent_url"},
     )
 
 

@@ -19,6 +19,7 @@ from malkuth.core.errors import ErrorCode, MalkuthError
 from malkuth.core.manifest import RESERVED_GLOBAL_GROUP, MemoryMode
 
 if TYPE_CHECKING:
+    from malkuth.access.store import AccessStore, Identity
     from malkuth.catalog import Catalog
     from malkuth.core.manifest import AgentManifest, GroupManifest
 
@@ -39,7 +40,9 @@ class MemoryBaseline:
 
     catalog: Catalog
 
-    def allows(self, agent: str, target: str, mode: Mode | None) -> bool:
+    def allows(
+        self, agent: str, target: str, mode: Mode | None, identity: Identity | None = None
+    ) -> bool:
         matched = SPACE_ID.match(target)
         if matched is None:
             return False
@@ -85,6 +88,52 @@ class MemoryBaseline:
             raise
 
 
+@dataclass(frozen=True)
+class A2ABaseline:
+    """Declared A2A connections — the graph the caller is deployed in.
+
+    그래프의 ``connections`` 가 기본 권한이다 (03 Enforcement). 호출자가 **지금 배포된** 그래프만
+    본다 — 같은 두 에이전트를 잇는 그래프가 저장소에 있어도 배포되지 않았으면 연결이 아니다.
+
+    Attributes:
+        catalog: 그래프 선언.
+        store: 호출자의 살아 있는 신원이 어느 그래프에 배포됐는지.
+    """
+
+    catalog: Catalog
+    store: AccessStore
+
+    def allows(
+        self, agent: str, target: str, mode: Mode | None, identity: Identity | None = None
+    ) -> bool:
+        if identity is not None:
+            # 요청한 신원의 배포 그래프만 본다 — 같은 이름으로 다른 그래프에 배포된 신원이 있어도
+            # 그 그래프의 연결을 빌려 쓰지 못한다
+            graphs = {identity.graph} if identity.graph else set()
+        else:
+            graphs = set(self.store.live_graphs(agent))
+        return any(self._connected(graph, agent, target) for graph in sorted(graphs))
+
+    def _connected(self, graph: str, caller: str, callee: str) -> bool:
+        try:
+            topology = self.catalog.graph(graph)
+        except MalkuthError as err:
+            if err.code == ErrorCode.NF_001:
+                return False
+            raise
+        # connections 는 **노드 id** 를 잇는다 — 노드의 에이전트로 풀어서 비교한다
+        agent_of = {n.id: _agent_name(n.agent) for n in topology.spec.nodes if n.agent}
+        return any(
+            agent_of.get(c.caller) == caller and agent_of.get(c.callee) == callee
+            for c in topology.spec.connections
+        )
+
+
+def _agent_name(ref: str) -> str:
+    """``agents/{name}@{version}`` → name."""
+    return ref.split("/", 1)[-1].split("@", 1)[0]
+
+
 HTTPS_PORT = 443
 
 PROVIDER_HOSTS = {"anthropic": "api.anthropic.com"}
@@ -118,7 +167,9 @@ class EgressBaseline:
 
     catalog: Catalog
 
-    def allows(self, agent: str, target: str, mode: Mode | None) -> bool:
+    def allows(
+        self, agent: str, target: str, mode: Mode | None, identity: Identity | None = None
+    ) -> bool:
         try:
             manifest = self.catalog.agent(agent)
         except MalkuthError as err:
@@ -146,6 +197,7 @@ class EgressBaseline:
 __all__ = [
     "PROVIDER_HOSTS",
     "SPACE_ID",
+    "A2ABaseline",
     "EgressBaseline",
     "MemoryBaseline",
     "egress_target",

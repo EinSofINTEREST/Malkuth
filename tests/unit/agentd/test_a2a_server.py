@@ -104,3 +104,49 @@ def test_the_depth_limit_is_injectable(monkeypatch, injected):
 
     # 구성이 성공하면 주입값이 반영된 것 — 실제 거부는 #118 이 검증한다
     assert build_a2a_app(manifest("researcher"), invoke) is not None
+
+
+# --- 레지스트리 모드 (#281) -----------------------------------------------------------
+
+
+@pytest.fixture
+def registry_mode(monkeypatch):
+    """공유 서명 키 없이 레지스트리 주소와 에이전트 신원만 주입된 컨테이너."""
+    from malkuth.access.client import ACCESS_URL_ENV
+    from malkuth.access.registry import ACCESS_CREDENTIAL_ENV
+
+    monkeypatch.delenv(SECRET_ENV, raising=False)
+    monkeypatch.setenv(PORT_ENV, "9100")
+    monkeypatch.setenv(EDGES_ENV, "researcher>planner")
+    monkeypatch.setenv(ACCESS_URL_ENV, "http://control-plane:8700")
+    monkeypatch.setenv(ACCESS_CREDENTIAL_ENV, "researcher-identity")
+
+
+def test_registry_mode_serves_without_a_shared_secret_and_verifies_with_the_registry(
+    registry_mode,
+):
+    app = build_a2a_app(manifest("researcher"), invoke)
+
+    assert app is not None
+    guard = app.state.guard
+    assert guard.verifier is not None, "레지스트리 모드인데 피호출자가 표를 확인하지 않는다"
+    assert guard.verifier.enforcer_token == "researcher-identity", "자기 신원으로 확인해야 한다"
+
+
+def test_token_mode_has_no_registry_verifier(injected):
+    assert build_a2a_app(manifest("researcher"), invoke).state.guard.verifier is None
+
+
+def test_registry_mode_calls_peers_with_tickets(registry_mode, monkeypatch):
+    from malkuth.agentd.a2a_server import PEERS_ENV, build_peer_client
+    from malkuth.protocols.a2a.tickets import TicketSource
+
+    monkeypatch.setenv(PEERS_ENV, "planner=malkuth-planner-0:9101")
+
+    client = build_peer_client(manifest("researcher"))
+
+    assert client is not None and isinstance(client.tickets, TicketSource)
+    assert (client.tickets.base_url, client.tickets.credential) == (
+        "http://control-plane:8700",
+        "researcher-identity",
+    )

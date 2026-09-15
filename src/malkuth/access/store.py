@@ -32,6 +32,29 @@ class Identity:
     deployment_id: str
     issued_at: float
     revoked_at: float | None = None
+    graph: str = ""
+    """배포된 그래프 — A2A 선언 판정이 이 에이전트의 ``connections`` 를 찾는 곳."""
+
+
+TICKETS_PER_EDGE = 4
+"""(호출자 신원, 피호출자) 마다 남기는 유효한 표 수 — 갱신 직후에도 진행 중 호출의 옛 표는 산다."""
+
+
+@dataclass(frozen=True)
+class Ticket:
+    """A one-callee A2A call ticket, by its hash.
+
+    호출자 자격 자체를 피호출자에게 넘기면 피호출자가 그 자격으로 다른 강제 지점을 통과한다 —
+    그래서 피호출자 **하나에만** 쓸 수 있고 곧 만료되는 표를 따로 발급한다 (03 Enforcement).
+    """
+
+    ticket_hash: str
+    caller_hash: str
+    """발급받은 호출자 신원의 해시 — 그 신원이 폐기되면 표도 통하지 않는다."""
+    caller: str
+    callee: str
+    issued_at: float
+    expires_at: float
 
 
 @runtime_checkable
@@ -52,6 +75,16 @@ class AccessStore(Protocol):
 
     def rule(self, rule_id: str) -> Rule | None: ...
     def rules(self, agent: str) -> Sequence[Rule]: ...
+    def live_graphs(self, agent: str) -> frozenset[str]: ...
+    def put_ticket(self, ticket: Ticket) -> None:
+        """Store a ticket, dropping expired ones and all but the newest few per edge.
+
+        표는 갱신마다 새로 생긴다 — 지우지 않으면 저장소가 끝없이 자라고, 침해된 에이전트가 발급을
+        반복해 디스크를 채울 수 있다.
+        """
+        ...
+
+    def ticket(self, ticket_hash: str) -> Ticket | None: ...
 
     def touch(self) -> int:
         """Bump the version for a change that has no record — a declaration file changed."""
@@ -66,6 +99,7 @@ class InMemoryAccessStore:
 
     _identities: dict[str, Identity] = field(default_factory=dict)
     _rules: dict[str, Rule] = field(default_factory=dict)
+    _tickets: dict[str, Ticket] = field(default_factory=dict)
     _version: int = 0
 
     def put_identity(self, identity: Identity) -> None:
@@ -95,6 +129,35 @@ class InMemoryAccessStore:
     def rules(self, agent: str) -> Sequence[Rule]:
         return sorted((r for r in self._rules.values() if r.agent == agent), key=_order)
 
+    def live_graphs(self, agent: str) -> frozenset[str]:
+        return frozenset(
+            i.graph
+            for i in self._identities.values()
+            if i.agent == agent and i.revoked_at is None and i.graph
+        )
+
+    def put_ticket(self, ticket: Ticket) -> None:
+        now = ticket.issued_at
+        for key, found in list(self._tickets.items()):
+            if found.expires_at <= now:
+                del self._tickets[key]
+        self._tickets[ticket.ticket_hash] = ticket
+        # 같은 시각에 발급된 표는 나중에 넣은 것이 최신이다 — 삽입 순서를 두 번째 기준으로 쓴다
+        edge = [
+            t
+            for t in self._tickets.values()
+            if t.caller_hash == ticket.caller_hash and t.callee == ticket.callee
+        ]
+        same_edge = [
+            t
+            for _, t in sorted(enumerate(edge), key=lambda p: (p[1].issued_at, p[0]), reverse=True)
+        ]
+        for stale in same_edge[TICKETS_PER_EDGE:]:
+            del self._tickets[stale.ticket_hash]
+
+    def ticket(self, ticket_hash: str) -> Ticket | None:
+        return self._tickets.get(ticket_hash)
+
     def touch(self) -> int:
         self._version += 1
         return self._version
@@ -113,9 +176,20 @@ CREATE TABLE IF NOT EXISTS identities (
     agent           TEXT NOT NULL,
     deployment_id   TEXT NOT NULL,
     issued_at       REAL NOT NULL,
-    revoked_at      REAL
+    revoked_at      REAL,
+    graph           TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS identities_by_deployment ON identities (deployment_id);
+CREATE TABLE IF NOT EXISTS tickets (
+    ticket_hash TEXT PRIMARY KEY,
+    caller_hash TEXT NOT NULL,
+    caller      TEXT NOT NULL,
+    callee      TEXT NOT NULL,
+    issued_at   REAL NOT NULL,
+    expires_at  REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS tickets_by_expiry ON tickets (expires_at);
+CREATE INDEX IF NOT EXISTS tickets_by_edge ON tickets (caller_hash, callee, issued_at);
 CREATE TABLE IF NOT EXISTS rules (
     rule_id      TEXT PRIMARY KEY,
     agent        TEXT NOT NULL,
@@ -154,6 +228,7 @@ class SqliteAccessStore:
                     str(self.path), isolation_level=None, check_same_thread=False
                 )
                 self._conn.row_factory = sqlite3.Row
+                _migrate(self._conn)
                 self._conn.executescript(_SCHEMA)
             except sqlite3.Error as err:
                 raise MalkuthError(
@@ -167,13 +242,16 @@ class SqliteAccessStore:
     def put_identity(self, identity: Identity) -> None:
         with self._lock:
             self._connect().execute(
-                "INSERT OR REPLACE INTO identities VALUES (?,?,?,?,?)",
+                "INSERT OR REPLACE INTO identities "
+                "(credential_hash, agent, deployment_id, issued_at, revoked_at, graph) "
+                "VALUES (?,?,?,?,?,?)",
                 (
                     identity.credential_hash,
                     identity.agent,
                     identity.deployment_id,
                     identity.issued_at,
                     identity.revoked_at,
+                    identity.graph,
                 ),
             )
 
@@ -259,6 +337,55 @@ class SqliteAccessStore:
             )
         return [_rule(row) for row in rows]
 
+    def live_graphs(self, agent: str) -> frozenset[str]:
+        with self._lock:
+            rows = (
+                self._connect()
+                .execute(
+                    "SELECT DISTINCT graph FROM identities "
+                    "WHERE agent = ? AND revoked_at IS NULL AND graph != ''",
+                    (agent,),
+                )
+                .fetchall()
+            )
+        return frozenset(row["graph"] for row in rows)
+
+    def put_ticket(self, ticket: Ticket) -> None:
+        with self._transaction() as conn:
+            conn.execute("DELETE FROM tickets WHERE expires_at <= ?", (ticket.issued_at,))
+            conn.execute(
+                "INSERT OR REPLACE INTO tickets VALUES (?,?,?,?,?,?)",
+                (
+                    ticket.ticket_hash,
+                    ticket.caller_hash,
+                    ticket.caller,
+                    ticket.callee,
+                    ticket.issued_at,
+                    ticket.expires_at,
+                ),
+            )
+            conn.execute(
+                "DELETE FROM tickets WHERE caller_hash = ? AND callee = ? AND ticket_hash NOT IN "
+                "(SELECT ticket_hash FROM tickets WHERE caller_hash = ? AND callee = ? "
+                "ORDER BY issued_at DESC, rowid DESC LIMIT ?)",
+                (
+                    ticket.caller_hash,
+                    ticket.callee,
+                    ticket.caller_hash,
+                    ticket.callee,
+                    TICKETS_PER_EDGE,
+                ),
+            )
+
+    def ticket(self, ticket_hash: str) -> Ticket | None:
+        with self._lock:
+            row = (
+                self._connect()
+                .execute("SELECT * FROM tickets WHERE ticket_hash = ?", (ticket_hash,))
+                .fetchone()
+            )
+        return Ticket(**dict(row)) if row else None
+
     def touch(self) -> int:
         with self._transaction() as conn:
             return _bump(conn)
@@ -271,6 +398,13 @@ class SqliteAccessStore:
                 .fetchone()
             )
         return int(row["version"])
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """#277 에 만든 파일에는 ``graph`` 열이 없다 — 스키마 스크립트 전에 열만 더한다."""
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(identities)")}
+    if columns and "graph" not in columns:
+        conn.execute("ALTER TABLE identities ADD COLUMN graph TEXT NOT NULL DEFAULT ''")
 
 
 def _bump(conn: sqlite3.Connection) -> int:
@@ -298,4 +432,4 @@ def _rule(row: sqlite3.Row) -> Rule:
     )
 
 
-__all__ = ["AccessStore", "Identity", "InMemoryAccessStore", "SqliteAccessStore"]
+__all__ = ["AccessStore", "Identity", "InMemoryAccessStore", "SqliteAccessStore", "Ticket"]

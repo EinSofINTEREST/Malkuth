@@ -1074,6 +1074,38 @@ async def test_with_a_registry_the_memory_token_is_the_agent_identity(workspace,
     await again.launcher.stop_all()
 
 
+async def test_each_identity_records_the_graph_it_was_deployed_in(manager):
+    """A2A 선언 판정은 호출자가 지금 배포된 그래프의 connections 를 본다 (#281)."""
+    registry = with_access(manager)
+
+    await manager.deploy("two")
+
+    assert registry.store.live_graphs("alpha") == frozenset({"two"})
+    await manager.launcher.stop_all()
+
+
+async def test_registry_mode_gives_agents_the_registry_address_and_no_shared_secret(
+    workspace, docker, healthy
+):
+    """공유 서명 키는 그래프의 모든 에이전트가 쥐어 누구든 다른 에이전트 행세를 한다 (#281)."""
+    from malkuth.access.client import ACCESS_URL_ENV
+
+    wired_workspace(workspace)
+    manager = wired_manager(workspace, docker)
+    with_access(manager)
+    manager.access_url = "http://control-plane:8700"
+
+    record = await manager.deploy("wired")
+
+    for agent in ("alpha", "beta"):
+        env = env_of(docker, agent)
+        assert A2A_SECRET_ENV not in env, "레지스트리 모드에 공유 서명 키가 들어갔다"
+        assert env[ACCESS_URL_ENV] == "http://control-plane:8700"
+        assert env[A2A_EDGES_ENV] == "beta>alpha", "호출자 쪽 편의 검사는 그대로 쓴다"
+    assert record.status == "ready"
+    await manager.launcher.stop_all()
+
+
 # --- 이그레스 프록시 (#293) ------------------------------------------------------------
 
 

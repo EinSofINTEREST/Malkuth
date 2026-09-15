@@ -16,6 +16,7 @@ import pytest
 
 from tests.e2e.conftest import (
     AGENTS,
+    CONTROL_PORT,
     GRAPH,
     api,
     deployed_containers,
@@ -42,6 +43,7 @@ def plane(stack, tmp_path) -> Iterator[dict[str, Any]]:
         orchestrator={
             "access_store": str(tmp_path / "access.db"),
             "access_enforcer_token": ENFORCER_TOKEN,
+            "access_agent_url": f"http://host.docker.internal:{CONTROL_PORT}",
             "access_stewards": ["permission-agent"],
         },
     )

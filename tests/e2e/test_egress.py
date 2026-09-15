@@ -119,6 +119,7 @@ def plane(stack, tmp_path) -> Iterator[dict[str, Any]]:
             "control_host": "0.0.0.0",  # noqa: S104 — 프록시·Memory Service 컨테이너가 닿아야 한다
             "access_store": str(tmp_path / "access.db"),
             "access_enforcer_token": ENFORCER_TOKEN,
+            "access_agent_url": f"http://host.docker.internal:{CONTROL_PORT}",
         },
     )
     config = yaml.safe_load((config_dir / "e2e.yaml").read_text(encoding="utf-8"))

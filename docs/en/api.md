@@ -482,6 +482,12 @@ without `access_agent_url` also refuses to start (`CFG_001`): agents need it to 
 are on A2A calls, and without it they would fall back to a signing key every agent in the graph
 holds.
 
+**Agents present credentials over this URL.** Plain `http` is for the private network that only
+agents and framework services share — the same trust boundary as the Agent Control API and the
+Memory Service. When agent traffic crosses hosts or any network you do not control, terminate TLS
+in front of the control plane and use `https`. The URL must be `http(s)://host[:port]` with nothing
+else — credentials, paths and queries in it are refused (`CFG_001`).
+
 **Enforcement is being rolled out point by point.** Memory and A2A calls are enforced today —
 the Memory Service in registry mode and each callee's A2A server ask for every request (see
 [Memory enforcement](#memory-enforcement) and [A2A enforcement](#a2a-enforcement)). Egress and

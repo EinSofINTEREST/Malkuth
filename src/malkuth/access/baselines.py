@@ -18,7 +18,7 @@ from malkuth.core.errors import ErrorCode, MalkuthError
 from malkuth.core.manifest import RESERVED_GLOBAL_GROUP, MemoryMode
 
 if TYPE_CHECKING:
-    from malkuth.access.store import AccessStore
+    from malkuth.access.store import AccessStore, Identity
     from malkuth.catalog import Catalog
     from malkuth.core.manifest import GroupManifest
 
@@ -39,7 +39,9 @@ class MemoryBaseline:
 
     catalog: Catalog
 
-    def allows(self, agent: str, target: str, mode: Mode | None) -> bool:
+    def allows(
+        self, agent: str, target: str, mode: Mode | None, identity: Identity | None = None
+    ) -> bool:
         matched = SPACE_ID.match(target)
         if matched is None:
             return False
@@ -100,17 +102,35 @@ class A2ABaseline:
     catalog: Catalog
     store: AccessStore
 
-    def allows(self, agent: str, target: str, mode: Mode | None) -> bool:
-        for graph in sorted(self.store.live_graphs(agent)):
-            try:
-                topology = self.catalog.graph(graph)
-            except MalkuthError as err:
-                if err.code == ErrorCode.NF_001:
-                    continue
-                raise
-            if any(c.caller == agent and c.callee == target for c in topology.spec.connections):
-                return True
-        return False
+    def allows(
+        self, agent: str, target: str, mode: Mode | None, identity: Identity | None = None
+    ) -> bool:
+        if identity is not None:
+            # 요청한 신원의 배포 그래프만 본다 — 같은 이름으로 다른 그래프에 배포된 신원이 있어도
+            # 그 그래프의 연결을 빌려 쓰지 못한다
+            graphs = {identity.graph} if identity.graph else set()
+        else:
+            graphs = set(self.store.live_graphs(agent))
+        return any(self._connected(graph, agent, target) for graph in sorted(graphs))
+
+    def _connected(self, graph: str, caller: str, callee: str) -> bool:
+        try:
+            topology = self.catalog.graph(graph)
+        except MalkuthError as err:
+            if err.code == ErrorCode.NF_001:
+                return False
+            raise
+        # connections 는 **노드 id** 를 잇는다 — 노드의 에이전트로 풀어서 비교한다
+        agent_of = {n.id: _agent_name(n.agent) for n in topology.spec.nodes if n.agent}
+        return any(
+            agent_of.get(c.caller) == caller and agent_of.get(c.callee) == callee
+            for c in topology.spec.connections
+        )
+
+
+def _agent_name(ref: str) -> str:
+    """``agents/{name}@{version}`` → name."""
+    return ref.split("/", 1)[-1].split("@", 1)[0]
 
 
 __all__ = ["SPACE_ID", "A2ABaseline", "MemoryBaseline"]

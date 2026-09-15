@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import httpx
 import pytest
-from a2a.client import ClientConfig, ClientFactory
 from a2a.server.routes.agent_card_routes import create_agent_card_routes
 from a2a.server.routes.fastapi_routes import add_a2a_routes_to_fastapi
 from a2a.server.routes.jsonrpc_routes import create_jsonrpc_routes
@@ -100,16 +99,13 @@ class _WiredTransport(SdkPeerTransport):
         super().__init__(agent=agent, addresses=addresses)
         self._http = http
 
-    async def _client(self, callee, *, token, headers):
-        if callee not in self._clients:
-            # 헤더 구성은 **프로덕션 코드가** 한다 — 테스트가 직접 만들면
-            # 그 배선을 지워도 통과한다
-            self._http.headers.update(self.call_headers(token, headers))
-            # 호출마다 헤더를 갈아 끼우는 것은 프로덕션 경로다 — 그 경로가 이 클라이언트를 보게 한다
-            self._peer_http[callee] = self._http
-            factory = ClientFactory(ClientConfig(httpx_client=self._http, streaming=True))
-            self._clients[callee] = await factory.create_from_url(self.addresses[callee])
-        return self._clients[callee]
+    def _new_http(self):
+        # 헤더·요청 훅은 **프로덕션 코드가** 정한다 — ASGI 전송만 갈아 끼운다.
+        # 테스트가 헤더를 직접 실으면 그 배선을 지워도 통과한다
+        production = super()._new_http()
+        production._transport = self._http._transport  # noqa: SLF001
+        production.base_url = self._http.base_url
+        return production
 
 
 # --- 순수 변환 ------------------------------------------------------------------

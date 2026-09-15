@@ -60,3 +60,22 @@ async def test_failing_to_get_a_ticket_is_classified(respond, code, retryable):
         await source(respond).ticket_for("planner")
 
     assert (exc_info.value.code, exc_info.value.retryable) == (code, retryable)
+
+
+async def test_concurrent_first_calls_share_one_ticket():
+    """모두가 새 표를 받으면 간선마다 남기는 수를 넘겨 진행 중 호출의 표가 지워진다 (#291 리뷰)."""
+    import asyncio
+
+    issued = []
+    clock = Clock()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(0.01)
+        issued.append(f"t{len(issued)}")
+        return httpx.Response(201, json={"ticket": issued[-1], "expires_at": clock.now + 300})
+
+    tickets = source(handler, clock)
+
+    got = await asyncio.gather(*(tickets.ticket_for("planner") for _ in range(8)))
+
+    assert issued == ["t0"] and set(got) == {"t0"}

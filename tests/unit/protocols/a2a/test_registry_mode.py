@@ -26,9 +26,8 @@ from malkuth.orchestrator.control import create_app as control_app
 from malkuth.orchestrator.runstore import InMemoryRunStore
 from malkuth.protocols.a2a.allowlist import Allowlist, Edge, issue_token
 from malkuth.protocols.a2a.client import A2AClient, A2AServer
-from malkuth.protocols.a2a.sdk import CALLER_HEADER, TOKEN_HEADER
 from malkuth.protocols.a2a.server import InboundGuard
-from malkuth.protocols.a2a.tickets import TICKET_HEADER, TicketSource
+from malkuth.protocols.a2a.tickets import TicketSource
 from tests.fixtures.builders import make_task
 from tests.fixtures.waiting import until
 from tests.unit.protocols.a2a.test_sdk import serve, transport_to
@@ -184,24 +183,55 @@ async def test_a_valid_edge_token_is_not_accepted_in_registry_mode(stack):
     assert (await refused(caller.call("planner", make_task()))).code == ErrorCode.A2A_004
 
 
+def recording(stack: Stack) -> list[str]:
+    """피호출자가 **실제로 받은** 표 — 호출자 쪽 클라이언트 상태가 아니라 도착한 것을 본다."""
+    received: list[str] = []
+    verify = stack.verifier.verify_ticket
+
+    async def spy(ticket: str):
+        received.append(ticket)
+        return await verify(ticket)
+
+    stack.verifier.verify_ticket = spy  # type: ignore[method-assign]
+    return received
+
+
+class Rotating:
+    """부를 때마다 새 표 — 갱신이 겹치는 상황을 만든다."""
+
+    def __init__(self, stack: Stack) -> None:
+        self.stack = stack
+        self.issued: list[str] = []
+
+    async def ticket_for(self, callee: str) -> str:
+        ticket, _ = self.stack.registry.issue_ticket(self.stack.credentials["researcher"], callee)
+        self.issued.append(ticket)
+        await asyncio.sleep(0)  # 다른 호출이 끼어들 틈을 준다
+        return ticket
+
+
 async def test_a_fresh_ticket_travels_on_every_call(stack):
     """표는 만료되어 새로 받는다 — 처음 실은 헤더를 계속 쓰면 옛 표가 나간다."""
-    issued = []
+    received = recording(stack)
+    tickets = Rotating(stack)
+    caller = stack.caller(tickets=tickets)
 
-    class Rotating:
-        async def ticket_for(self, callee: str) -> str:
-            ticket, _ = stack.registry.issue_ticket(stack.credentials["researcher"], callee)
-            issued.append(ticket)
-            return ticket
+    await caller.call("planner", make_task(task_id="first"))
+    await caller.call("planner", make_task(task_id="second"))
 
-    caller = stack.caller(tickets=Rotating())
-    await caller.call("planner", make_task())
-    await caller.call("planner", make_task())
+    assert received == tickets.issued and len(set(received)) == 2
 
-    http = caller.transport._peer_http["planner"]  # noqa: SLF001
-    assert http.headers[TICKET_HEADER] == issued[-1] != issued[0]
-    assert http.headers[CALLER_HEADER] == "researcher"
-    assert http.headers[TOKEN_HEADER] == ""
+
+async def test_concurrent_calls_each_carry_their_own_ticket(stack):
+    """같은 peer 에 동시에 처음 부르면 공유 상태를 덮어써 서로의 표를 싣던 경합 (#291 리뷰)."""
+    received = recording(stack)
+    tickets = Rotating(stack)
+    caller = stack.caller(tickets=tickets)
+
+    await asyncio.gather(*(caller.call("planner", make_task(task_id=f"t{i}")) for i in range(4)))
+
+    assert sorted(received) == sorted(tickets.issued), "어떤 호출은 남의 표를 실었다"
+    assert len(caller.transport._clients) == 1, "peer 클라이언트를 여러 번 만들었다"  # noqa: SLF001
 
 
 # --- 장애 ----------------------------------------------------------------------------

@@ -191,3 +191,81 @@ def test_a_store_from_before_graphs_opens_and_keeps_its_identities(tmp_path):
     found = store.identity("h")
     assert found is not None and (found.agent, found.graph) == ("planner", "")
     assert store.live_graphs("planner") == frozenset()
+
+
+# --- 리뷰 반영 (#291) ------------------------------------------------------------------
+
+
+def id_workspace(tmp_path: Path) -> Catalog:
+    """노드 id 가 에이전트 이름과 다른 그래프 두 개 — alpha→beta 는 `one` 에만 있다."""
+    from tests.fixtures.access import agent, write
+    from tests.unit.runtime.test_deployments import graph_doc
+
+    for name in ("alpha", "beta"):
+        write(tmp_path / "agents" / name / "manifest.yaml", agent(name))
+    one = graph_doc("one", ["beta", "alpha"])  # n0=beta, n1=alpha
+    one["spec"]["connections"] = [{"caller": "n1", "callee": "n0"}]
+    write(tmp_path / "graphs" / "one.yaml", one)
+    write(tmp_path / "graphs" / "two.yaml", graph_doc("two", ["beta", "alpha"]))
+    return Catalog.under(tmp_path)
+
+
+def id_registry(tmp_path: Path) -> AccessRegistry:
+    catalog = id_workspace(tmp_path)
+    store = InMemoryAccessStore()
+    return AccessRegistry(
+        store=store, catalog=catalog, baselines={ResourceKind.A2A: A2ABaseline(catalog, store)}
+    )
+
+
+def test_connections_between_node_ids_resolve_to_their_agents(tmp_path):
+    """connections 는 노드 id 를 잇는다 — 이름으로 비교하면 id 를 쓰는 그래프가 전부 거부된다."""
+    registry = id_registry(tmp_path)
+    caller = registry.issue_identity("alpha", "dep-1", graph="one")
+    callee = registry.issue_identity("beta", "dep-1", graph="one")
+    ticket, _ = registry.issue_ticket(caller, "beta")
+
+    assert registry.verify_ticket(callee, ticket).allowed
+    back, _ = registry.issue_ticket(callee, "alpha")
+    assert not registry.verify_ticket(caller, back).allowed, "역방향은 선언이 없다"
+
+
+def test_a_ticket_is_judged_by_the_graph_its_own_identity_was_deployed_in(tmp_path):
+    """같은 이름의 신원이 다른 그래프에도 살아 있어도 그 그래프의 연결을 빌리지 못한다."""
+    registry = id_registry(tmp_path)
+    registry.issue_identity("alpha", "dep-1", graph="one")  # 연결이 선언된 배포
+    caller = registry.issue_identity("alpha", "dep-2", graph="two")  # 연결이 없는 배포
+    callee = registry.issue_identity("beta", "dep-2", graph="two")
+    ticket, _ = registry.issue_ticket(caller, "beta")
+
+    assert not registry.verify_ticket(callee, ticket).allowed
+
+
+@pytest.mark.parametrize("store_kind", ["memory", "sqlite"])
+def test_expired_and_excess_tickets_are_pruned(tmp_path, clock, store_kind):
+    """갱신마다 새 표가 생긴다 — 지우지 않으면 저장소가 끝없이 자란다."""
+    from malkuth.access.store import TICKETS_PER_EDGE
+
+    catalog = Catalog.under(REPO_ROOT)
+    store = (
+        InMemoryAccessStore() if store_kind == "memory" else SqliteAccessStore(tmp_path / "a.db")
+    )
+    registry = AccessRegistry(
+        store=store,
+        catalog=catalog,
+        clock=clock,
+        baselines={ResourceKind.A2A: A2ABaseline(catalog, store)},
+    )
+    caller = registry.issue_identity("researcher", "dep-1", graph=GRAPH)
+    callee = registry.issue_identity("planner", "dep-1", graph=GRAPH)
+
+    old, _ = registry.issue_ticket(caller, "planner")
+    clock.now += TICKET_TTL_S + 1
+    fresh = [registry.issue_ticket(caller, "planner")[0] for _ in range(TICKETS_PER_EDGE + 3)]
+
+    from malkuth.access.registry import credential_hash
+
+    assert store.ticket(credential_hash(old)) is None, "만료된 표가 남았다"
+    kept = [t for t in fresh if store.ticket(credential_hash(t)) is not None]
+    assert kept == fresh[-TICKETS_PER_EDGE:], "간선마다 최신 몇 개만 남겨야 한다"
+    assert registry.verify_ticket(callee, fresh[-1]).allowed

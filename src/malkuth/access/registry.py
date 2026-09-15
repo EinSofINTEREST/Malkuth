@@ -62,7 +62,11 @@ class Baseline(Protocol):
     ``connections`` — 그래서 종류별로 꽂는다.
     """
 
-    def allows(self, agent: str, target: str, mode: Mode | None) -> bool: ...
+    def allows(
+        self, agent: str, target: str, mode: Mode | None, identity: Identity | None = None
+    ) -> bool:
+        """``identity`` 는 요청을 보낸 **그 신원** — 배포마다 다른 선언(A2A 의 그래프)을 고른다."""
+        ...
 
 
 DECLARATIONS_POLL_S = 2.0
@@ -182,17 +186,34 @@ class AccessRegistry:
         Raises:
             MalkuthError: FORBIDDEN/``ACC_001`` if the credential is unknown or revoked.
         """
+        return self.identity_of(credential).agent
+
+    def identity_of(self, credential: str) -> Identity:
+        """The live identity record behind a credential — agent, deployment, graph.
+
+        Raises:
+            MalkuthError: FORBIDDEN/``ACC_001`` if the credential is unknown or revoked.
+        """
         found = self.store.identity(credential_hash(credential)) if credential else None
         if found is None or found.revoked_at is not None:
             raise _unknown_identity()
-        return found.agent
+        return found
 
     # --- 판정 ---------------------------------------------------------------
 
     def decide(
-        self, agent: str, kind: ResourceKind, target: str, mode: Mode | None = None
+        self,
+        agent: str,
+        kind: ResourceKind,
+        target: str,
+        mode: Mode | None = None,
+        *,
+        identity: Identity | None = None,
     ) -> Decision:
         """Decide one request — revocation, then declaration, then grant.
+
+        ``identity`` 가 있으면 선언 판정이 그 신원의 배포를 본다 — 같은 이름의 다른 배포가 선언한
+        권한을 이 요청이 빌려 쓰지 않는다.
 
         Raises:
             MalkuthError: VALIDATION/``VAL_002`` if the mode does not fit the kind.
@@ -214,7 +235,7 @@ class AccessRegistry:
         if denial is not None:
             return answer(Outcome.DENY, denial.decided_by)
         baseline = self.baselines.get(kind)
-        if baseline is not None and baseline.allows(agent, target, mode):
+        if baseline is not None and baseline.allows(agent, target, mode, identity):
             return answer(Outcome.ALLOW, DECLARATION)
         grant = next((r for r in active if r.effect is Effect.ALLOW), None)
         if grant is not None:
@@ -278,7 +299,8 @@ class AccessRegistry:
                 decided_by=INVALID_TICKET,
                 version=self.store.version(),
             )
-        decision = self.decide(found.caller, ResourceKind.A2A, callee)
+        # 판정은 표를 발급받은 **그 신원**의 배포 선언으로 한다
+        decision = self.decide(found.caller, ResourceKind.A2A, callee, identity=caller_identity)
         until = found.expires_at
         if decision.valid_until is not None:
             until = min(until, decision.valid_until)

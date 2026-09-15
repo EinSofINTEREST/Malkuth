@@ -8,6 +8,7 @@ per-edge token 은 그래프의 모든 에이전트가 **같은 서명 키**를 
 
 from __future__ import annotations
 
+import asyncio
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -39,6 +40,7 @@ class TicketSource:
     http: httpx.AsyncClient | None = None
     clock: Callable[[], float] = time.time
     _held: dict[str, tuple[str, float]] = field(default_factory=dict, init=False)
+    _fetching: dict[str, asyncio.Lock] = field(default_factory=dict, init=False)
 
     async def ticket_for(self, callee: str) -> str:
         """A live ticket for ``callee``.
@@ -50,6 +52,15 @@ class TicketSource:
         held = self._held.get(callee)
         if held is not None and held[1] - self.clock() > RENEW_BEFORE_S:
             return held[0]
+        # 동시에 처음 부르면 모두가 새 표를 받아 레지스트리가 간선마다 남기는 수를 넘긴다 —
+        # 넘친 옛 표는 지워져 진행 중 호출이 거부된다. 한 번만 받고 나눠 쓴다
+        async with self._fetching.setdefault(callee, asyncio.Lock()):
+            held = self._held.get(callee)
+            if held is not None and held[1] - self.clock() > RENEW_BEFORE_S:
+                return held[0]
+            return await self._fetch(callee)
+
+    async def _fetch(self, callee: str) -> str:
         try:
             response = await self._client().post(
                 "/v1/access/a2a/tickets",

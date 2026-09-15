@@ -162,7 +162,7 @@ def mount_access(
         """판정 — 모르는 자격도 **거부 판정**으로 답한다. 강제 지점이 캐시할 수 있어야 한다."""
         asked = parsed(body, DecisionRequest)
         try:
-            agent = registry.identify(asked.credential)
+            identity = registry.identity_of(asked.credential)
         except MalkuthError as err:
             if err.code != ErrorCode.ACC_001:
                 raise
@@ -173,7 +173,9 @@ def mount_access(
                 "version": registry.version(),
                 "valid_until": None,
             }
-        decision = registry.decide(agent, asked.kind, asked.target, asked.mode)
+        decision = registry.decide(
+            identity.agent, asked.kind, asked.target, asked.mode, identity=identity
+        )
         return {
             "agent": decision.agent,
             "decision": decision.outcome.value,

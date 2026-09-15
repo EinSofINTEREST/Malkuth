@@ -36,6 +36,10 @@ class Identity:
     """배포된 그래프 — A2A 선언 판정이 이 에이전트의 ``connections`` 를 찾는 곳."""
 
 
+TICKETS_PER_EDGE = 4
+"""(호출자 신원, 피호출자) 마다 남기는 유효한 표 수 — 갱신 직후에도 진행 중 호출의 옛 표는 산다."""
+
+
 @dataclass(frozen=True)
 class Ticket:
     """A one-callee A2A call ticket, by its hash.
@@ -72,7 +76,14 @@ class AccessStore(Protocol):
     def rule(self, rule_id: str) -> Rule | None: ...
     def rules(self, agent: str) -> Sequence[Rule]: ...
     def live_graphs(self, agent: str) -> frozenset[str]: ...
-    def put_ticket(self, ticket: Ticket) -> None: ...
+    def put_ticket(self, ticket: Ticket) -> None:
+        """Store a ticket, dropping expired ones and all but the newest few per edge.
+
+        표는 갱신마다 새로 생긴다 — 지우지 않으면 저장소가 끝없이 자라고, 침해된 에이전트가 발급을
+        반복해 디스크를 채울 수 있다.
+        """
+        ...
+
     def ticket(self, ticket_hash: str) -> Ticket | None: ...
 
     def touch(self) -> int:
@@ -126,7 +137,23 @@ class InMemoryAccessStore:
         )
 
     def put_ticket(self, ticket: Ticket) -> None:
+        now = ticket.issued_at
+        for key, found in list(self._tickets.items()):
+            if found.expires_at <= now:
+                del self._tickets[key]
         self._tickets[ticket.ticket_hash] = ticket
+        # 같은 시각에 발급된 표는 나중에 넣은 것이 최신이다 — 삽입 순서를 두 번째 기준으로 쓴다
+        edge = [
+            t
+            for t in self._tickets.values()
+            if t.caller_hash == ticket.caller_hash and t.callee == ticket.callee
+        ]
+        same_edge = [
+            t
+            for _, t in sorted(enumerate(edge), key=lambda p: (p[1].issued_at, p[0]), reverse=True)
+        ]
+        for stale in same_edge[TICKETS_PER_EDGE:]:
+            del self._tickets[stale.ticket_hash]
 
     def ticket(self, ticket_hash: str) -> Ticket | None:
         return self._tickets.get(ticket_hash)
@@ -161,6 +188,8 @@ CREATE TABLE IF NOT EXISTS tickets (
     issued_at   REAL NOT NULL,
     expires_at  REAL NOT NULL
 );
+CREATE INDEX IF NOT EXISTS tickets_by_expiry ON tickets (expires_at);
+CREATE INDEX IF NOT EXISTS tickets_by_edge ON tickets (caller_hash, callee, issued_at);
 CREATE TABLE IF NOT EXISTS rules (
     rule_id      TEXT PRIMARY KEY,
     agent        TEXT NOT NULL,
@@ -322,8 +351,9 @@ class SqliteAccessStore:
         return frozenset(row["graph"] for row in rows)
 
     def put_ticket(self, ticket: Ticket) -> None:
-        with self._lock:
-            self._connect().execute(
+        with self._transaction() as conn:
+            conn.execute("DELETE FROM tickets WHERE expires_at <= ?", (ticket.issued_at,))
+            conn.execute(
                 "INSERT OR REPLACE INTO tickets VALUES (?,?,?,?,?,?)",
                 (
                     ticket.ticket_hash,
@@ -332,6 +362,18 @@ class SqliteAccessStore:
                     ticket.callee,
                     ticket.issued_at,
                     ticket.expires_at,
+                ),
+            )
+            conn.execute(
+                "DELETE FROM tickets WHERE caller_hash = ? AND callee = ? AND ticket_hash NOT IN "
+                "(SELECT ticket_hash FROM tickets WHERE caller_hash = ? AND callee = ? "
+                "ORDER BY issued_at DESC, rowid DESC LIMIT ?)",
+                (
+                    ticket.caller_hash,
+                    ticket.callee,
+                    ticket.caller_hash,
+                    ticket.callee,
+                    TICKETS_PER_EDGE,
                 ),
             )
 

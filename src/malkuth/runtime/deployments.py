@@ -551,23 +551,30 @@ class DeploymentManager:
         """
         engine = self.launcher.engine
         for agent in record.agents:
-            container_id = await asyncio.to_thread(
-                engine.client.find, container_name(agent.name, agent.replica)
-            )
-            if container_id is None:
-                continue  # 없는 컨테이너는 아래 대조가 missing 으로 보고한다
             try:
+                container_id = await asyncio.to_thread(
+                    engine.client.find, container_name(agent.name, agent.replica)
+                )
+                if container_id is None:
+                    continue  # 없는 컨테이너는 아래 대조가 missing 으로 보고한다
                 await engine.verify_isolation(agent.name, agent.image, container_id)
             except MalkuthError as err:
-                self._bind_log(record).error(
-                    "deployment not reattached — agent network isolation does not match",
-                    agent=agent.name,
-                    error_code=err.code,
-                    network=err.details.get("network"),
-                )
-                self._mark_lost(record, f"network isolation mismatch: {agent.name}", touched)
-                self._revoke_orphaned_identities(record)
-                return False
+                reason, code = "network isolation mismatch", err.code
+            except Exception as err:  # noqa: BLE001 — 격리를 확인하지 못했다: 붙이지 않는 쪽으로 닫는다
+                # 조회 사이에 컨테이너가 사라지거나 daemon 이 답하지 않으면 SDK 예외가 온다. 여기서
+                # 새면 이 배포는 lost 도 신원 회수도 없이 남고, 뒤의 배포는 재부착조차 되지 않는다
+                reason, code = "network isolation unverifiable", type(err).__name__
+            else:
+                continue
+            self._bind_log(record).error(
+                "deployment not reattached — agent network isolation not confirmed",
+                agent=agent.name,
+                reason=reason,
+                error_code=code,
+            )
+            self._mark_lost(record, f"{reason}: {agent.name}", touched)
+            self._revoke_orphaned_identities(record)
+            return False
         return True
 
     async def _live(self, agent: DeployedAgent) -> tuple[str, str, int] | None:

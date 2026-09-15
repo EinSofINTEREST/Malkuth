@@ -652,6 +652,66 @@ async def test_reattach_refuses_containers_that_are_not_isolated(
             registry.identify(agent.access_credential)  # 외부 경로가 남은 컨테이너의 신원은 회수
 
 
+class VanishingDocker(TrackingDocker):
+    """찾은 뒤 조회하는 사이 컨테이너가 사라진다 — SDK 는 NotFound 같은 자기 예외를 던진다."""
+
+    def __init__(self, vanishing: str, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.vanishing = vanishing
+
+    def networks_of(self, container_id: str) -> tuple[str, ...]:
+        if container_id == self.find(self.vanishing):
+            raise RuntimeError("404 container not found")
+        return super().networks_of(container_id)
+
+
+async def test_a_docker_failure_during_the_isolation_check_fails_closed_and_moves_on(
+    workspace, healthy
+):
+    """확인하지 못한 배포는 lost + 신원 회수, 뒤의 배포는 계속 재부착한다 (#296 리뷰)."""
+    catalog = Catalog.under(workspace)
+    store = InMemoryDeploymentStore()
+    first_docker = TrackingDocker()
+
+    def manager_with(client, *, internal: bool) -> DeploymentManager:
+        return DeploymentManager(
+            catalog=catalog,
+            author=Author(catalog=catalog),
+            store=store,
+            secrets_env={"ANTHROPIC_API_KEY": "k"},
+            launcher=AgentLauncher(
+                engine=DockerEngine(client=client, network="agents", internal=internal),
+                health_interval_s=10.0,
+                health_sleep=Tick(),
+            ),
+            ready_poll_s=0.0,
+            sleep=NoSleep(),
+        )
+
+    first = manager_with(first_docker, internal=True)
+    registry = with_access(first)
+    broken = await first.deploy("two")
+    await first.launcher.stop_all()
+    write(workspace / "agents" / "gamma" / "manifest.yaml", agent_doc("gamma"))
+    write(workspace / "graphs" / "other.yaml", graph_doc("other", ["gamma"]))
+    healthy_record = await manager_with(first_docker, internal=True).deploy("other")
+
+    later = VanishingDocker("malkuth-alpha-0", attached=("agents",))
+    later.created = list(first_docker.created)
+    second = manager_with(later, internal=True)
+    second.access = registry
+
+    touched = {r.deployment_id: r for r in await second.reattach()}
+
+    assert touched[broken.deployment_id].status == DeploymentStatus.LOST
+    assert touched[broken.deployment_id].error == "network isolation unverifiable: alpha"
+    with pytest.raises(MalkuthError):
+        registry.identify(broken.agents[0].access_credential)
+    assert touched[healthy_record.deployment_id].status == DeploymentStatus.READY
+    assert sorted(second.launcher.launched) == [("gamma", 0)]
+    await second.launcher.stop_all()
+
+
 async def test_reattach_hands_the_launcher_what_a_restart_needs(workspace, docker, healthy):
     wired_workspace(workspace)
     store = InMemoryDeploymentStore()

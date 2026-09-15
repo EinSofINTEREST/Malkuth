@@ -95,8 +95,9 @@ async def app(scope, receive, send):
 uvicorn.run(app, host="0.0.0.0", port=8000, log_level="warning")
 """
 
-# 컨테이너 안에서 agentd 의 조립 그대로 원격 MCP 도구를 부른다 — 결과 또는 에러 코드·사유만 출력
-MCP_CALL = """
+# 컨테이너 안에서 agentd 의 조립 그대로 **한 세션**을 열어 두고, 줄마다 도구를 부른다 — 회수 전후가
+# 같은 세션이어야 세션을 열 때만 판정하는 회귀를 잡는다. 결과 또는 에러 코드·사유를 한 줄로 답한다
+MCP_SESSION = """
 import asyncio, json, os, sys
 import yaml
 from malkuth.agentd.mcp import build_mcp_client
@@ -108,12 +109,18 @@ async def main():
         manifest = AgentManifest.model_validate(yaml.safe_load(handle))
     client = build_mcp_client(manifest)
     [spec] = [s for s in manifest.spec.mcp.servers if s.name == "corp"]
+    await client.start(spec)
+    print("READY", flush=True)
+    loop = asyncio.get_running_loop()
     try:
-        await client.start(spec)
-        result = await client.call_tool("mcp__corp__" + sys.argv[1], json.loads(sys.argv[2]))
-        print("OK:" + json.dumps(result.content))
-    except MalkuthError as err:
-        print("ERR:" + err.code + ":" + str(err.details.get("detail", ""))[:200])
+        while line := await loop.run_in_executor(None, sys.stdin.readline):
+            tool, arguments = line.rstrip("\\n").split(" ", 1)
+            try:
+                result = await client.call_tool("mcp__corp__" + tool, json.loads(arguments))
+                print("OK:" + json.dumps(result.content), flush=True)
+            except MalkuthError as err:
+                detail = str(err.details.get("detail", ""))[:200]
+                print("ERR:" + err.code + ":" + detail, flush=True)
     finally:
         await client.shutdown()
 
@@ -483,8 +490,29 @@ print(json.dumps([s["name"] for s in json.load(urllib.request.urlopen(request))[
 """
 
 
-def mcp_call(tool: str, arguments: dict[str, Any]) -> str:
-    return run_in(RESEARCHER, MCP_CALL, tool, json.dumps(arguments))
+class McpSession:
+    """떠 있는 에이전트 컨테이너 안의 MCP 세션 하나 — 도구를 부를 때마다 같은 세션을 쓴다."""
+
+    def __init__(self, container: str) -> None:
+        self.process = subprocess.Popen(  # noqa: S603
+            ["docker", "exec", "-i", container, "python", "-c", MCP_SESSION],  # noqa: S607
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        ready = self.process.stdout.readline().strip()
+        assert ready == "READY", ready + self.process.stderr.read()[-800:]
+
+    def call(self, tool: str, arguments: dict[str, Any]) -> str:
+        self.process.stdin.write(f"{tool} {json.dumps(arguments)}\n")
+        self.process.stdin.flush()
+        answer = self.process.stdout.readline().strip()
+        return answer or "CLOSED:" + self.process.stderr.read()[-800:]
+
+    def close(self) -> None:
+        self.process.stdin.close()
+        self.process.wait(timeout=30)
 
 
 def test_remote_mcp_tools_are_decided_one_by_one_through_the_proxy(plane):
@@ -502,8 +530,9 @@ def test_remote_mcp_tools_are_decided_one_by_one_through_the_proxy(plane):
     advertised = json.loads(run_in(RESEARCHER, CARD))
     assert {"mcp__corp__echo", "mcp__corp__add"} <= set(advertised), advertised
 
-    assert "e2e" in mcp_call("echo", {"text": "e2e"})
-    assert mcp_call("add", {"a": 2, "b": 3}).startswith("OK:")
+    session = McpSession(RESEARCHER)
+    assert "e2e" in session.call("echo", {"text": "e2e"})
+    assert session.call("add", {"a": 2, "b": 3}).startswith("OK:")
 
     # --- 도구 하나 회수: 다음 호출부터 거부, 같은 서버의 다른 도구는 계속
     status, revoked = api(
@@ -512,13 +541,15 @@ def test_remote_mcp_tools_are_decided_one_by_one_through_the_proxy(plane):
         {"agent": "researcher", "kind": "mcp_tool", "target": "corp/echo", "reason": "e2e"},
     )
     assert status == 201, revoked
+    # 같은 세션의 다음 호출부터 — 세션을 다시 열지 않는다
     until(
-        lambda: mcp_call("echo", {"text": "e2e"}).startswith("ERR:MCP_003:ACC_001"),
-        what="revoked mcp tool refused",
+        lambda: session.call("echo", {"text": "e2e"}).startswith("ERR:MCP_003:ACC_001"),
+        what="revoked mcp tool refused in the open session",
         timeout_s=30,
     )
-    assert "5" in mcp_call("add", {"a": 2, "b": 3}), "회수가 같은 서버의 다른 도구까지 막았다"
+    assert "5" in session.call("add", {"a": 2, "b": 3}), "회수가 같은 서버의 다른 도구까지 막았다"
 
     api("DELETE", f"/v1/access/rules/{revoked['rule_id']}")
-    until(lambda: "e2e" in mcp_call("echo", {"text": "e2e"}), what="lifted tool", timeout_s=30)
+    until(lambda: "e2e" in session.call("echo", {"text": "e2e"}), what="lifted", timeout_s=30)
+    session.close()
     assert started_at(RESEARCHER) == started, "권한 변경이 컨테이너를 재시작했다"

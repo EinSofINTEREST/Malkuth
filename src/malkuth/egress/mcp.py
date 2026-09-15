@@ -15,7 +15,10 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import json
+import secrets
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -42,6 +45,8 @@ if TYPE_CHECKING:
 log = structlog.get_logger(__name__)
 
 MCP_PREFIX = "/mcp"
+SESSION_HEADER = "mcp-session-id"
+SESSION_MAC_CHARS = 32
 TOOLS_CALL = "tools/call"
 DENIED_RPC_CODE = -32001
 """JSON-RPC 서버 정의 에러 대역 — 도구 판정 거부. 메시지에 malkuth 코드를 싣는다."""
@@ -115,6 +120,32 @@ class McpUpstreams:
         return McpUpstream(url=declared.url, target=target, token=token)
 
 
+@dataclass(frozen=True)
+class SessionSeal:
+    """Binds an upstream MCP session id to the (agent, server) it was issued to.
+
+    upstream 은 모든 에이전트에게서 **같은 프록시 자격**을 받으므로 세션 주인을 가리지 못한다.
+    그래서 프록시가 돌려주는 세션 id 에 (에이전트, 서버) 로 서명을 붙이고, 들어오는 id 는 서명을
+    확인해 벗긴다 — 다른 에이전트의 세션 id 를 알아내도 쓰지 못한다. 상태가 없으므로 같은 키라면
+    프록시 재시작을 넘는다.
+    """
+
+    key: bytes = field(default_factory=lambda: secrets.token_bytes(32))
+
+    def seal(self, agent: str, server: str, session: str) -> str:
+        return f"{session}.{self._mac(agent, server, session)}"
+
+    def open(self, agent: str, server: str, sealed: str) -> str | None:
+        session, _, mac = sealed.rpartition(".")
+        if not session or not hmac.compare_digest(mac, self._mac(agent, server, session)):
+            return None
+        return session
+
+    def _mac(self, agent: str, server: str, session: str) -> str:
+        message = f"{agent}\n{server}\n{session}".encode()
+        return hmac.new(self.key, message, hashlib.sha256).hexdigest()[:SESSION_MAC_CHARS]
+
+
 @dataclass
 class McpTermination:
     """The ``/mcp/{server}`` route — one agent's calls to one declared remote server."""
@@ -128,6 +159,7 @@ class McpTermination:
         default_factory=lambda: httpx.AsyncClient(timeout=UPSTREAM_TIMEOUT)
     )
     resolver: Callable[[str, int], Awaitable[list[str]]] = resolve
+    sessions: SessionSeal = field(default_factory=SessionSeal)
 
     def router(self) -> APIRouter:
         router = APIRouter()
@@ -163,7 +195,7 @@ class McpTermination:
         denied = await self._decide_tools(credential, server, body)
         if denied is not None:
             return denied
-        return await self._forward(request, agent, upstream, body)
+        return await self._forward(request, (agent, server), upstream, body)
 
     async def _decide_tools(self, credential: str, server: str, body: bytes) -> Response | None:
         """``tools/call`` 마다 판정한다 — 하나라도 막히면 아무것도 보내지 않는다."""
@@ -193,13 +225,22 @@ class McpTermination:
         return None
 
     async def _forward(
-        self, request: Request, agent: str, upstream: McpUpstream, body: bytes
+        self, request: Request, owner: tuple[str, str], upstream: McpUpstream, body: bytes
     ) -> Response:
+        agent, server = owner
         parts = urlsplit(upstream.url)
-        if parts.scheme == "http" and upstream.token is not None and not self.allow_plaintext:
-            log.error("mcp credential over plaintext refused", agent=agent,
+        if parts.scheme == "http" and not self.allow_plaintext:
+            # 도구 인자와 결과도 민감하다 — 자격 없는 서버라도 평문은 명시 허용(테스트 대역)일 때만
+            log.error("mcp over plaintext refused", agent=agent,
                       resource=ResourceKind.EGRESS.value, target=upstream.target)  # fmt: skip
-            return _http_error(502, "remote mcp server must use https to receive a credential")
+            return _http_error(502, "remote mcp server must use https")
+        sealed = request.headers.get(SESSION_HEADER)
+        session = self.sessions.open(agent, server, sealed) if sealed is not None else None
+        if sealed is not None and session is None:
+            # MCP 는 모르는 세션에 404 로 답한다 — 클라이언트가 새 세션을 연다
+            log.warning("mcp session not issued to this agent", agent=agent, mcp_server=server,
+                        resource=ResourceKind.MCP_TOOL.value, target=server)  # fmt: skip
+            return _http_error(404, "unknown mcp session")
         address = await self._address(parts, upstream.target)
         if address is None:
             log.warning("mcp upstream at a private address refused", agent=agent,
@@ -207,6 +248,8 @@ class McpTermination:
                         error_code="ACC_001")  # fmt: skip
             return _http_error(403, "remote mcp server resolves to a private address", "ACC_001")
         outbound = self._outbound(request, parts, address, upstream, body)
+        if session is not None:
+            outbound.headers[SESSION_HEADER] = session
         try:
             answer = await self.http.send(outbound, stream=True)
         except httpx.HTTPError as err:
@@ -214,12 +257,15 @@ class McpTermination:
                         resource=ResourceKind.EGRESS.value, target=upstream.target,
                         exc_info=err)  # fmt: skip
             return _http_error(502, "remote mcp server unreachable")
+        headers = {k: v for k, v in answer.headers.items() if k.lower() not in _RETURNED_EXCLUDED}
+        issued = answer.headers.get(SESSION_HEADER)
+        if issued is not None:
+            headers = {k: v for k, v in headers.items() if k.lower() != SESSION_HEADER}
+            headers[SESSION_HEADER] = self.sessions.seal(agent, server, issued)
         return StreamingResponse(
             answer.aiter_raw(),
             status_code=answer.status_code,
-            headers={
-                k: v for k, v in answer.headers.items() if k.lower() not in _RETURNED_EXCLUDED
-            },
+            headers=headers,
             background=BackgroundTask(answer.aclose),
         )
 
@@ -240,7 +286,12 @@ class McpTermination:
     ) -> httpx.Request:
         host = f"[{address}]" if ":" in address else address
         netloc = f"{host}:{parts.port}" if parts.port else host
-        headers = {k: v for k, v in request.headers.items() if k.lower() in _FORWARDED}
+        # 세션 id 는 서명을 벗긴 값으로 호출자가 따로 싣는다
+        headers = {
+            k: v
+            for k, v in request.headers.items()
+            if k.lower() in _FORWARDED and k.lower() != SESSION_HEADER
+        }
         headers["host"] = parts.netloc
         if upstream.token is not None:
             headers["authorization"] = f"Bearer {upstream.token}"
@@ -301,4 +352,4 @@ def _rpc_error(request_id: Any, refused: tuple[int, str, str | None]) -> JSONRes
     )
 
 
-__all__ = ["MCP_PREFIX", "McpTermination", "McpUpstream", "McpUpstreams"]
+__all__ = ["MCP_PREFIX", "McpTermination", "McpUpstream", "McpUpstreams", "SessionSeal"]

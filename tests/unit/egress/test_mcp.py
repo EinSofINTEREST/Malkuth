@@ -120,7 +120,7 @@ async def post(client, server="corp", body=None, credential="cred-researcher", *
     return await client.post(
         f"/mcp/{server}",
         content=content,
-        headers={"content-type": "application/json", "mcp-session-id": "s-1", **headers},
+        headers={"content-type": "application/json", **headers},
     )
 
 
@@ -131,14 +131,13 @@ async def test_an_allowed_tool_call_goes_to_the_declared_server_with_the_proxy_c
     async with client_for(termination(tmp_path, Identities(), server)) as client:
         response = await post(client)
 
-    assert response.status_code == 200 and response.headers["mcp-session-id"] == "s-1"
+    assert response.status_code == 200
     [sent] = server.seen
     assert sent.headers["authorization"] == f"Bearer {TOKEN}", "프록시 자격이 붙지 않았다"
     assert "cred-researcher" not in str(sent.headers), "에이전트 신원이 서버로 새어 나갔다"
     assert (sent.url.host, sent.url.path) == (PUBLIC, "/mcp"), "확인한 주소로 붙지 않았다"
     assert sent.headers["host"] == "mcp.corp.example"
     assert sent.extensions["sni_hostname"] == "mcp.corp.example"
-    assert sent.headers["mcp-session-id"] == "s-1"
 
 
 async def test_a_revoked_tool_is_refused_while_other_tools_of_the_server_still_work(tmp_path):
@@ -208,7 +207,14 @@ async def test_the_server_is_not_reached_without_a_decision(tmp_path, change, st
             "선언이 모델 키를 자격으로 끌어내려 해도 보내지 않는다",
         ),
         ({"corp": {"url": "http://mcp.corp.example/mcp"}}, "corp", None, 502, "평문으로 자격을"),
-        ({}, "lab", {"jsonrpc": "2.0", "id": 1, "method": "ping"}, 403, "사설 주소로 풀리는 서버"),
+        ({}, "lab", {"jsonrpc": "2.0", "id": 1, "method": "ping"}, 502, "자격 없는 평문 서버도"),
+        (
+            {"allow_plaintext": True},
+            "lab",
+            {"jsonrpc": "2.0", "id": 1, "method": "ping"},
+            403,
+            "사설 주소로 풀리는 서버",
+        ),
     ],
 )
 async def test_unsafe_or_unknown_requests_do_not_reach_any_server(
@@ -259,3 +265,45 @@ async def test_without_an_identity_nothing_is_asked(tmp_path):
         response = await post(client, credential=None)
 
     assert response.status_code == 401 and registry.asked == [] and server.seen == []
+
+
+async def test_a_session_is_usable_only_by_the_agent_it_was_issued_to(tmp_path):
+    """upstream 은 모두에게서 같은 자격을 받는다 — 세션 id 는 발급받은 (에이전트, 서버) 만 쓴다."""
+    registry, server = Identities(), Server()
+    target = termination(
+        tmp_path,
+        registry,
+        server,
+        allow_plaintext=True,
+        private_destinations=("lab.internal:9000",),
+    )
+    async with client_for(target) as client:
+        opened = await post(client, body={"jsonrpc": "2.0", "id": 1, "method": "initialize"})
+        sealed = opened.headers["mcp-session-id"]
+        assert sealed != "s-1" and sealed.startswith("s-1."), "upstream 세션 id 를 그대로 돌려줬다"
+
+        again = await post(client, **{"mcp-session-id": sealed})
+        forged = await post(client, **{"mcp-session-id": "s-1"})
+        tampered = await post(client, **{"mcp-session-id": "s-2." + sealed.split(".", 1)[1]})
+        other_server = await post(
+            client, server="lab", body={"jsonrpc": "2.0", "id": 1, "method": "ping"},
+            **{"mcp-session-id": sealed},
+        )  # fmt: skip
+
+    assert again.status_code == 200
+    assert server.seen[1].headers["mcp-session-id"] == "s-1", "서명을 벗기지 않고 보냈다"
+    assert (forged.status_code, tampered.status_code, other_server.status_code) == (404, 404, 404)
+    assert len(server.seen) == 2
+
+
+def test_a_seal_binds_agent_and_server():
+    from malkuth.egress.mcp import SessionSeal
+
+    seal = SessionSeal(key=b"k" * 32)
+    sealed = seal.seal("researcher", "corp", "abc")
+
+    assert seal.open("researcher", "corp", sealed) == "abc"
+    assert seal.open("writer", "corp", sealed) is None
+    assert seal.open("researcher", "lab", sealed) is None
+    assert SessionSeal(key=b"x" * 32).open("researcher", "corp", sealed) is None
+    assert seal.open("researcher", "corp", "abc") is None

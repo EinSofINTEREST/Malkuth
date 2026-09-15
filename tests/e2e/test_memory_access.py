@@ -63,11 +63,12 @@ except urllib.error.HTTPError as err:
 """
 
 
-def start_memory() -> None:
+def start_memory(network: str = NETWORK, *, also: tuple[str, ...] = ()) -> None:
+    """레지스트리 모드 Memory Service — ``also`` 는 함께 붙일 네트워크 (격리된 에이전트 망 등)."""
     docker("rm", "-f", MEMORY, check=False)
     docker(
         "run", "-d", "--name", MEMORY,
-        "--network", NETWORK, "--network-alias", MEMORY_ALIAS,
+        "--network", network, "--network-alias", MEMORY_ALIAS,
         "--add-host", "host.docker.internal:host-gateway",
         "--read-only", "--tmpfs", "/tmp:size=16m",  # noqa: S108 — 컨테이너 안 tmpfs
         "--user", "1000:1000", "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true",
@@ -77,6 +78,8 @@ def start_memory() -> None:
         "-e", f"MALKUTH_ACCESS_ENFORCER_TOKEN={ENFORCER_TOKEN}",
         "malkuth/memory-service:0.1.0",
     )  # fmt: skip
+    for extra in also:
+        docker("network", "connect", "--alias", MEMORY_ALIAS, extra, MEMORY)
 
 
 def memory_ready() -> bool:

@@ -7,6 +7,7 @@ egress ``api.search.example.com``, TTL 600.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
@@ -41,6 +42,7 @@ class Link:
     def __init__(self, down: bool = False) -> None:
         self.down = down
         self.calls = 0
+        self.gate: asyncio.Event | None = None
 
 
 def steward_for(
@@ -55,6 +57,8 @@ def steward_for(
 
     async def route(request: httpx.Request) -> httpx.Response:
         link.calls += 1
+        if link.gate is not None:
+            await link.gate.wait()
         if link.down:
             raise httpx.ConnectError("control plane is down")
         return await asgi.handle_async_request(request)
@@ -182,6 +186,37 @@ async def test_a_retried_request_is_granted_once(registry):
 
     assert first.output == second.output
     assert len(allows(registry, "worker")) == 1
+
+
+async def test_concurrent_copies_of_one_request_are_granted_once(registry):
+    """기억은 끝난 뒤에 생긴다 — 동시에 온 재시도는 진행 중인 요청의 답을 나눠 받아야 한다."""
+    link = Link()
+    link.gate = asyncio.Event()
+    steward = steward_for(registry, link=link)
+
+    racing = [asyncio.create_task(steward.execute(request(task_id="same"))) for _ in range(3)]
+    await asyncio.sleep(0.05)
+    link.gate.set()
+    answers = await asyncio.gather(*racing)
+
+    assert link.calls == 1
+    assert len(allows(registry, "worker")) == 1
+    assert {answer.output["rule_id"] for answer in answers} == {answers[0].output["rule_id"]}
+
+
+async def test_a_cancelled_waiter_does_not_abandon_the_grant(registry):
+    link = Link()
+    link.gate = asyncio.Event()
+    steward = steward_for(registry, link=link)
+
+    first = asyncio.create_task(steward.execute(request(task_id="once")))
+    await asyncio.sleep(0.05)
+    first.cancel()
+    link.gate.set()
+    retried = await steward.execute(request(task_id="once"))
+
+    assert retried.status is TaskStatus.COMPLETED, retried.error
+    assert (link.calls, len(allows(registry, "worker"))) == (1, 1)
 
 
 async def test_another_caller_reusing_a_task_id_gets_its_own_answer(registry):

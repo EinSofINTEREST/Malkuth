@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from collections import OrderedDict
@@ -94,6 +95,8 @@ class PermissionAgent:
             )
         self._http = http or httpx.AsyncClient(base_url=self._base_url, timeout=REQUEST_TIMEOUT_S)
         self._completed: OrderedDict[tuple[str | None, str], TaskResult] = OrderedDict()
+        self._inflight: dict[tuple[str | None, str], asyncio.Future[TaskResult]] = {}
+        """진행 중인 요청 — 키가 끝날 때까지 이 표가 태스크를 쥔다 (완료 콜백이 뺀다)."""
 
     async def execute(self, task: TaskRequest) -> TaskResult:
         # 호출자까지 키에 넣는다 — task id 는 호출자가 고르므로, 남의 id 로 남의 답을 받으면 안 된다
@@ -102,6 +105,17 @@ class PermissionAgent:
         if cached is not None:
             # 같은 요청의 재시도가 부여를 두 번 기록하지 않게 (02 Rule 3)
             return cached
+        running = self._inflight.get(key)
+        if running is None:
+            # 같은 요청이 동시에 들어오면 한 번만 부여하고 같은 답을 나눠 준다 — 기억은 끝난 뒤에야
+            # 생기므로 그것만으로는 동시 재시도가 부여를 둘 만든다 (#295 리뷰)
+            running = asyncio.ensure_future(self._answer(task, key))
+            self._inflight[key] = running
+            running.add_done_callback(lambda _: self._inflight.pop(key, None))
+        # 기다리던 쪽이 취소돼도 부여 요청은 끝까지 간다 — 반쯤 기록된 부여를 남기지 않는다
+        return await asyncio.shield(running)
+
+    async def _answer(self, task: TaskRequest, key: tuple[str | None, str]) -> TaskResult:
         try:
             result = TaskResult.completed(task, output=await self._grant(task))
         except MalkuthError as err:

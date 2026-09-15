@@ -1104,3 +1104,70 @@ async def test_registry_mode_gives_agents_the_registry_address_and_no_shared_sec
         assert env[A2A_EDGES_ENV] == "beta>alpha", "호출자 쪽 편의 검사는 그대로 쓴다"
     assert record.status == "ready"
     await manager.launcher.stop_all()
+
+
+# --- 이그레스 프록시 (#293) ------------------------------------------------------------
+
+
+async def test_with_an_egress_proxy_agents_get_no_model_key_and_go_out_through_the_proxy(
+    manager, docker
+):
+    """프록시가 키를 주입한다 — 에이전트 env 에 키가 있으면 회수가 재배포 없이는 안 된다."""
+    from urllib.parse import urlsplit
+
+    from malkuth.runtime.deployments import EgressEndpoints
+
+    with_access(manager)
+    manager.egress = EgressEndpoints(
+        connect_url="http://malkuth-egress:8080", providers_url="http://malkuth-egress:8081"
+    )
+    manager.agent_env = {"ANTHROPIC_BASE_URL": "https://api.anthropic.com"}
+
+    record = await manager.deploy("two")
+
+    for agent in record.agents:
+        env = env_of(docker, agent.name)
+        assert "k" not in env.values(), "모델 API 키가 컨테이너에 들어갔다"
+        assert env["ANTHROPIC_API_KEY"] == agent.access_credential, "키 자리에는 신원을 싣는다"
+        assert env["ANTHROPIC_BASE_URL"] == "http://malkuth-egress:8081/anthropic"
+        proxy = urlsplit(env["HTTPS_PROXY"])
+        assert (proxy.hostname, proxy.port, proxy.username) == ("malkuth-egress", 8080, agent.name)
+        assert proxy.password == agent.access_credential
+        assert env["https_proxy"] == env["HTTPS_PROXY"]
+        assert "HTTP_PROXY" not in env, "사설 네트워크의 http 서비스까지 프록시로 보내면 안 된다"
+    await manager.launcher.stop_all()
+
+
+async def test_without_an_egress_proxy_the_model_key_is_injected_as_before(manager, docker):
+    record = await manager.deploy("two")
+
+    assert all(env_of(docker, a.name)["ANTHROPIC_API_KEY"] == "k" for a in record.agents)
+    await manager.launcher.stop_all()
+
+
+def test_a_proxy_terminated_key_never_leaves_even_without_an_identity_override(manager):
+    """배선이 신원으로 덮어쓰지 않아도 프록시가 종단하는 키는 에이전트 env 로 나가지 않는다."""
+    from malkuth.runtime.deployments import EgressEndpoints, Provision
+
+    manager.egress = EgressEndpoints(
+        connect_url="http://malkuth-egress:8080", providers_url="http://malkuth-egress:8081"
+    )
+    manifest = manager.catalog.agent("alpha")
+
+    env = manager._env_for(manifest, Provision(env={}, mounts=(), a2a_port=None, image=None))  # noqa: SLF001
+
+    assert "ANTHROPIC_API_KEY" not in env
+
+
+def test_an_ipv6_proxy_address_keeps_its_brackets():
+    """hostname 은 IPv6 괄호를 벗긴다 — `@::1:8080` 은 프록시 주소가 아니다 (#294 리뷰)."""
+    from urllib.parse import urlsplit
+
+    from malkuth.runtime.deployments import EgressEndpoints
+
+    env = EgressEndpoints(
+        connect_url="http://[fd00::5]:8080", providers_url="http://[fd00::5]:8081"
+    ).env_for("alpha", "cred")
+
+    parsed = urlsplit(env["HTTPS_PROXY"])
+    assert (parsed.hostname, parsed.port, parsed.password) == ("fd00::5", 8080, "cred")

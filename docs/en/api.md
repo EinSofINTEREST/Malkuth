@@ -488,11 +488,12 @@ Memory Service. When agent traffic crosses hosts or any network you do not contr
 in front of the control plane and use `https`. The URL must be `http(s)://host[:port]` with nothing
 else — credentials, paths and queries in it are refused (`CFG_001`).
 
-**Enforcement is being rolled out point by point.** Memory and A2A calls are enforced today —
-the Memory Service in registry mode and each callee's A2A server ask for every request (see
-[Memory enforcement](#memory-enforcement) and [A2A enforcement](#a2a-enforcement)). Egress and
-remote MCP tools are recorded here but not yet enforced, so a decision for those kinds changes
-nothing the agent can reach.
+**Enforcement is being rolled out point by point.** Memory, A2A calls and egress through the proxy
+are enforced today — the Memory Service in registry mode, each callee's A2A server and the egress
+proxy ask for every request (see [Memory enforcement](#memory-enforcement),
+[A2A enforcement](#a2a-enforcement) and [Egress enforcement](#egress-enforcement)). Two gaps
+remain: agents are not yet on a network without an external route, so a call that ignores
+`HTTPS_PROXY` still leaves unchecked; and remote MCP tools are not yet decided per tool.
 
 ### Three callers, three credentials
 
@@ -525,9 +526,10 @@ In order, first match wins:
 A revocation therefore beats both the declaration and any grant. For memory, revoking with
 `mode: "rw"` removes writing only — reading stays.
 
-Step 2 counts only for a resource kind whose enforcement point is in place — today, `memory` and
-`a2a`. For `a2a` the declaration is the `connections` of the graph the caller is **currently
-deployed in**; a graph on disk that is not deployed grants nothing.
+Step 2 counts only for a resource kind whose enforcement point is in place — today, `memory`,
+`a2a` and `egress`. For `a2a` the declaration is the `connections` of the graph the caller is
+**currently deployed in**; a graph on disk that is not deployed grants nothing. For `egress` it is
+the manifest's `runtime.egress`, the model provider's host and any external MCP server's host.
 Each kind's declaration check is wired together with the enforcement point that uses it, so the
 declaration and its enforcement cannot drift apart. Until then, a declaration contributes
 nothing for that kind, and a request with no grant is `deny` with `decided_by: "default"`.
@@ -688,6 +690,69 @@ answers, cached decisions older than two seconds are asked again.
 tokens; a Memory Service still in token mode does not know them and refuses every agent. The
 reverse — a registry-mode Memory Service with a control plane that has no registry — refuses
 every agent too, because nothing issues identities.
+
+### Egress enforcement
+
+The egress proxy (`python -m malkuth.egress`, image `malkuth/egress-proxy`) is the path agents take
+to anything outside. It hosts no tools; it decides and forwards.
+
+| Listener | What agents send | Decided as |
+|---|---|---|
+| CONNECT (`8080`) | HTTPS through `HTTPS_PROXY`, identity as proxy credentials | `egress` on `host[:port]` — `:443` is left out |
+| Provider (`8081`) | model API calls to `ANTHROPIC_BASE_URL`, identity in place of the key | `egress` on the provider host (`api.anthropic.com`) |
+
+The proxy never looks inside TLS. For model calls it removes the agent's identity, adds the key it
+holds, and streams the provider's answer back, so **the agent's environment never has the model key**
+and revoking model access needs no redeploy.
+
+Turn it on in the control plane:
+
+```yaml
+runtime:
+  egress_proxy:
+    connect_url: http://malkuth-egress:8080
+    providers_url: http://malkuth-egress:8081
+```
+
+Deployments then give each agent `HTTPS_PROXY` (its own identity as credentials),
+`ANTHROPIC_BASE_URL` pointing at the proxy, and its identity where `ANTHROPIC_API_KEY` was. Plain
+`http` is not proxied — framework services on the agent network stay direct. `runtime.egress_proxy`
+without `orchestrator.access_store` refuses to start (`CFG_001`).
+
+Declare destinations in the manifest — host or `host:port`, no wildcards, schemes or paths:
+
+```yaml
+spec:
+  runtime:
+    egress: [api.search.example.com, feeds.example.com:8443]
+```
+
+The proxy process takes:
+
+| Variable | Meaning |
+|---|---|
+| `MALKUTH_ACCESS_URL`, `MALKUTH_ACCESS_ENFORCER_TOKEN` | the registry — both required, or it refuses to start |
+| `ANTHROPIC_API_KEY` | the key the proxy adds to model calls |
+| `MALKUTH_EGRESS_ANTHROPIC_UPSTREAM` | where model calls go (default `https://api.anthropic.com`) |
+| `MALKUTH_EGRESS_ALLOW_PLAINTEXT_UPSTREAM` | `true` to accept an `http` upstream — for a test double only, since the key travels to it |
+| `MALKUTH_EGRESS_PORT`, `MALKUTH_EGRESS_PROVIDER_PORT` | the CONNECT and provider listeners (default `8080`, `8081`) |
+| `MALKUTH_EGRESS_MODE` | `enforce` (default) or `record` |
+| `MALKUTH_EGRESS_PRIVATE_DESTINATIONS` | comma-separated targets allowed to resolve to private addresses |
+
+Responses: a denied destination is `403` (`ACC_001`); no decision while the registry is unreachable
+and nothing is cached is `503` (`ACC_002`); a missing or unknown identity is `407` on CONNECT and
+`401` on the provider listener. A malformed setting refuses to start (`CFG_001`), and so does the proxy
+when its registry feed or either listener ends — run it under a restart policy.
+
+**Private addresses.** The proxy sits on the external network, so it can reach what agents cannot —
+cloud metadata addresses, services on the host. A destination that resolves to a private, loopback,
+link-local or shared (CGNAT) address is refused unless it is listed in
+`MALKUTH_EGRESS_PRIVATE_DESTINATIONS`, and the proxy connects to the address it checked, so a name
+cannot be re-pointed between the decision and the connection.
+
+**Record mode.** `record` logs a denial (`egress denied but recorded only`) and lets the call
+through. Use it to surface undeclared destinations before enforcing. A missing or unknown identity,
+or a registry that cannot decide, is refused in both modes — there is no agent to record.
 
 ### A2A enforcement
 

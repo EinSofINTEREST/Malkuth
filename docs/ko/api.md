@@ -471,10 +471,11 @@ orchestrator:
 넘거나 통제하지 않는 네트워크를 지나면 control plane 앞에서 TLS 를 종단하고 `https` 를 쓴다. 주소는
 `http(s)://host[:port]` 만 받는다 — 자격·경로·쿼리가 들어 있으면 거부한다 (`CFG_001`).
 
-**강제는 지점별로 차례차례 들어온다.** 메모리와 A2A 호출은 지금 강제된다 — 레지스트리 모드의
-Memory Service 와 피호출자의 A2A 서버가 요청마다 묻는다 ([메모리 강제](#메모리-강제),
-[A2A 강제](#a2a-강제) 참조). 이그레스와 원격 MCP 도구는 여기에 기록되지만 아직 강제되지 않으므로,
-그 종류의 판정은 에이전트가 닿는 범위를 바꾸지 않는다.
+**강제는 지점별로 차례차례 들어온다.** 메모리, A2A 호출, 프록시를 거친 이그레스는 지금 강제된다 —
+레지스트리 모드의 Memory Service, 피호출자의 A2A 서버, 이그레스 프록시가 요청마다 묻는다
+([메모리 강제](#메모리-강제), [A2A 강제](#a2a-강제), [이그레스 강제](#이그레스-강제) 참조). 남은 틈은
+둘이다: 에이전트가 아직 외부 경로 없는 네트워크에 있지 않아 `HTTPS_PROXY` 를 무시한 호출은 판정 없이
+나간다. 원격 MCP 도구는 아직 도구 단위로 판정하지 않는다.
 
 ### 호출자 셋, 자격 셋
 
@@ -507,8 +508,10 @@ SHA-256 해시만 저장하며, 값은 어떤 API 응답에도 실리지 않는�
 따라서 회수는 선언과 부여를 모두 이긴다. 메모리에 `mode: "rw"` 로 회수하면 쓰기만 막고 읽기는
 남는다.
 
-2단계는 강제 지점이 갖춰진 자원 종류에만 적용된다 — 지금은 `memory` 와 `a2a`. `a2a` 의 선언은 호출자가
-**지금 배포된** 그래프의 `connections` 다. 저장소에 있어도 배포되지 않은 그래프는 아무것도 허용하지 않는다. 종류별 선언 판정은 그것을
+2단계는 강제 지점이 갖춰진 자원 종류에만 적용된다 — 지금은 `memory`, `a2a`, `egress`. `a2a` 의 선언은
+호출자가 **지금 배포된** 그래프의 `connections` 다. 저장소에 있어도 배포되지 않은 그래프는 아무것도
+허용하지 않는다. `egress` 의 선언은 매니페스트의 `runtime.egress`, 모델 provider 호스트, external MCP
+서버 호스트다. 종류별 선언 판정은 그것을
 쓰는 강제 지점과 함께 연결되므로, 선언과 강제가 따로 놀 수 없다. 그 전까지는 해당 종류에서 선언이
 아무것도 허용하지 않고, 부여가 없는 요청은 `decided_by: "default"` 로 `deny` 된다.
 
@@ -661,6 +664,67 @@ Memory Service 는 환경에 아래 둘이 **모두** 있으면 **레지스트�
 **양쪽을 함께 켠다.** `access_store` 를 켠 control plane 은 신원을 메모리 토큰으로 넣는데, 토큰 모드로
 남은 Memory Service 는 그 신원을 몰라 모든 에이전트를 거부한다. 반대로 레지스트리 모드 Memory Service
 와 레지스트리 없는 control plane 도 신원을 발급하는 곳이 없어 모든 에이전트를 거부한다.
+
+### 이그레스 강제
+
+이그레스 프록시(`python -m malkuth.egress`, 이미지 `malkuth/egress-proxy`)는 에이전트가 바깥으로 나가는
+길이다. 도구를 호스팅하지 않고, 판정하고 전달만 한다.
+
+| 창구 | 에이전트가 보내는 것 | 판정 |
+|---|---|---|
+| CONNECT (`8080`) | `HTTPS_PROXY` 를 통한 HTTPS, 프록시 자격으로 신원 | `host[:port]` 에 대한 `egress` — `:443` 은 생략 |
+| Provider (`8081`) | `ANTHROPIC_BASE_URL` 로 가는 모델 API 호출, 키 자리에 신원 | provider 호스트(`api.anthropic.com`) 에 대한 `egress` |
+
+프록시는 TLS 안을 보지 않는다. 모델 호출에서는 에이전트 신원을 떼고 자기가 쥔 키를 붙인 뒤 provider 의
+응답을 그대로 흘려보내므로, **에이전트 환경에는 모델 키가 없고** 모델 접근 회수에 재배포가 필요 없다.
+
+control plane 에서 켠다:
+
+```yaml
+runtime:
+  egress_proxy:
+    connect_url: http://malkuth-egress:8080
+    providers_url: http://malkuth-egress:8081
+```
+
+그러면 배포가 에이전트마다 `HTTPS_PROXY`(자기 신원을 자격으로), 프록시를 가리키는 `ANTHROPIC_BASE_URL`,
+그리고 `ANTHROPIC_API_KEY` 자리에 신원을 넣는다. 평문 `http` 는 프록시로 보내지 않는다 — 에이전트
+네트워크의 프레임워크 서비스는 그대로 직접 닿는다. `orchestrator.access_store` 없이
+`runtime.egress_proxy` 를 켜면 기동을 거부한다 (`CFG_001`).
+
+목적지는 매니페스트에 선언한다 — 호스트 또는 `host:port`, 와일드카드·스킴·경로는 받지 않는다:
+
+```yaml
+spec:
+  runtime:
+    egress: [api.search.example.com, feeds.example.com:8443]
+```
+
+프록시 프로세스 설정:
+
+| 변수 | 의미 |
+|---|---|
+| `MALKUTH_ACCESS_URL`, `MALKUTH_ACCESS_ENFORCER_TOKEN` | 레지스트리 — 둘 다 필수, 없으면 기동 거부 |
+| `ANTHROPIC_API_KEY` | 프록시가 모델 호출에 붙이는 키 |
+| `MALKUTH_EGRESS_ANTHROPIC_UPSTREAM` | 모델 호출이 가는 곳 (기본 `https://api.anthropic.com`) |
+| `MALKUTH_EGRESS_ALLOW_PLAINTEXT_UPSTREAM` | `true` 면 `http` upstream 을 받는다 — 키가 그리로 가므로 테스트용 대역에만 |
+| `MALKUTH_EGRESS_PORT`, `MALKUTH_EGRESS_PROVIDER_PORT` | CONNECT 창구와 provider 창구 (기본 `8080`, `8081`) |
+| `MALKUTH_EGRESS_MODE` | `enforce`(기본) 또는 `record` |
+| `MALKUTH_EGRESS_PRIVATE_DESTINATIONS` | 사설 주소로 풀려도 되는 목적지, 쉼표로 |
+
+응답: 거부된 목적지는 `403`(`ACC_001`), 레지스트리에 닿지 않고 캐시도 없어 판정하지 못하면
+`503`(`ACC_002`), 신원이 없거나 모르는 신원이면 CONNECT 는 `407`, provider 창구는 `401` 이다. 설정 형식이
+틀리면 기동을 거부하고(`CFG_001`), 판정 피드나 두 창구 중 하나가 끝나도 프로세스가 멈춘다 — 재시작
+정책 아래에서 돌린다.
+
+**사설 주소.** 프록시는 외부 네트워크에 있으므로 에이전트가 닿지 못하는 곳 — 클라우드 메타데이터 주소,
+호스트의 서비스 — 에 닿을 수 있다. 사설·루프백·링크 로컬·공유(CGNAT) 주소로 풀리는 목적지는
+`MALKUTH_EGRESS_PRIVATE_DESTINATIONS` 에 없으면 거부하고, 프록시는 확인한 주소로 연결하므로 판정과 연결
+사이에 이름이 다른 주소로 바뀌지 못한다.
+
+**기록 모드.** `record` 는 거부를 로그(`egress denied but recorded only`)로 남기고 통과시킨다. 강제하기
+전에 선언되지 않은 목적지를 드러낼 때 쓴다. 신원이 없거나 모르는 신원, 판정할 수 없는 경우는 두 모드
+모두 거부한다 — 기록할 에이전트가 없다.
 
 ### A2A 강제
 

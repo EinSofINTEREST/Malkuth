@@ -399,3 +399,30 @@ def test_an_agent_facing_registry_url_is_accepted(url):
     from malkuth.config import OrchestratorConfig
 
     assert OrchestratorConfig(access_agent_url=url).access_agent_url == url
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        {"connect_url": "https://egress:8080"},
+        {"connect_url": "http://agent:secret@egress:8080"},
+        {"providers_url": "http://egress:8081/anthropic"},
+        {"providers_url": "egress:8081"},
+    ],
+)
+def test_egress_proxy_urls_are_bare_http_addresses(field):
+    """자격은 배포가 에이전트마다 붙인다 — 설정에 박힌 자격은 모든 에이전트가 나눠 갖는다."""
+    from malkuth.config import EgressProxyConfig
+
+    values = {"connect_url": "http://egress:8080", "providers_url": "http://egress:8081", **field}
+    with pytest.raises(ValidationError):
+        EgressProxyConfig(**values)
+
+
+@pytest.mark.parametrize("url", ["http://egress", "http://egress:8080#frag"])
+def test_egress_proxy_urls_need_a_port_and_nothing_extra(url):
+    """포트가 없으면 80 으로 가서 8080·8081 창구에 닿지 않는다 (#294 리뷰)."""
+    from malkuth.config import EgressProxyConfig
+
+    with pytest.raises(ValidationError):
+        EgressProxyConfig(connect_url=url, providers_url="http://egress:8081")

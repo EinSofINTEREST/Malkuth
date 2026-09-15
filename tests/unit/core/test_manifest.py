@@ -478,3 +478,71 @@ def test_builder_replaces_non_mapping_values():
     raw = manifest_dict(spec={"skillsets": [{"ref": "skillsets/x@0.1.0"}]})
 
     assert raw["spec"]["skillsets"] == [{"ref": "skillsets/x@0.1.0"}]
+
+
+# --- 이그레스 목적지 (#293) ------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "destination", ["api.example.com", "fake-provider:8000", "localhost", "a-b.c-d.example.com:443"]
+)
+def test_an_explicit_egress_destination_is_accepted(destination):
+    from malkuth.core.manifest import RuntimeSpec
+
+    assert RuntimeSpec(egress=(destination,)).egress == (destination,)
+
+
+@pytest.mark.parametrize(
+    "destination",
+    [
+        "*.example.com",
+        "*",
+        "https://api.example.com",
+        "api.example.com/path",
+        "API.example.com",
+        "",
+        "host:",
+    ],
+)
+def test_a_vague_egress_destination_is_refused(destination):
+    """와일드카드·스킴·경로를 받으면 선언이 "어디든" 이 된다."""
+    from pydantic import ValidationError
+
+    from malkuth.core.manifest import RuntimeSpec
+
+    with pytest.raises(ValidationError):
+        RuntimeSpec(egress=(destination,))
+
+
+@pytest.mark.parametrize(
+    "destination", ["api.example.com:0", "api.example.com:65536", "api.example.com:99999"]
+)
+def test_an_egress_port_outside_the_valid_range_is_refused(destination):
+    """범위 밖 포트는 어떤 CONNECT 와도 맞지 않는다 — 선언이 조용히 쓸모없어진다 (#294 리뷰)."""
+    from pydantic import ValidationError
+
+    from malkuth.core.manifest import RuntimeSpec
+
+    with pytest.raises(ValidationError):
+        RuntimeSpec(egress=(destination,))
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://mcp.example:99999/mcp",
+        "ftp://mcp.example/mcp",
+        "mcp.example/mcp",
+        "https://:443/mcp",
+        "https://user:secret@mcp.example/mcp",
+        "https://token@mcp.example/mcp",
+    ],
+)
+def test_an_external_mcp_url_must_be_a_valid_http_url(url):
+    """판정이 선언을 풀다 터지면 그 에이전트의 판정 전체가 멈춘다 (#294 리뷰)."""
+    from pydantic import ValidationError
+
+    from malkuth.core.manifest import McpServerSpec
+
+    with pytest.raises(ValidationError):
+        McpServerSpec(name="corp", transport="streamable-http", url=url)

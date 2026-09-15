@@ -165,6 +165,15 @@ auto-recall 은 프롬프트에 붙는 것이 전부라, 저장이 됐다는 것
 MAX_SEEN = 50
 
 
+_KEYS: list[str] = []
+"""받은 ``x-api-key`` — **E2E 전용.** 이그레스 프록시가 신원을 떼고 진짜 키를 붙였는지 본다."""
+
+
+def _remember_key(key: str) -> None:
+    _KEYS.append(key)
+    del _KEYS[:-MAX_SEEN]
+
+
 def _remember(prompt: str) -> None:
     """최근 프롬프트를 기억한다 — 오래된 것부터 버린다."""
     _SEEN.append(prompt)
@@ -178,6 +187,7 @@ class Handler(BaseHTTPRequestHandler):
         """모델 호출 요청에 결정적으로 응답한다."""
         length = min(int(self.headers.get("content-length", 0)), MAX_BODY_BYTES)
         raw = self.rfile.read(length) if length else b"{}"
+        _remember_key(self.headers.get("x-api-key", ""))
         try:
             payload = json.loads(raw)
         except json.JSONDecodeError:
@@ -206,6 +216,8 @@ class Handler(BaseHTTPRequestHandler):
         """
         if self.path.rstrip("/").endswith("/prompts"):
             body = json.dumps(_SEEN).encode()
+        elif self.path.rstrip("/").endswith("/keys"):
+            body = json.dumps(_KEYS).encode()
         else:
             body = b'{"status":"healthy"}'
         self.send_response(200)

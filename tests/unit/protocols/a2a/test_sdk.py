@@ -316,3 +316,31 @@ async def test_a_deep_chain_is_refused_on_the_real_sdk_path():
         )
 
     assert exc_info.value.code == ErrorCode.A2A_005
+
+
+async def test_a_peer_failure_carries_its_structured_reason_to_the_caller():
+    """상태만 보내면 호출자는 실패만 안다 — 권한 에이전트의 거절 코드 같은 **왜**가 필요하다."""
+    from malkuth.core.errors import ErrorCategory
+
+    async def handler(task):
+        return TaskResult.failed(
+            task,
+            MalkuthError(
+                category=ErrorCategory.FORBIDDEN, code="ACC_003", message="beyond the ceiling"
+            ),
+        )
+
+    app = serve(guard_for((CALLER, CALLEE)), handler)
+    transport = transport_to(app)
+
+    with pytest.raises(MalkuthError) as exc_info:
+        await transport.send(
+            callee=CALLEE,
+            task=make_task(),
+            token=issue_token(SECRET, Edge(caller=CALLER, callee=CALLEE)),
+            headers={},
+        )
+
+    assert exc_info.value.code == ErrorCode.A2A_003
+    assert exc_info.value.details["peer_error"]["code"] == "ACC_003"
+    assert exc_info.value.details["peer_error"]["message"] == "beyond the ceiling"

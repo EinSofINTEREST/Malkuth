@@ -259,7 +259,13 @@ class GuardedRequestHandler(DefaultRequestHandler):
 
 
 def encode_result(result: TaskResult) -> str:
-    """결과를 peer 가 읽을 본문으로 — ``read_output`` 의 짝."""
+    """결과를 peer 가 읽을 본문으로 — ``read_output`` 의 짝.
+
+    실패면 구조화 에러를 싣는다 — 상태만 보내면 호출자는 "실패했다" 만 알고 **왜**(예: 권한
+    에이전트의 ``ACC_003`` 거절)를 모른다. 에러 payload 는 호출자에게 보여도 되는 계약 표현이다.
+    """
+    if result.error is not None:
+        return json.dumps({"error": result.error.model_dump(mode="json")}, ensure_ascii=False)
     return json.dumps(result.output, ensure_ascii=False)
 
 

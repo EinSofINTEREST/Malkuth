@@ -607,7 +607,7 @@ async function loadAccess() {
   const now = Date.now() / 1000;
   $("#access-rules tbody").replaceChildren(...view.rules.map((rule) => {
     const state = ruleState(rule, now);
-    return el("tr", { dataset: { ruleId: rule.rule_id } }, [
+    return el("tr", { id: `rule-${rule.rule_id}` }, [
       el("td", { textContent: rule.effect }),
       el("td", { textContent: rule.kind }),
       el("td", { textContent: rule.target }),

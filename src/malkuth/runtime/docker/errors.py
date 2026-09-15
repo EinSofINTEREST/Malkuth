@@ -70,7 +70,9 @@ class NetworkIsolationError(Exception):
         self.actual = actual
 
 
-def network_mismatch(agent: str, image: str, err: NetworkIsolationError) -> MalkuthError:
+def network_mismatch(
+    agent: str, image: str, err: NetworkIsolationError, **details: Any
+) -> MalkuthError:
     """에이전트 네트워크의 격리가 runtime 과 다르다 — 설정 문제라 재시도해도 같다."""
     return runtime_error(
         ErrorCode.RT_001,
@@ -79,6 +81,7 @@ def network_mismatch(agent: str, image: str, err: NetworkIsolationError) -> Malk
         image=image,
         network=err.name,
         reason=str(err),
+        **details,
     )
 
 

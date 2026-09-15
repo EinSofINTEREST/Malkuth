@@ -132,6 +132,11 @@ class SdkDockerClient:
             raise LookupError(f"container port {container_port} is not published")
         return int(bindings[0]["HostPort"])
 
+    def networks_of(self, container_id: str) -> tuple[str, ...]:
+        container = self._sdk.containers.get(container_id)
+        container.reload()
+        return tuple(container.attrs["NetworkSettings"]["Networks"])
+
     def address_of(self, container_id: str, network: str) -> str:
         container = self._sdk.containers.get(container_id)
         container.reload()

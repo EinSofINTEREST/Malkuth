@@ -95,6 +95,10 @@ class DockerClient(Protocol):
         """컨테이너 포트에 매핑된 호스트 포트."""
         ...
 
+    def networks_of(self, container_id: str) -> tuple[str, ...]:
+        """컨테이너가 붙어 있는 네트워크 이름들."""
+        ...
+
     def address_of(self, container_id: str, network: str) -> str:
         """컨테이너가 이 네트워크에서 쓰는 주소 — 포트가 게시되지 않는 내부 네트워크에서 쓴다."""
         ...
@@ -248,6 +252,31 @@ class DockerEngine:
             return address, container_port
         port = await asyncio.to_thread(self.client.port_of, container_id, container_port)
         return LOOPBACK, port
+
+    async def verify_isolation(self, agent: str, image: str, container_id: str) -> None:
+        """Refuse a container that is not isolated the way this engine runs agents.
+
+        재부착은 기동을 거치지 않는다 — 프록시를 켜기 전에 일반 네트워크로 뜬 컨테이너, 누가 외부
+        네트워크를 더 붙인 컨테이너를 그대로 붙이면 외부 경로가 남은 채 "격리됨" 으로 다뤄진다.
+
+        Raises:
+            MalkuthError: RUNTIME/``RT_001`` (재시도 불가) — 네트워크가 내부가 아니거나, 컨테이너가
+                에이전트 네트워크 말고 다른 네트워크에도 붙어 있음.
+        """
+        if not self.internal:
+            return
+        try:
+            await asyncio.to_thread(self.client.ensure_network, self.network, internal=True)
+        except NetworkIsolationError as err:
+            raise network_mismatch(agent, image, err) from err
+        attached = await asyncio.to_thread(self.client.networks_of, container_id)
+        if set(attached) != {self.network}:
+            raise network_mismatch(
+                agent,
+                image,
+                NetworkIsolationError(self.network, expected=True, actual=False),
+                attached=sorted(attached),
+            )
 
     async def inspect(self, handle: ContainerHandle) -> dict[str, Any]:
         """컨테이너 상태를 조회한다."""

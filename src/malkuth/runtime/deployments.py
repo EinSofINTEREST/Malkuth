@@ -517,6 +517,8 @@ class DeploymentManager:
                 # 운영자에게 보인다. 조용히 붙이면 첫 재시작에서 넘어진다
                 self._mark_lost(record, f"cannot rebuild from declarations: {err.message}", touched)
                 continue
+            if not await self._isolated(record, touched):
+                continue
             missing = []
             for agent in record.agents:
                 # 이름으로 찾는다 — launcher 의 재시작이 컨테이너를 갈아 끼우면
@@ -539,6 +541,34 @@ class DeploymentManager:
             else:
                 touched.append(self._refresh(record))
         return touched
+
+    async def _isolated(self, record: DeploymentRecord, touched: list[DeploymentRecord]) -> bool:
+        """재부착 전에 배포의 모든 컨테이너가 runtime 의 격리대로 서 있는지 본다 (#280).
+
+        하나라도 아니면 아무것도 붙이지 않고 lost 로 두며 그 배포의 신원을 회수한다 — 외부 경로가
+        남은 컨테이너가 신원으로 메모리·peer·모델에 계속 닿지 못하게. 컨테이너는 지우지 않는다:
+        운영자가 원인을 보고 해체한다.
+        """
+        engine = self.launcher.engine
+        for agent in record.agents:
+            container_id = await asyncio.to_thread(
+                engine.client.find, container_name(agent.name, agent.replica)
+            )
+            if container_id is None:
+                continue  # 없는 컨테이너는 아래 대조가 missing 으로 보고한다
+            try:
+                await engine.verify_isolation(agent.name, agent.image, container_id)
+            except MalkuthError as err:
+                self._bind_log(record).error(
+                    "deployment not reattached — agent network isolation does not match",
+                    agent=agent.name,
+                    error_code=err.code,
+                    network=err.details.get("network"),
+                )
+                self._mark_lost(record, f"network isolation mismatch: {agent.name}", touched)
+                self._revoke_orphaned_identities(record)
+                return False
+        return True
 
     async def _live(self, agent: DeployedAgent) -> tuple[str, str, int] | None:
         """이 자리에 지금 서 있는 컨테이너의 (id, control 주소, control 포트) — 없으면 None."""

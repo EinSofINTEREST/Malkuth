@@ -23,6 +23,7 @@ from malkuth.core.agent import HealthState, HealthStatus
 from malkuth.core.errors import MalkuthError
 from malkuth.core.manifest import AgentManifest
 from malkuth.runtime.docker.engine import ContainerHandle, DockerEngine
+from malkuth.runtime.docker.errors import NetworkIsolationError
 from malkuth.runtime.health import HealthMonitor
 from malkuth.runtime.lifecycle import AgentLifecycle, AgentState
 from malkuth.runtime.spec import build_container_spec
@@ -80,16 +81,25 @@ class CliDockerClient:
             raise RuntimeError(f"image not built: {image}")
 
     def ensure_network(self, name: str, *, internal: bool = False) -> None:
-        flags = ["--internal"] if internal else []
-        docker("network", "create", "--driver", "bridge", *flags, name, check=False)
+        """SdkDockerClient 와 같은 계약 — 없으면 만들고, 있는데 격리가 다르면 거부한다."""
+        existing = docker("network", "inspect", "-f", "{{.Internal}}", name, check=False).strip()
+        if existing not in ("true", "false"):
+            flags = ["--internal"] if internal else []
+            docker("network", "create", "--driver", "bridge", *flags, name)
+            return
+        if (existing == "true") != internal:
+            raise NetworkIsolationError(name, expected=internal, actual=existing == "true")
+
+    def networks_of(self, container_id: str) -> tuple[str, ...]:
+        raw = docker("inspect", "-f", "{{json .NetworkSettings.Networks}}", container_id)
+        return tuple(json.loads(raw))
 
     def address_of(self, container_id: str, network: str) -> str:
-        return docker(
-            "inspect",
-            "-f",
-            f'{{{{(index .NetworkSettings.Networks "{network}").IPAddress}}}}',
-            container_id,
-        ).strip()
+        raw = docker("inspect", "-f", "{{json .NetworkSettings.Networks}}", container_id)
+        address = (json.loads(raw).get(network) or {}).get("IPAddress") or ""
+        if not address:
+            raise LookupError(f"container has no address on network {network}")
+        return address
 
     def create(self, **kwargs: Any) -> str:
         args = [

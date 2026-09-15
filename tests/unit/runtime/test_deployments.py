@@ -584,6 +584,74 @@ async def test_an_isolated_control_plane_reattaches_by_network_address(workspace
     await second.launcher.stop_all()
 
 
+@pytest.mark.parametrize(
+    ("network_error", "attached"),
+    [
+        # 프록시를 켜기 전 일반 네트워크로 뜬 배포
+        ("not internal", None),
+        # 내부 네트워크에 있지만 누가 외부 네트워크를 더 붙인 컨테이너
+        (None, ("agents", "bridge")),
+    ],
+)
+async def test_reattach_refuses_containers_that_are_not_isolated(
+    workspace, healthy, network_error, attached
+):
+    """재부착은 기동을 거치지 않는다 — 외부 경로가 남은 컨테이너를 격리된 것으로 붙이면 안 된다."""
+    from malkuth.runtime.docker.errors import NetworkIsolationError
+
+    catalog = Catalog.under(workspace)
+    store = InMemoryDeploymentStore()
+    first_docker = TrackingDocker()
+    first = DeploymentManager(
+        catalog=catalog,
+        author=Author(catalog=catalog),
+        store=store,
+        secrets_env={"ANTHROPIC_API_KEY": "k"},
+        launcher=AgentLauncher(
+            engine=DockerEngine(client=first_docker, network="agents"),
+            health_interval_s=10.0,
+            health_sleep=Tick(),
+        ),
+        ready_poll_s=0.0,
+        sleep=NoSleep(),
+    )
+    registry = with_access(first)
+    record = await first.deploy("two")
+    await first.launcher.stop_all()
+
+    later = TrackingDocker(
+        network_error=(
+            NetworkIsolationError("agents", expected=True, actual=False) if network_error else None
+        ),
+        attached=attached,
+    )
+    later.created = list(first_docker.created)
+    second = DeploymentManager(
+        catalog=catalog,
+        author=Author(catalog=catalog),
+        store=store,
+        secrets_env={"ANTHROPIC_API_KEY": "k"},
+        launcher=AgentLauncher(
+            engine=DockerEngine(client=later, network="agents", internal=True),
+            health_interval_s=10.0,
+            health_sleep=Tick(),
+        ),
+        ready_poll_s=0.0,
+        sleep=NoSleep(),
+    )
+    second.access = registry
+
+    touched = await second.reattach()
+
+    assert [(r.status, r.error) for r in touched] == [
+        (DeploymentStatus.LOST, "network isolation mismatch: alpha")
+    ]
+    assert second.launcher.launched == {}, "격리되지 않은 컨테이너를 붙였다"
+    for agent in record.agents:
+        with pytest.raises(MalkuthError):
+            registry.identify(agent.access_credential)  # 외부 경로가 남은 컨테이너의 신원은 회수
+
+
 async def test_reattach_hands_the_launcher_what_a_restart_needs(workspace, docker, healthy):
     wired_workspace(workspace)
     store = InMemoryDeploymentStore()

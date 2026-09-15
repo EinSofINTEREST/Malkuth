@@ -578,7 +578,8 @@ async def test_an_isolated_control_plane_reattaches_by_network_address(workspace
 
     assert [r.status for r in touched] == [DeploymentStatus.READY]
     for launched in second.launcher.launched.values():
-        assert launched.handle.control_url == "http://172.30.0.9:8080"
+        # 핸들만이 아니라 실제로 부르는 클라이언트가 그 주소를 써야 한다
+        assert launched.client.base_url == launched.handle.control_url == "http://172.30.0.9:8080"
     await first.launcher.stop_all()
     await second.launcher.stop_all()
 

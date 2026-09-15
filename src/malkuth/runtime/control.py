@@ -73,6 +73,11 @@ class ControlClient:
         """대상 에이전트 이름."""
         return self._agent
 
+    @property
+    def base_url(self) -> str:
+        """이 에이전트의 Control API 주소 — 게시 포트 또는 내부 네트워크 안 주소."""
+        return self._base_url
+
     async def aclose(self) -> None:
         """Release the underlying transport when this client owns it.
 

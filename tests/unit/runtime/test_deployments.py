@@ -1104,3 +1104,61 @@ async def test_registry_mode_gives_agents_the_registry_address_and_no_shared_sec
         assert env[A2A_EDGES_ENV] == "beta>alpha", "호출자 쪽 편의 검사는 그대로 쓴다"
     assert record.status == "ready"
     await manager.launcher.stop_all()
+
+
+# --- 권한 에이전트 (#279) ------------------------------------------------------------------
+
+
+async def test_a_running_permission_agent_becomes_a_peer_of_every_later_deployment(
+    workspace, docker, healthy
+):
+    """권한 에이전트는 다른 배포에 있다 — 떠 있으면 레지스트리 모드의 모두가 요청할 수 있다."""
+    from malkuth.access.client import ACCESS_URL_ENV
+
+    wired_workspace(workspace)
+    steward_doc = agent_doc("permission-agent")
+    steward_doc["spec"]["a2a"] = {"enabled": True}
+    write(workspace / "agents" / "permission-agent" / "manifest.yaml", steward_doc)
+    write(workspace / "graphs" / "permissions.yaml", graph_doc("permissions", ["permission-agent"]))
+
+    manager = wired_manager(workspace, docker)
+    registry = with_access(manager)
+    registry.stewards = frozenset({"permission-agent"})
+    manager.access_url = "http://control-plane:8700"
+
+    await manager.deploy("permissions")
+    port = manager.launcher.launched[("permission-agent", 0)].a2a_port
+    await manager.deploy("wired")
+
+    for agent in ("alpha", "beta"):
+        env = env_of(docker, agent)
+        assert f"{agent}>permission-agent" in env[A2A_EDGES_ENV].split(",")
+        assert f"permission-agent=malkuth-permission-agent-0:{port}" in env[A2A_PEERS_ENV].split(
+            ","
+        )
+        assert ACCESS_URL_ENV in env
+    steward_env = env_of(docker, "permission-agent")
+    assert "permission-agent>permission-agent" not in steward_env.get(A2A_EDGES_ENV, ""), (
+        "자기 자신을 peer 로"
+    )
+    await manager.launcher.stop_all()
+
+
+async def test_without_the_registry_address_no_permission_agent_is_wired(
+    workspace, docker, healthy
+):
+    """표 없이 부를 수 없다 — 레지스트리 모드가 아니면 권한 에이전트를 잇지 않는다."""
+    wired_workspace(workspace)
+    steward_doc = agent_doc("permission-agent")
+    steward_doc["spec"]["a2a"] = {"enabled": True}
+    write(workspace / "agents" / "permission-agent" / "manifest.yaml", steward_doc)
+    write(workspace / "graphs" / "permissions.yaml", graph_doc("permissions", ["permission-agent"]))
+    manager = wired_manager(workspace, docker)
+    registry = with_access(manager)
+    registry.stewards = frozenset({"permission-agent"})
+
+    await manager.deploy("permissions")
+    await manager.deploy("wired")
+
+    assert "permission-agent" not in env_of(docker, "alpha").get(A2A_EDGES_ENV, "")
+    await manager.launcher.stop_all()

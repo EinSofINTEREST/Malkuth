@@ -628,6 +628,7 @@ class DeploymentManager:
                     self.launcher.ports.release(name)
                 raise
 
+        stewards = self._running_stewards()
         provisions: dict[str, Provision] = {}
         for manifest in manifests:
             # base 이미지 기본값(/app/manifest.yaml)이 아니라 디렉토리 마운트 안을 읽게 한다
@@ -638,8 +639,16 @@ class DeploymentManager:
                 env[ACCESS_CREDENTIAL_ENV] = credential
                 if self.access_url:
                     env[ACCESS_URL_ENV] = self.access_url
-            if edges:
-                env[A2A_EDGES_ENV] = ",".join(f"{caller}>{callee}" for caller, callee in edges)
+            # 권한 에이전트는 그래프 배선이 아니라 설정이 정한다 — 떠 있으면 모두가 요청할 수 있다.
+            # 호출은 표로만 증명되므로 레지스트리 모드에서만 잇는다
+            reachable = (
+                {s: a for s, a in stewards.items() if s != manifest.name}
+                if credential and self.access_url
+                else {}
+            )
+            own_edges = [*edges, *((manifest.name, s) for s in reachable)]
+            if own_edges:
+                env[A2A_EDGES_ENV] = ",".join(f"{caller}>{callee}" for caller, callee in own_edges)
                 if not (credential and self.access_url):
                     # 레지스트리 모드에서는 공유 서명 키를 넣지 않는다 — 그래프의 모든 에이전트가
                     # 쥐는 키로는 누구든 다른 에이전트 행세의 토큰을 만든다 (#281)
@@ -649,6 +658,7 @@ class DeploymentManager:
                 for caller, callee in edges
                 if caller == manifest.name and callee in assigned
             ]
+            peers += [f"{s}={address}" for s, address in reachable.items() if s not in assigned]
             if peers:
                 env[A2A_PEERS_ENV] = ",".join(peers)
             provisions[manifest.name] = Provision(
@@ -658,6 +668,21 @@ class DeploymentManager:
                 image=self._baked_image(manifest),
             )
         return provisions
+
+    def _running_stewards(self) -> dict[str, str]:
+        """지금 떠 있는 권한 에이전트의 A2A 주소 — 이름 → ``container:port``.
+
+        다른 배포에 속한 컨테이너다. 권한 에이전트를 나중에 세우면 이미 떠 있던 에이전트의 env 에는
+        없다 — env 는 기동 시 고정되므로 그 에이전트를 다시 배포해야 한다 (운영 문서에 적는다).
+        """
+        if self.access is None:
+            return {}
+        found: dict[str, str] = {}
+        for steward in sorted(self.access.stewards):
+            launched = self.launcher.launched.get((steward, 0))
+            if launched is not None and launched.a2a_port is not None:
+                found[steward] = f"{container_name(steward, 0)}:{launched.a2a_port}"
+        return found
 
     def _issue_identities(
         self, manifests: Sequence[AgentManifest], deployment_id: str, graph: str

@@ -287,7 +287,9 @@ def _access_registry(orchestrator: Any, catalog: Catalog, *, metrics: Any = None
         # a2a 는 피호출자의 A2A 서버 (#281)
         baselines={
             ResourceKind.MEMORY: MemoryBaseline(catalog),
-            ResourceKind.A2A: A2ABaseline(catalog, store),
+            ResourceKind.A2A: A2ABaseline(
+                catalog, store, stewards=frozenset(orchestrator.access_stewards)
+            ),
         },
         metrics=metrics,
     )

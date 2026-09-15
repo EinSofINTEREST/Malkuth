@@ -270,3 +270,27 @@ def test_expired_and_excess_tickets_are_pruned(tmp_path, clock, store_kind):
     kept = [t for t in fresh if store.ticket(credential_hash(t)) is not None]
     assert kept == fresh[-TICKETS_PER_EDGE:], "간선마다 최신 몇 개만 남겨야 한다"
     assert registry.verify_ticket(callee, fresh[-1]).allowed
+
+
+def test_any_deployed_agent_may_ask_a_designated_permission_agent(tmp_path):
+    """권한 에이전트는 배선이 아니라 운영자 설정이 정한다 — 요청일 뿐 부여는 규칙과 상한이 한다."""
+    catalog = Catalog.under(REPO_ROOT)
+    store = InMemoryAccessStore()
+    registry = AccessRegistry(
+        store=store,
+        catalog=catalog,
+        baselines={
+            ResourceKind.A2A: A2ABaseline(catalog, store, stewards=frozenset({"permission-agent"}))
+        },
+    )
+    writer = registry.issue_identity("writer", "dep-1", graph=GRAPH)
+    steward = registry.issue_identity("permission-agent", "dep-2", graph="permissions")
+    ticket, _ = registry.issue_ticket(writer, "permission-agent")
+
+    assert registry.verify_ticket(steward, ticket).allowed
+    back, _ = registry.issue_ticket(steward, "writer")
+    assert not registry.verify_ticket(writer, back).allowed, (
+        "권한 에이전트가 아무나 부르게 되지 않는다"
+    )
+    selfish, _ = registry.issue_ticket(steward, "permission-agent")
+    assert not registry.verify_ticket(steward, selfish).allowed, "자기 자신은 요청 대상이 아니다"

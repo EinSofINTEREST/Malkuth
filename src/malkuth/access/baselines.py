@@ -94,17 +94,25 @@ class A2ABaseline:
     그래프의 ``connections`` 가 기본 권한이다 (03 Enforcement). 호출자가 **지금 배포된** 그래프만
     본다 — 같은 두 에이전트를 잇는 그래프가 저장소에 있어도 배포되지 않았으면 연결이 아니다.
 
+    권한 에이전트(``stewards``)는 예외다: 운영자가 설정으로 지정한 권한 에이전트에게는 모든
+    에이전트가 확장을 **요청**할 수 있어야 한다 (01 Access Control 3). 요청일 뿐 — 무엇을 줄지는
+    권한 에이전트의 규칙과 확장 상한이 정한다. 권한 에이전트가 자기 자신을 부르는 것은 아니다.
+
     Attributes:
         catalog: 그래프 선언.
         store: 호출자의 살아 있는 신원이 어느 그래프에 배포됐는지.
+        stewards: 운영자가 지정한 권한 에이전트 이름.
     """
 
     catalog: Catalog
     store: AccessStore
+    stewards: frozenset[str] = frozenset()
 
     def allows(
         self, agent: str, target: str, mode: Mode | None, identity: Identity | None = None
     ) -> bool:
+        if target in self.stewards and target != agent:
+            return True
         if identity is not None:
             # 요청한 신원의 배포 그래프만 본다 — 같은 이름으로 다른 그래프에 배포된 신원이 있어도
             # 그 그래프의 연결을 빌려 쓰지 못한다

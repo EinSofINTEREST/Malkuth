@@ -867,17 +867,29 @@ The proxy needs two more settings for this:
 | `MALKUTH_REPO_ROOT` | the declarations, mounted read-only — without it, remote MCP calls are `404` |
 | `MALKUTH_EGRESS_MCP_TOKENS` | comma-separated credential names the proxy may send to MCP servers, each set in the proxy's environment |
 
-**Only listed credential names are sent.** A declaration that names another secret, such as the model
-key, as `auth.token_env` gets `502` (`CFG_002`) instead of that value. A credential is never sent over
-plain `http` unless `MALKUTH_EGRESS_ALLOW_PLAINTEXT_UPSTREAM=true`, and a server that resolves to a
-private address must be listed in `MALKUTH_EGRESS_PRIVATE_DESTINATIONS`, like any destination.
+**Only listed credential names are sent.** A declaration that names another secret as
+`auth.token_env` gets `502` (`CFG_002`) instead of that value. The list itself may not name secrets the
+proxy holds for other purposes — `ANTHROPIC_API_KEY` or any `MALKUTH_*` name refuses to start
+(`CFG_001`). A remote MCP server must use `https`: plain `http` is refused (`502`) unless
+`MALKUTH_EGRESS_ALLOW_PLAINTEXT_UPSTREAM=true`, which is for test doubles only. A server that resolves to
+a private address must be listed in `MALKUTH_EGRESS_PRIVATE_DESTINATIONS`, like any destination.
+
+**Sessions belong to one agent and one server.** Every agent reaches a server with the same proxy
+credential, so the server cannot tell their sessions apart. The proxy signs each `mcp-session-id` it
+returns with the agent and server it was issued to, and strips and checks the signature on the way in.
+A session id used by another agent, for another server, or altered is `404`, which MCP clients answer
+by opening a new session. The signing key is derived from the proxy's registry credential, so sessions
+survive a proxy restart.
 
 Deployments leave remote MCP credentials out of the agent's environment. Declare them in a scope as
-usual (`env_allowlist` and a group or global `secrets` list) so validation can resolve them.
+usual (`env_allowlist` and a group or global `secrets` list) so validation can resolve them. A remote
+server's `auth.token_env` may not also appear in a stdio server's `env_allowlist` — the manifest is
+rejected, since the proxy-held credential would reach a process inside the container.
 
 Not covered: stdio MCP servers run inside the agent container, so their tools are not decided one by
 one — their outside effects go through the proxy's destination decisions, and local effects are not
-controlled at run time. Sidecar MCP servers are not routed through the proxy.
+controlled at run time. Sidecar MCP servers cannot be started by this runtime yet, so a graph whose
+agents declare one is refused at deployment (`VAL_002`).
 
 **agentd now starts the declared MCP sessions.** The tools are advertised on the card and run from the
 first task. A required server that fails stops startup (`MCP_001`), and reload keeps the live sessions.

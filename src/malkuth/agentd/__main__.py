@@ -21,6 +21,7 @@ import uvicorn
 import yaml
 
 from malkuth.agentd.a2a_server import build_peer_client
+from malkuth.agentd.mcp import build_mcp_client
 from malkuth.agentd.server import AgentRuntime, create_app
 from malkuth.agentd.telemetry import ExecutorTelemetry
 from malkuth.agentd.tools import AgentToolRegistry
@@ -273,14 +274,23 @@ async def build_executor(manifest: AgentManifest, *, metrics: Metrics | None = N
     from malkuth.modules.registry import ModuleRegistry
 
     registry = ModuleRegistry.under(Path(os.environ.get(ROOT_ENV, DEFAULT_ROOT)))
-    binding = await load_modules(
-        manifest,
-        registry,
-        memory=_memory_access(manifest.name),
-        # 03 은 "실행 중 peer 에게 위임한다" 를 규정하는데, 이 조립이 없어
-        # 에이전트는 **받을 수는 있고 걸 수는 없었다** (#193)
-        peers=build_peer_client(manifest),
-    )
+    # 선언한 MCP 서버의 세션 — 없으면 선언된 MCP 도구가 광고도 실행도 되지 않는다 (#282)
+    mcp = build_mcp_client(manifest, metrics=metrics)
+    try:
+        binding = await load_modules(
+            manifest,
+            registry,
+            memory=_memory_access(manifest.name),
+            # 03 은 "실행 중 peer 에게 위임한다" 를 규정하는데, 이 조립이 없어
+            # 에이전트는 **받을 수는 있고 걸 수는 없었다** (#193)
+            peers=build_peer_client(manifest),
+            mcp=mcp,
+        )
+    except BaseException:
+        # 필수 서버 하나가 실패하면 기동이 멈춘다 — 먼저 뜬 세션·자식 프로세스를 남기지 않는다
+        if mcp is not None:
+            await mcp.shutdown()
+        raise
 
     return Executor(
         agent=manifest.name,
@@ -329,6 +339,8 @@ async def load_modules(
         manifest,
         promptset_loader=PromptsetLoader(registry),
         skillset_loader=SkillsetLoader(registry, generation=generation),
+        # 리로드도 같은 클라이언트를 넘긴다 — 떠 있는 세션은 다시 띄우지 않고 그 도구를 보고한다
+        mcp_launcher=mcp,
     ).run()
     tools = AgentToolRegistry(
         agent=manifest.name, skillsets=result.skillsets, memory=memory, peers=peers, mcp=mcp
@@ -614,7 +626,15 @@ def main() -> None:
     """
     manifest = load_manifest(Path(os.environ.get(MANIFEST_ENV, DEFAULT_MANIFEST_PATH)))
     metrics = _setup_observability()
-    executor = asyncio.run(build_executor(manifest, metrics=metrics))
+    asyncio.run(_run(manifest, metrics))
+
+
+async def _run(manifest: AgentManifest, metrics: Metrics) -> None:
+    """조립과 서빙을 **한 이벤트 루프**에서 — MCP 세션(자식 프로세스·HTTP 스트림)은 연 루프에 산다.
+
+    조립을 따로 ``asyncio.run`` 하면 그 루프가 닫히며 세션이 죽은 채 서빙이 시작된다.
+    """
+    executor = await build_executor(manifest, metrics=metrics)
     from malkuth.agentd.executor import Executor
 
     app = build_app(
@@ -638,10 +658,20 @@ def main() -> None:
         agent_version=manifest.metadata.version,
         port=CONTROL_PORT,
     )
-    _serve(app, manifest, executor)
+    try:
+        await _serve(app, manifest, executor)
+    finally:
+        await _close_mcp(executor)
 
 
-def _serve(app: Any, manifest: AgentManifest, executor: Any) -> None:
+async def _close_mcp(executor: Any) -> None:
+    """종료 시 MCP 세션과 자식 프로세스를 정리한다 — 좀비 금지 (03 Session Management 2)."""
+    mcp = getattr(getattr(getattr(executor, "binding", None), "tools", None), "mcp", None)
+    if mcp is not None:
+        await mcp.shutdown()
+
+
+async def _serve(app: Any, manifest: AgentManifest, executor: Any) -> None:
     """Control API 를 서빙하고, 선언되어 있으면 A2A 도 함께 띄운다.
 
     03 기동 순서 5단계 — 두 포트는 **별개 서버**다: Control 은 runtime 만,
@@ -652,10 +682,11 @@ def _serve(app: Any, manifest: AgentManifest, executor: Any) -> None:
     peer_app = build_a2a_app(manifest, executor.execute)
     port = a2a_port()
     if peer_app is None or port is None:
-        uvicorn.run(app, host="0.0.0.0", port=CONTROL_PORT, log_config=None)  # noqa: S104
+        config = uvicorn.Config(app, host="0.0.0.0", port=CONTROL_PORT, log_config=None)  # noqa: S104
+        await uvicorn.Server(config).serve()
         return
 
-    asyncio.run(_serve_both(app, peer_app, port))
+    await _serve_both(app, peer_app, port)
 
 
 async def _serve_both(control: Any, peer: Any, peer_port: int) -> None:

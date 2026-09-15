@@ -70,6 +70,10 @@ class McpClient:
         Raises:
             MalkuthError: MCP/``MCP_001`` if the server fails to initialize.
         """
+        live = self.sessions.get(spec.name)
+        if live is not None and live.connected:
+            # 리로드가 같은 기동 시퀀스를 탄다 — 떠 있는 세션을 다시 띄우면 연결과 스키마가 바뀐다
+            return live.tools
         session = McpSession(
             spec=spec,
             transport=self.transports.for_spec(spec),

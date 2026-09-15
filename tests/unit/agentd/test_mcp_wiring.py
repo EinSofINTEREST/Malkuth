@@ -159,3 +159,46 @@ def test_an_agent_without_mcp_servers_does_not_load_the_mcp_sdk():
     ).stdout.strip()
 
     assert out == "False"
+
+
+async def test_a_failure_after_the_modules_load_still_closes_the_sessions(
+    root,  # noqa: F811
+    monkeypatch,
+):
+    """세션이 열린 뒤 실행기를 만들다 실패해도 자식 프로세스를 남기지 않는다 (#298 리뷰)."""
+    stdio = FakeStdioClient(tools=["read_file"])
+    monkeypatch.setattr(agentd, "build_mcp_client", Launchers(stdio))
+    monkeypatch.setattr(
+        agentd, "_telemetry_for", lambda *a: (_ for _ in ()).throw(RuntimeError("x"))
+    )
+
+    with pytest.raises(RuntimeError):
+        await agentd.build_executor(with_servers(FS))
+
+    assert stdio.terminated == 1
+
+
+def test_a_failure_while_assembling_the_app_closes_the_sessions(
+    root,  # noqa: F811
+    tmp_path,
+    monkeypatch,
+):
+    stdio = FakeStdioClient(tools=["read_file"])
+    monkeypatch.setattr(agentd, "build_mcp_client", Launchers(stdio))
+    manifest_path = tmp_path / "manifest.yaml"
+    manifest_path.write_text(
+        yaml.safe_dump(with_servers(FS).model_dump(mode="json", by_alias=True, exclude_none=True)),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(agentd.MANIFEST_ENV, str(manifest_path))
+    monkeypatch.setattr(agentd, "_setup_observability", Metrics)
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("app assembly failed")
+
+    monkeypatch.setattr(agentd, "build_app", broken)
+
+    with pytest.raises(RuntimeError):
+        agentd.main()
+
+    assert stdio.terminated == 1

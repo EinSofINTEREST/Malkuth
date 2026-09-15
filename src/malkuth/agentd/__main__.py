@@ -264,6 +264,24 @@ async def build_executor(manifest: AgentManifest, *, metrics: Metrics | None = N
             details={"provider": manifest.spec.model.provider},
         )
 
+    from malkuth.modules.registry import ModuleRegistry
+
+    registry = ModuleRegistry.under(Path(os.environ.get(ROOT_ENV, DEFAULT_ROOT)))
+    # 선언한 MCP 서버의 세션 — 없으면 선언된 MCP 도구가 광고도 실행도 되지 않는다 (#282)
+    mcp = build_mcp_client(manifest, metrics=metrics)
+    try:
+        return await _standard_executor(manifest, registry, mcp, metrics=metrics)
+    except BaseException:
+        # 조립이 어디서 실패하든 먼저 뜬 세션·자식 프로세스를 남기지 않는다 — 넘겨준 뒤에는
+        # 실행기(binding.tools.mcp)를 받은 쪽이 정리한다
+        if mcp is not None:
+            await mcp.shutdown()
+        raise
+
+
+async def _standard_executor(
+    manifest: AgentManifest, registry: Any, mcp: Any, *, metrics: Metrics | None
+) -> Any:
     from malkuth.agentd.executor import (
         MODEL_RETRY_POLICIES,
         Executor,
@@ -271,27 +289,16 @@ async def build_executor(manifest: AgentManifest, *, metrics: Metrics | None = N
         ExecutorServices,
     )
     from malkuth.agentd.providers.anthropic import AnthropicModel
-    from malkuth.modules.registry import ModuleRegistry
 
-    registry = ModuleRegistry.under(Path(os.environ.get(ROOT_ENV, DEFAULT_ROOT)))
-    # 선언한 MCP 서버의 세션 — 없으면 선언된 MCP 도구가 광고도 실행도 되지 않는다 (#282)
-    mcp = build_mcp_client(manifest, metrics=metrics)
-    try:
-        binding = await load_modules(
-            manifest,
-            registry,
-            memory=_memory_access(manifest.name),
-            # 03 은 "실행 중 peer 에게 위임한다" 를 규정하는데, 이 조립이 없어
-            # 에이전트는 **받을 수는 있고 걸 수는 없었다** (#193)
-            peers=build_peer_client(manifest),
-            mcp=mcp,
-        )
-    except BaseException:
-        # 필수 서버 하나가 실패하면 기동이 멈춘다 — 먼저 뜬 세션·자식 프로세스를 남기지 않는다
-        if mcp is not None:
-            await mcp.shutdown()
-        raise
-
+    binding = await load_modules(
+        manifest,
+        registry,
+        memory=_memory_access(manifest.name),
+        # 03 은 "실행 중 peer 에게 위임한다" 를 규정하는데, 이 조립이 없어
+        # 에이전트는 **받을 수는 있고 걸 수는 없었다** (#193)
+        peers=build_peer_client(manifest),
+        mcp=mcp,
+    )
     return Executor(
         agent=manifest.name,
         model=AnthropicModel(config=manifest.spec.model, agent=manifest.name),
@@ -635,30 +642,30 @@ async def _run(manifest: AgentManifest, metrics: Metrics) -> None:
     조립을 따로 ``asyncio.run`` 하면 그 루프가 닫히며 세션이 죽은 채 서빙이 시작된다.
     """
     executor = await build_executor(manifest, metrics=metrics)
-    from malkuth.agentd.executor import Executor
-
-    app = build_app(
-        manifest,
-        executor,
-        token=os.environ.get(TOKEN_ENV),
-        # 광고와 실행이 같은 목록을 봐야 peer 가 부를 수 없는 skill 을 보지 않는다
-        tools=getattr(executor, "tool_schemas", ()),
-        # 모듈에서 도구를 만드는 표준 실행기만 리로드할 것이 있다. 커스텀 entrypoint 가
-        # Executor 를 돌려주더라도 그 배선은 표준 조립과 다를 수 있으므로 리로드하지 않는다
-        reload=(
-            build_reload(manifest, executor)
-            if manifest.spec.entrypoint is None and isinstance(executor, Executor)
-            else None
-        ),
-    )
-
-    log.info(
-        "agentd starting",
-        agent=manifest.name,
-        agent_version=manifest.metadata.version,
-        port=CONTROL_PORT,
-    )
+    # 실행기를 받은 순간부터 세션 정리는 여기 몫이다 — 앱 조립이 실패해도 세션을 남기지 않는다
     try:
+        from malkuth.agentd.executor import Executor
+
+        app = build_app(
+            manifest,
+            executor,
+            token=os.environ.get(TOKEN_ENV),
+            # 광고와 실행이 같은 목록을 봐야 peer 가 부를 수 없는 skill 을 보지 않는다
+            tools=getattr(executor, "tool_schemas", ()),
+            # 모듈에서 도구를 만드는 표준 실행기만 리로드할 것이 있다. 커스텀 entrypoint 가
+            # Executor 를 돌려주더라도 그 배선은 표준 조립과 다를 수 있으므로 리로드하지 않는다
+            reload=(
+                build_reload(manifest, executor)
+                if manifest.spec.entrypoint is None and isinstance(executor, Executor)
+                else None
+            ),
+        )
+        log.info(
+            "agentd starting",
+            agent=manifest.name,
+            agent_version=manifest.metadata.version,
+            port=CONTROL_PORT,
+        )
         await _serve(app, manifest, executor)
     finally:
         await _close_mcp(executor)

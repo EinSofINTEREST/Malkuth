@@ -185,6 +185,62 @@ async def test_missing_auth_token_fails_startup():
     assert "s3cret" not in str(exc_info.value)
 
 
+REMOTE = {
+    "name": "corp-search",
+    "transport": "streamable-http",
+    "url": "https://mcp.example.com/mcp",
+    "auth": {"type": "bearer", "token_env": "CORP_TOKEN"},
+}
+
+
+def proxied(http: FakeHttpClient, identity: str | None = "cred-researcher") -> McpClient:
+    return McpClient(
+        agent="researcher",
+        transports=TransportSelector(
+            stdio=StdioTransport(agent="researcher", client=FakeStdioClient(), environ={}),
+            http=HttpTransport(
+                agent="researcher",
+                client=http,
+                sidecar_urls={"browser": "http://browser-sidecar:3000/mcp"},
+                environ={"CORP_TOKEN": "s3cret"},
+                proxy_url="http://malkuth-egress:8081/mcp/",
+                identity=identity,
+            ),
+        ),
+    )
+
+
+async def test_behind_the_egress_proxy_a_remote_server_goes_through_it_with_the_identity():
+    """주소는 서버 이름뿐, 자격은 신원 — 서버 자격은 프록시가 붙인다 (#282)."""
+    http = FakeHttpClient(["search"])
+
+    await proxied(http).start(McpServerSpec.model_validate(REMOTE))
+
+    assert http.connections == [
+        ("http://malkuth-egress:8081/mcp/corp-search", {"authorization": "Bearer cred-researcher"})
+    ]
+
+
+async def test_behind_the_proxy_without_an_identity_startup_fails():
+    with pytest.raises(MalkuthError) as exc_info:
+        await proxied(FakeHttpClient(), identity=None).start(McpServerSpec.model_validate(REMOTE))
+
+    assert exc_info.value.code == "MCP_001"
+
+
+async def test_a_sidecar_is_not_routed_through_the_proxy():
+    http = FakeHttpClient(["navigate"])
+    sidecar = {
+        "name": "browser",
+        "transport": "streamable-http",
+        "sidecar": {"image": "mcp/x:1.0.0"},
+    }
+
+    await proxied(http).start(McpServerSpec.model_validate(sidecar))
+
+    assert http.connections == [("http://browser-sidecar:3000/mcp", {})]
+
+
 # --- tool 라우팅 --------------------------------------------------------------
 
 

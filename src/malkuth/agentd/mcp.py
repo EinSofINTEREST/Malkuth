@@ -9,9 +9,15 @@ from __future__ import annotations
 import os
 from typing import TYPE_CHECKING
 
+from malkuth.access.registry import ACCESS_CREDENTIAL_ENV
 from malkuth.protocols.mcp.client import McpClient
 from malkuth.protocols.mcp.sdk import SdkHttpClient, SdkStdioClient
-from malkuth.protocols.mcp.transport import HttpTransport, StdioTransport, TransportSelector
+from malkuth.protocols.mcp.transport import (
+    MCP_PROXY_URL_ENV,
+    HttpTransport,
+    StdioTransport,
+    TransportSelector,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -35,7 +41,14 @@ def build_mcp_client(
         agent=agent,
         transports=TransportSelector(
             stdio=StdioTransport(agent=agent, client=SdkStdioClient(), environ=env),
-            http=HttpTransport(agent=agent, client=SdkHttpClient(), environ=env),
+            http=HttpTransport(
+                agent=agent,
+                client=SdkHttpClient(),
+                environ=env,
+                # 이그레스 프록시가 켜진 배포 — 원격 서버는 프록시가 종단하고 자격을 붙인다 (#282)
+                proxy_url=env.get(MCP_PROXY_URL_ENV) or None,
+                identity=env.get(ACCESS_CREDENTIAL_ENV) or None,
+            ),
         ),
         metrics=metrics,
     )

@@ -433,9 +433,11 @@ async def test_the_registry_reaches_deployments_and_the_served_app(tmp_path, mon
     a2a = deployments.access.baselines[ResourceKind.A2A]
     assert isinstance(a2a, A2ABaseline)
     assert a2a.store is deployments.access.store, "배포 기록과 다른 저장소를 보면 그래프를 모른다"
-    from malkuth.access.baselines import EgressBaseline
+    from malkuth.access.baselines import EgressBaseline, McpToolBaseline
 
     assert isinstance(deployments.access.baselines[ResourceKind.EGRESS], EgressBaseline)
+    # 빠지면 선언된 원격 MCP 도구가 전부 기본 거부된다 (#282)
+    assert isinstance(deployments.access.baselines[ResourceKind.MCP_TOOL], McpToolBaseline)
     # 계측기는 노출되는 것 하나 — 따로 만들면 기록은 되는데 아무도 못 본다
     assert deployments.access.metrics is served_metrics
     assert captured["run_metrics"] is served_metrics

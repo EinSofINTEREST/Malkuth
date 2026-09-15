@@ -180,3 +180,61 @@ def test_a_broken_mcp_url_that_slipped_past_validation_does_not_break_decisions(
     declared = EgressBaseline.declared(manifest)
 
     assert "api.anthropic.com" in declared and not any(t.startswith("x") for t in declared)
+
+
+# --- 원격 MCP 도구 (#282) ---------------------------------------------------------------
+
+
+def mcp_workspace(tmp_path: Path) -> Catalog:
+    researcher = agent("researcher")
+    researcher["spec"]["mcp"] = {
+        "servers": [
+            {"name": "corp", "transport": "streamable-http", "url": "https://mcp.corp.example/s"},
+            {
+                "name": "lab",
+                "transport": "streamable-http",
+                "url": "http://lab.internal:9000/mcp",
+                "allowed_tools": ["read"],
+            },
+            {"name": "fs", "transport": "stdio", "command": ["mcp-server-fs"]},
+        ]
+    }
+    write(tmp_path / "agents" / "researcher" / "manifest.yaml", researcher)
+    write(tmp_path / "agents" / "quiet" / "manifest.yaml", agent("quiet"))
+    return Catalog.under(tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("who", "target", "allowed", "why"),
+    [
+        ("researcher", "corp/search", True, "allowed_tools 없는 원격 서버의 도구"),
+        ("researcher", "lab/read", True, "allowed_tools 에 있는 도구"),
+        ("researcher", "lab/write", False, "allowed_tools 밖의 도구"),
+        ("researcher", "fs/read_file", False, "stdio 서버는 프록시가 보지 않는다"),
+        ("researcher", "ghost/search", False, "선언하지 않은 서버"),
+        ("researcher", "corp", False, "도구 이름이 없는 대상"),
+        ("researcher", "/search", False, "서버 이름이 없는 대상"),
+        ("quiet", "corp/search", False, "남의 선언"),
+        ("ghost", "corp/search", False, "없는 에이전트"),
+    ],
+)
+def test_declarations_decide_remote_mcp_tools(tmp_path, who, target, allowed, why):
+    from malkuth.access.baselines import McpToolBaseline
+
+    assert McpToolBaseline(mcp_workspace(tmp_path)).allows(who, target, None) is allowed, why
+
+
+@pytest.mark.parametrize(
+    ("url", "target"),
+    [
+        ("https://mcp.corp.example/s", "mcp.corp.example"),
+        ("http://lab.internal:9000/mcp", "lab.internal:9000"),
+        ("http://lab.internal/mcp", "lab.internal:80"),
+        ("https://x:99999/", None),
+        ("https:///nohost", None),
+    ],
+)
+def test_url_target_names_a_remote_server_like_the_egress_declaration(url, target):
+    from malkuth.access.baselines import url_target
+
+    assert url_target(url) == target

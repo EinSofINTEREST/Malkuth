@@ -295,7 +295,11 @@ class McpSession:
         except MalkuthError:
             raise
         except Exception as err:
-            raise tool_failed(self.agent, self.name, tool, reason=type(err).__name__) from err
+            # 서버·프록시가 준 사유를 싣는다 — 도구 판정 거부(ACC_001)는 메시지에만 있다. 신뢰할 수
+            # 없는 입력이므로 길이를 자르고 지시로 쓰지 않는다
+            raise tool_failed(
+                self.agent, self.name, tool, reason=type(err).__name__, detail=str(err)[:300]
+            ) from err
 
     async def reconnect(self) -> None:
         """Re-establish the session with exponential backoff.

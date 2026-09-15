@@ -424,7 +424,7 @@ async def test_completed_tasks_are_untracked():
 
 @pytest.mark.parametrize("path", ["/v1/invoke", "/v1/stream"])
 def test_a_caller_claimed_through_the_control_api_is_dropped(path):
-    """확인된 호출자는 A2A 수신 입구만 채운다 — 본문에 적은 이름으로 권한 에이전트를 속이지 못한다."""
+    """확인된 호출자는 A2A 수신 입구만 채운다 — 본문의 이름으로 권한 에이전트를 속이지 못한다."""
     seen = []
 
     class Recording(FakeExecutor):

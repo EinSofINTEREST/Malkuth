@@ -60,7 +60,7 @@ MCP_TARGET = "fake-mcp:8000"
 MCP_TOKEN = "e2e-remote-mcp-token"  # noqa: S105 — 프록시만 쥐는 테스트 값
 MCP_TOKEN_ENV = "CORP_MCP_TOKEN"  # noqa: S105 — 키 이름이다
 
-# 원격 MCP 서버 대역 — 프록시만 가진 자격이 없으면 401. 스택 네트워크에만 있다 (에이전트는 못 닿는다)
+# 원격 MCP 서버 대역 — 프록시가 쥔 자격이 없으면 401. 스택 네트워크에만 있다
 FAKE_MCP = f"""
 import uvicorn
 from mcp.server import MCPServer
@@ -242,6 +242,11 @@ def workspace(tmp_path: Path) -> Path:
         ]
     }
     manifest_path.write_text(yaml.safe_dump(manifest, sort_keys=False), encoding="utf-8")
+    # 자격은 스코프에 선언돼야 해석된다 — research 그룹 비밀로 둔다
+    group_path = root / "groups" / "research.yaml"
+    group = yaml.safe_load(group_path.read_text(encoding="utf-8"))
+    group["spec"]["secrets"] = [*group["spec"].get("secrets", []), MCP_TOKEN_ENV]
+    group_path.write_text(yaml.safe_dump(group, sort_keys=False), encoding="utf-8")
     return root
 
 

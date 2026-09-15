@@ -143,3 +143,19 @@ def test_the_daemon_builds_and_serves_on_one_loop_and_closes_sessions(
     assert loops["built"] is loops["served"], "세션을 연 루프가 닫힌 뒤에 서빙한다"
     assert loops["live_while_serving"] is True
     assert stdio.terminated == 1, "종료 시 MCP 세션을 닫지 않았다"
+
+
+def test_an_agent_without_mcp_servers_does_not_load_the_mcp_sdk():
+    """SDK import 만으로 기동이 늘어 health 창을 넘기면 runtime 이 뜨는 컨테이너를 재시작한다."""
+    import subprocess
+    import sys
+
+    probe = (
+        "import sys, malkuth.agentd.__main__;"
+        "print(any(m == 'mcp' or m.startswith('mcp.') for m in sys.modules))"
+    )
+    out = subprocess.run(  # noqa: S603
+        [sys.executable, "-c", probe], capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+    assert out == "False"

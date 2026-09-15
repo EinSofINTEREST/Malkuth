@@ -734,12 +734,15 @@ The proxy process takes:
 | `MALKUTH_ACCESS_URL`, `MALKUTH_ACCESS_ENFORCER_TOKEN` | the registry — both required, or it refuses to start |
 | `ANTHROPIC_API_KEY` | the key the proxy adds to model calls |
 | `MALKUTH_EGRESS_ANTHROPIC_UPSTREAM` | where model calls go (default `https://api.anthropic.com`) |
+| `MALKUTH_EGRESS_ALLOW_PLAINTEXT_UPSTREAM` | `true` to accept an `http` upstream — for a test double only, since the key travels to it |
+| `MALKUTH_EGRESS_PORT`, `MALKUTH_EGRESS_PROVIDER_PORT` | the CONNECT and provider listeners (default `8080`, `8081`) |
 | `MALKUTH_EGRESS_MODE` | `enforce` (default) or `record` |
 | `MALKUTH_EGRESS_PRIVATE_DESTINATIONS` | comma-separated targets allowed to resolve to private addresses |
 
 Responses: a denied destination is `403` (`ACC_001`); no decision while the registry is unreachable
 and nothing is cached is `503` (`ACC_002`); a missing or unknown identity is `407` on CONNECT and
-`401` on the provider listener.
+`401` on the provider listener. A malformed setting refuses to start (`CFG_001`), and so does the proxy
+when its registry feed or either listener ends — run it under a restart policy.
 
 **Private addresses.** The proxy sits on the external network, so it can reach what agents cannot —
 cloud metadata addresses, services on the host. A destination that resolves to a private, loopback,

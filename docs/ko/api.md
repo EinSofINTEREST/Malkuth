@@ -707,11 +707,15 @@ spec:
 | `MALKUTH_ACCESS_URL`, `MALKUTH_ACCESS_ENFORCER_TOKEN` | 레지스트리 — 둘 다 필수, 없으면 기동 거부 |
 | `ANTHROPIC_API_KEY` | 프록시가 모델 호출에 붙이는 키 |
 | `MALKUTH_EGRESS_ANTHROPIC_UPSTREAM` | 모델 호출이 가는 곳 (기본 `https://api.anthropic.com`) |
+| `MALKUTH_EGRESS_ALLOW_PLAINTEXT_UPSTREAM` | `true` 면 `http` upstream 을 받는다 — 키가 그리로 가므로 테스트용 대역에만 |
+| `MALKUTH_EGRESS_PORT`, `MALKUTH_EGRESS_PROVIDER_PORT` | CONNECT 창구와 provider 창구 (기본 `8080`, `8081`) |
 | `MALKUTH_EGRESS_MODE` | `enforce`(기본) 또는 `record` |
 | `MALKUTH_EGRESS_PRIVATE_DESTINATIONS` | 사설 주소로 풀려도 되는 목적지, 쉼표로 |
 
 응답: 거부된 목적지는 `403`(`ACC_001`), 레지스트리에 닿지 않고 캐시도 없어 판정하지 못하면
-`503`(`ACC_002`), 신원이 없거나 모르는 신원이면 CONNECT 는 `407`, provider 창구는 `401` 이다.
+`503`(`ACC_002`), 신원이 없거나 모르는 신원이면 CONNECT 는 `407`, provider 창구는 `401` 이다. 설정 형식이
+틀리면 기동을 거부하고(`CFG_001`), 판정 피드나 두 창구 중 하나가 끝나도 프로세스가 멈춘다 — 재시작
+정책 아래에서 돌린다.
 
 **사설 주소.** 프록시는 외부 네트워크에 있으므로 에이전트가 닿지 못하는 곳 — 클라우드 메타데이터 주소,
 호스트의 서비스 — 에 닿을 수 있다. 사설·루프백·링크 로컬·공유(CGNAT) 주소로 풀리는 목적지는

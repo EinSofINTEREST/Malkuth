@@ -8,6 +8,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from malkuth.config import (
     ENV_PREFIX,
@@ -373,3 +374,21 @@ def test_the_enforcer_token_must_differ_from_the_control_token():
         OrchestratorConfig(control_token="a", access_enforcer_token="b").access_enforcer_token
         == "b"
     )
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        {"connect_url": "https://egress:8080"},
+        {"connect_url": "http://agent:secret@egress:8080"},
+        {"providers_url": "http://egress:8081/anthropic"},
+        {"providers_url": "egress:8081"},
+    ],
+)
+def test_egress_proxy_urls_are_bare_http_addresses(field):
+    """자격은 배포가 에이전트마다 붙인다 — 설정에 박힌 자격은 모든 에이전트가 나눠 갖는다."""
+    from malkuth.config import EgressProxyConfig
+
+    values = {"connect_url": "http://egress:8080", "providers_url": "http://egress:8081", **field}
+    with pytest.raises(ValidationError):
+        EgressProxyConfig(**values)

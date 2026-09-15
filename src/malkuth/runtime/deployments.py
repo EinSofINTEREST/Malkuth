@@ -23,6 +23,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from urllib.parse import quote, urlsplit
 
 import structlog
 
@@ -354,6 +355,9 @@ class DeploymentManager:
     access: AccessRegistry | None = None
     """권한 레지스트리 (#277) — 있으면 에이전트마다 신원을 발급해 주입하고,
     해체·되감기 때 폐기한다."""
+    egress: EgressEndpoints | None = None
+    """이그레스 프록시 (#293) — 있으면 외부 HTTPS·모델 API 를 프록시로 보내고 모델 키를 넣지
+    않는다."""
     ready_timeout_s: float = DEFAULT_READY_TIMEOUT_S
     ready_poll_s: float = DEFAULT_READY_POLL_S
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
@@ -633,6 +637,8 @@ class DeploymentManager:
             if credential:
                 # 강제 지점에 내미는 에이전트 신원 (01 Access Control 6) — 배선이라 provision 에
                 env[ACCESS_CREDENTIAL_ENV] = credential
+                if self.egress is not None:
+                    env.update(self.egress.env_for(manifest.name, credential))
             if edges:
                 env[A2A_EDGES_ENV] = ",".join(f"{caller}>{callee}" for caller, callee in edges)
                 env[A2A_SECRET_ENV] = a2a_secret
@@ -773,6 +779,9 @@ class DeploymentManager:
             group_values=self.secrets_env,
             global_values=self.secrets_env,
         ).env_for(tuple(manifest.spec.runtime.env_allowlist))
+        if self.egress is not None:
+            # 프록시가 종단하는 서비스의 키는 에이전트에게 주지 않는다 — 프록시가 주입한다 (02)
+            scoped = {k: v for k, v in scoped.items() if k not in PROXY_TERMINATED_SECRETS}
         return {**self.agent_env, **scoped, **provision.env}
 
     def _memory_for(self, manifest: AgentManifest, provision: Provision) -> MemoryEndpoint | None:
@@ -868,6 +877,34 @@ def _relaunched(agent: DeployedAgent, launched: LaunchedAgent) -> DeployedAgent:
         control_port=launched.handle.control_port,
         a2a_port=launched.a2a_port,
     )
+
+
+PROXY_TERMINATED_SECRETS = frozenset({"ANTHROPIC_API_KEY"})
+"""이그레스 프록시가 종단해 스스로 주입하는 자격 — 에이전트 env 로 나가지 않는다."""
+
+
+@dataclass(frozen=True)
+class EgressEndpoints:
+    """The egress proxy as agent containers reach it."""
+
+    connect_url: str
+    providers_url: str
+
+    def env_for(self, agent: str, credential: str) -> dict[str, str]:
+        """이 에이전트의 외부 호출 배선 — 프록시 자격은 **그 에이전트의 신원**이다."""
+        parts = urlsplit(self.connect_url)
+        port = f":{parts.port}" if parts.port else ""
+        user = f"{quote(agent, safe='')}:{quote(credential, safe='')}"
+        proxy = f"{parts.scheme}://{user}@{parts.hostname}{port}"
+        return {
+            # 대소문자 둘 다 — 도구마다 읽는 쪽이 다르다. http 는 프록시로 보내지 않는다: 프레임워크
+            # 서비스(메모리·레지스트리·peer)는 사설 네트워크의 http 다
+            "HTTPS_PROXY": proxy,
+            "https_proxy": proxy,
+            "ANTHROPIC_BASE_URL": f"{self.providers_url.rstrip('/')}/anthropic",
+            # 키 자리에 신원을 싣는다 — 프록시가 떼고 진짜 키를 붙인다
+            "ANTHROPIC_API_KEY": credential,
+        }
 
 
 def _code(err: BaseException) -> str:

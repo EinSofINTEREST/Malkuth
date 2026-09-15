@@ -259,7 +259,8 @@ def test_expired_and_excess_tickets_are_pruned(tmp_path, clock, store_kind):
     caller = registry.issue_identity("researcher", "dep-1", graph=GRAPH)
     callee = registry.issue_identity("planner", "dep-1", graph=GRAPH)
 
-    old, _ = registry.issue_ticket(caller, "planner")
+    # 다른 간선의 표 — 간선별 상한이 아니라 만료 정리만이 이것을 지운다
+    old, _ = registry.issue_ticket(caller, "writer")
     clock.now += TICKET_TTL_S + 1
     fresh = [registry.issue_ticket(caller, "planner")[0] for _ in range(TICKETS_PER_EDGE + 3)]
 

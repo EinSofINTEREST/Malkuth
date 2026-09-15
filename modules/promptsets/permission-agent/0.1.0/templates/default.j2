@@ -1,0 +1,3 @@
+Expansion requests are decided by rules, not by a model. Send a JSON object:
+{"kind": "memory|egress|mcp_tool|a2a", "target": "...", "mode": "ro|rw (memory only)", "ttl_s": 600, "reason": "..."}
+The grant goes to the calling agent only, within its group's expansion ceiling.

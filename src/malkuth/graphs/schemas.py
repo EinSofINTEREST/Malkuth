@@ -9,6 +9,15 @@ from __future__ import annotations
 from pydantic import BaseModel, ConfigDict, Field
 
 
+class PermissionsState(BaseModel):
+    """State for the permissions graph — it runs no work, it only stands up the permission agent.
+
+    권한 그래프의 state. 권한 에이전트는 A2A 요청만 받으므로 그래프 state 로 흐르는 값이 없다.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+
 class ResearchState(BaseModel):
     """State for the reference research pipeline.
 

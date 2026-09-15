@@ -492,8 +492,8 @@ else — credentials, paths and queries in it are refused (`CFG_001`).
 are enforced today — the Memory Service in registry mode, each callee's A2A server and the egress
 proxy ask for every request (see [Memory enforcement](#memory-enforcement),
 [A2A enforcement](#a2a-enforcement) and [Egress enforcement](#egress-enforcement)). With the proxy
-on, agents sit on a network with no external route, so the proxy is the only way out. One gap
-remains: remote MCP tools are not yet decided per tool.
+on, agents sit on a network with no external route, so the proxy is the only way out, and remote MCP
+tools are decided one by one (see [Remote MCP tools](#remote-mcp-tools)).
 
 ### Three callers, three credentials
 
@@ -526,10 +526,12 @@ In order, first match wins:
 A revocation therefore beats both the declaration and any grant. For memory, revoking with
 `mode: "rw"` removes writing only — reading stays.
 
-Step 2 counts only for a resource kind whose enforcement point is in place — today, `memory`,
-`a2a` and `egress`. For `a2a` the declaration is the `connections` of the graph the caller is
-**currently deployed in**; a graph on disk that is not deployed grants nothing. For `egress` it is
-the manifest's `runtime.egress`, the model provider's host and any external MCP server's host.
+Step 2 counts only for a resource kind whose enforcement point is in place — today, all four:
+`memory`, `a2a`, `egress` and `mcp_tool`. For `a2a` the declaration is the `connections` of the graph
+the caller is **currently deployed in**; a graph on disk that is not deployed grants nothing. For
+`egress` it is the manifest's `runtime.egress`, the model provider's host and any external MCP
+server's host. For `mcp_tool` (`server/tool`) it is every tool of a remote server the manifest
+declares, or only its `allowed_tools` when those are listed.
 Each kind's declaration check is wired together with the enforcement point that uses it, so the
 declaration and its enforcement cannot drift apart. Until then, a declaration contributes
 nothing for that kind, and a request with no grant is `deny` with `decided_by: "default"`.
@@ -835,6 +837,50 @@ cannot be re-pointed between the decision and the connection.
 **Record mode.** `record` logs a denial (`egress denied but recorded only`) and lets the call
 through. Use it to surface undeclared destinations before enforcing. A missing or unknown identity,
 or a registry that cannot decide, is refused in both modes — there is no agent to record.
+
+#### Remote MCP tools
+
+The proxy also terminates remote MCP servers (`streamable-http` with a `url`). With
+`runtime.egress_proxy` on, agentd connects to `http://<proxy>:8081/mcp/<server>` instead of the declared
+URL and presents its identity where the server credential was. For every request the proxy:
+
+1. learns the agent from the identity and looks up **that agent's declaration** for the server's URL and
+   `auth.token_env` — the request names only the server, so an agent cannot point the proxy's
+   credential at another address;
+2. decides `egress` on the server's host, then `mcp_tool` on `server/tool` for every `tools/call`;
+3. drops the identity, adds the credential, and connects to the address it checked.
+
+Revoking one tool refuses the next call to it and leaves the server's other tools working:
+
+```json
+{"agent": "researcher", "kind": "mcp_tool", "target": "corp/search", "reason": "incident 311"}
+```
+
+A refused tool call is answered as a JSON-RPC error (`ACC_001: mcp_tool denied: corp/search`), which
+reaches the agent as `MCP_003` with the reason in `details.detail`. A batch containing a refused call is
+refused whole (`403`). A server the agent did not declare is `404`.
+
+The proxy needs two more settings for this:
+
+| Variable | Meaning |
+|---|---|
+| `MALKUTH_REPO_ROOT` | the declarations, mounted read-only — without it, remote MCP calls are `404` |
+| `MALKUTH_EGRESS_MCP_TOKENS` | comma-separated credential names the proxy may send to MCP servers, each set in the proxy's environment |
+
+**Only listed credential names are sent.** A declaration that names another secret, such as the model
+key, as `auth.token_env` gets `502` (`CFG_002`) instead of that value. A credential is never sent over
+plain `http` unless `MALKUTH_EGRESS_ALLOW_PLAINTEXT_UPSTREAM=true`, and a server that resolves to a
+private address must be listed in `MALKUTH_EGRESS_PRIVATE_DESTINATIONS`, like any destination.
+
+Deployments leave remote MCP credentials out of the agent's environment. Declare them in a scope as
+usual (`env_allowlist` and a group or global `secrets` list) so validation can resolve them.
+
+Not covered: stdio MCP servers run inside the agent container, so their tools are not decided one by
+one — their outside effects go through the proxy's destination decisions, and local effects are not
+controlled at run time. Sidecar MCP servers are not routed through the proxy.
+
+**agentd now starts the declared MCP sessions.** The tools are advertised on the card and run from the
+first task. A required server that fails stops startup (`MCP_001`), and reload keeps the live sessions.
 
 ### A2A enforcement
 

@@ -113,3 +113,52 @@ def test_a_declaration_change_is_read_on_the_next_decision(baseline, tmp_path):
 
     assert not baseline.allows("worker", "group:research:knowledge", Mode.RW)
     assert baseline.allows("worker", "group:research:knowledge", Mode.RO)
+
+
+# --- 이그레스 (#293) ------------------------------------------------------------------
+
+
+def egress_workspace(tmp_path: Path) -> Catalog:
+    researcher = agent("researcher")
+    researcher["spec"]["runtime"] = {"egress": ["api.search.example.com", "feeds.example.com:8443"]}
+    researcher["spec"]["mcp"] = {
+        "servers": [
+            {
+                "name": "corp",
+                "transport": "streamable-http",
+                "url": "https://mcp.corp.example.com/s",
+            },
+            {"name": "lab", "transport": "streamable-http", "url": "http://lab.internal:9000/mcp"},
+        ]
+    }
+    write(tmp_path / "agents" / "researcher" / "manifest.yaml", researcher)
+    write(tmp_path / "agents" / "quiet" / "manifest.yaml", agent("quiet"))
+    return Catalog.under(tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("who", "target", "allowed", "why"),
+    [
+        ("researcher", "api.search.example.com", True, "매니페스트에 선언한 목적지"),
+        ("researcher", "feeds.example.com:8443", True, "포트까지 선언한 목적지"),
+        ("researcher", "feeds.example.com", False, "선언한 포트가 아닌 443"),
+        ("researcher", "api.anthropic.com", True, "모델 provider 는 선언에서 나온다"),
+        ("researcher", "mcp.corp.example.com", True, "external MCP 서버 호스트"),
+        ("researcher", "lab.internal:9000", True, "비표준 포트의 MCP 서버"),
+        ("researcher", "evil.example.com", False, "선언 밖"),
+        ("quiet", "api.search.example.com", False, "남의 선언은 내 권한이 아니다"),
+        ("quiet", "api.anthropic.com", True, "모든 anthropic 에이전트는 모델 API 에 닿는다"),
+        ("ghost", "api.anthropic.com", False, "없는 에이전트"),
+    ],
+)
+def test_declarations_decide_egress(tmp_path, who, target, allowed, why):
+    from malkuth.access.baselines import EgressBaseline
+
+    assert EgressBaseline(egress_workspace(tmp_path)).allows(who, target, None) is allowed, why
+
+
+def test_the_target_name_drops_only_the_https_port():
+    from malkuth.access.baselines import egress_target
+
+    assert egress_target("API.Example.com.", 443) == "api.example.com"
+    assert egress_target("api.example.com", 8443) == "api.example.com:8443"

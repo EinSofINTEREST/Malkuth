@@ -16,6 +16,10 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 RESERVED_GLOBAL_GROUP = "global"
 
+_HOST_LABEL = r"[a-z0-9]([a-z0-9-]*[a-z0-9])?"
+EGRESS_TARGET = re.compile(rf"^{_HOST_LABEL}(\.{_HOST_LABEL})*(:[0-9]{{1,5}})?$")
+"""이그레스 목적지 — 소문자 호스트 이름과 선택 포트. 레지스트리 대상과 같은 모양이다."""
+
 _NAME_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 NAME_PATTERN = _NAME_PATTERN
 """선언 이름 규칙 — 소문자·숫자·하이픈. 이름이 곧 파일 경로가 되므로 경로 구분자와 점 구간이
@@ -412,6 +416,21 @@ class RuntimeSpec(BaseModel):
     volumes: tuple[VolumeSpec, ...] = ()
     replicas: int = 1
     max_concurrent_tasks: int = 4
+    egress: tuple[str, ...] = ()
+    """이 에이전트가 이그레스 프록시를 거쳐 닿는 외부 목적지 — ``host`` 또는 ``host:port`` (#293).
+
+    선언이 기본 권한이다. 모델 provider 와 external MCP 서버의 호스트는 따로 적지 않아도 선언에서
+    나온다. 와일드카드·스킴·경로는 받지 않는다 — 받으면 선언이 "어디든" 이 된다."""
+
+    @field_validator("egress")
+    @classmethod
+    def _explicit_destinations(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        for value in values:
+            if not EGRESS_TARGET.fullmatch(value):
+                raise ValueError(
+                    f"egress destination must be host or host:port without wildcards: {value!r}"
+                )
+        return values
 
     @field_validator("image")
     @classmethod

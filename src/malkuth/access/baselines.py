@@ -12,6 +12,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
+from urllib.parse import urlsplit
 
 from malkuth.access.model import Mode
 from malkuth.core.errors import ErrorCode, MalkuthError
@@ -19,7 +20,7 @@ from malkuth.core.manifest import RESERVED_GLOBAL_GROUP, MemoryMode
 
 if TYPE_CHECKING:
     from malkuth.catalog import Catalog
-    from malkuth.core.manifest import GroupManifest
+    from malkuth.core.manifest import AgentManifest, GroupManifest
 
 SPACE_ID = re.compile(r"^(?P<scope>local|group|global):(?P<owner>[^:\s*]+):(?P<alias>[^:\s*]+)$")
 """Memory Service 의 영구 space id — ``MemorySpace.space_id`` 와 같은 모양이다.
@@ -84,4 +85,68 @@ class MemoryBaseline:
             raise
 
 
-__all__ = ["SPACE_ID", "MemoryBaseline"]
+HTTPS_PORT = 443
+
+PROVIDER_HOSTS = {"anthropic": "api.anthropic.com"}
+"""모델 provider 의 논리 호스트 — 이그레스 프록시가 종단하는 호출은 이 이름으로 판정한다.
+
+실제 upstream(대역 provider 등)이 달라도 판정 대상은 이 이름이다: 운영자가 회수하는 것은 "모델 API"
+이지 테스트 배치의 주소가 아니다."""
+
+
+def egress_target(host: str, port: int = HTTPS_PORT) -> str:
+    """판정 대상 이름 — 443 은 생략한다. 선언과 CONNECT 가 같은 이름을 쓰게 한 곳에서 정한다."""
+    host = host.lower().rstrip(".")
+    return host if port == HTTPS_PORT else f"{host}:{port}"
+
+
+def _declared_target(value: str) -> str:
+    host, _, port = value.rpartition(":") if ":" in value else (value, "", "")
+    return egress_target(host, int(port)) if port else egress_target(value)
+
+
+@dataclass(frozen=True)
+class EgressBaseline:
+    """Declared egress destinations.
+
+    - 매니페스트 ``runtime.egress``
+    - 모델 provider 의 논리 호스트 (프록시가 종단해 키를 주입하는 호출)
+    - external MCP 서버 ``url`` 의 호스트
+
+    선언을 요청마다 읽는다 — 목적지 추가·삭제가 재시작 없이 다음 판정에 반영된다.
+    """
+
+    catalog: Catalog
+
+    def allows(self, agent: str, target: str, mode: Mode | None) -> bool:
+        try:
+            manifest = self.catalog.agent(agent)
+        except MalkuthError as err:
+            if err.code == ErrorCode.NF_001:
+                return False
+            raise
+        return target in self.declared(manifest)
+
+    @staticmethod
+    def declared(manifest: AgentManifest) -> frozenset[str]:
+        targets = {_declared_target(entry) for entry in manifest.spec.runtime.egress}
+        provider = PROVIDER_HOSTS.get(manifest.spec.model.provider)
+        if provider is not None:
+            targets.add(provider)
+        for server in manifest.spec.mcp.servers:
+            if server.url is None:
+                continue
+            parts = urlsplit(server.url)
+            if parts.hostname:
+                default = HTTPS_PORT if parts.scheme == "https" else 80
+                targets.add(egress_target(parts.hostname, parts.port or default))
+        return frozenset(targets)
+
+
+__all__ = [
+    "PROVIDER_HOSTS",
+    "SPACE_ID",
+    "EgressBaseline",
+    "MemoryBaseline",
+    "egress_target",
+]

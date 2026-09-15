@@ -785,6 +785,11 @@ outside address fails. The proxy is the only way out.
   is missing. It refuses to start an agent on an existing network whose isolation differs (`RT_001`,
   not retryable) instead of reusing it: a network with a route out would let agents bypass the proxy.
   Remove or recreate that network.
+- **Reattaching checks isolation too.** After a restart, a deployment is reattached only when the
+  agent network is internal and each of its containers is attached to that network alone. Otherwise
+  the deployment becomes `lost` ("network isolation mismatch"), nothing is attached, and its agent
+  identities are revoked, so containers with a route out lose their memory, peer and model access.
+  The containers are left running for you to inspect and tear down.
 - **Agents publish no ports.** Ports cannot be published from an internal network, so the control
   plane reaches each agent's Control API at the container's address on that network, and reattaching
   after a restart looks the address up again. The control plane must be able to reach that

@@ -550,6 +550,39 @@ async def test_a_failed_deploy_returns_the_preallocated_ports(
     assert running(docker) == []
 
 
+async def test_an_isolated_control_plane_reattaches_by_network_address(workspace, healthy):
+    """내부 네트워크에는 게시 포트가 없다 — 재부착도 네트워크 안 주소로 붙어야 한다 (#280)."""
+    docker = TrackingDocker(address="172.30.0.9")
+    catalog = Catalog.under(workspace)
+    store = InMemoryDeploymentStore()
+
+    def manager_on_internal_network() -> DeploymentManager:
+        return DeploymentManager(
+            catalog=catalog,
+            author=Author(catalog=catalog),
+            store=store,
+            secrets_env={"ANTHROPIC_API_KEY": "k"},
+            launcher=AgentLauncher(
+                engine=DockerEngine(client=docker, network="agents", internal=True),
+                health_interval_s=10.0,
+                health_sleep=Tick(),
+            ),
+            ready_poll_s=0.0,
+            sleep=NoSleep(),
+        )
+
+    first = manager_on_internal_network()
+    await first.deploy("two")
+    second = manager_on_internal_network()
+    touched = await second.reattach()
+
+    assert [r.status for r in touched] == [DeploymentStatus.READY]
+    for launched in second.launcher.launched.values():
+        assert launched.handle.control_url == "http://172.30.0.9:8080"
+    await first.launcher.stop_all()
+    await second.launcher.stop_all()
+
+
 async def test_reattach_hands_the_launcher_what_a_restart_needs(workspace, docker, healthy):
     wired_workspace(workspace)
     store = InMemoryDeploymentStore()

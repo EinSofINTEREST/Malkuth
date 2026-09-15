@@ -15,13 +15,15 @@ import structlog
 
 from malkuth.runtime.docker.errors import (
     OOM_EXIT_CODE,
+    NetworkIsolationError,
     drain_timeout,
     image_unavailable,
     invalid_spec,
+    network_mismatch,
     oom_killed,
     start_failed,
 )
-from malkuth.runtime.spec import ContainerSpec
+from malkuth.runtime.spec import LOOPBACK, ContainerSpec
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -73,8 +75,8 @@ class DockerClient(Protocol):
         """이미지를 확보한다 — 없으면 pull."""
         ...
 
-    def ensure_network(self, name: str) -> None:
-        """네트워크를 확보한다 — 없으면 생성."""
+    def ensure_network(self, name: str, *, internal: bool = False) -> None:
+        """네트워크를 확보한다 — 없으면 생성, 있는데 격리가 다르면 예외."""
         ...
 
     def create(self, **kwargs: Any) -> str:
@@ -91,6 +93,10 @@ class DockerClient(Protocol):
 
     def port_of(self, container_id: str, container_port: int) -> int:
         """컨테이너 포트에 매핑된 호스트 포트."""
+        ...
+
+    def address_of(self, container_id: str, network: str) -> str:
+        """컨테이너가 이 네트워크에서 쓰는 주소 — 포트가 게시되지 않는 내부 네트워크에서 쓴다."""
         ...
 
     def stop(self, container_id: str, *, timeout_s: float) -> None:
@@ -129,6 +135,13 @@ class ContainerHandle:
     container_id: str
     image: str
     control_port: int
+    control_host: str = LOOPBACK
+    """control plane 이 이 컨테이너의 Control API 에 닿는 주소 — 게시 포트면 루프백, 내부
+    네트워크면 그 네트워크에서의 컨테이너 주소."""
+
+    @property
+    def control_url(self) -> str:
+        return f"http://{self.control_host}:{self.control_port}"
 
     @property
     def short_id(self) -> str:
@@ -146,6 +159,9 @@ class DockerEngine:
 
     client: DockerClient
     network: str = DEFAULT_NETWORK
+    internal: bool = False
+    """에이전트 네트워크를 외부 경로 없는 내부 네트워크로 (#280, 02 Network). 켜면 포트를 게시하지
+    않고 control plane 은 네트워크 안 주소로 닿는다 — 외부로 나가는 길은 이그레스 프록시뿐이다."""
     stop_grace_s: float = DEFAULT_STOP_GRACE_S
     started: dict[str, ContainerHandle] = field(default_factory=dict)
 
@@ -173,7 +189,11 @@ class DockerEngine:
             raise image_unavailable(agent, spec.image, reason=type(err).__name__) from err
 
         try:
-            await asyncio.to_thread(self.client.ensure_network, self.network)
+            await asyncio.to_thread(
+                self.client.ensure_network, self.network, internal=self.internal
+            )
+        except NetworkIsolationError as err:
+            raise network_mismatch(agent, spec.image, err) from err
         except Exception as err:
             raise start_failed(
                 agent, spec.image, reason=f"network unavailable: {type(err).__name__}"
@@ -181,6 +201,9 @@ class DockerEngine:
 
         kwargs = spec.to_docker_kwargs()
         kwargs["network"] = self.network
+        if self.internal:
+            # 내부 네트워크에는 게시가 먹지 않는다 — 남겨 두면 닿지 않는 주소를 믿게 된다
+            kwargs["ports"] = {}
 
         try:
             container_id = await asyncio.to_thread(self.client.create, **kwargs)
@@ -189,9 +212,7 @@ class DockerEngine:
 
         try:
             await asyncio.to_thread(self.client.start, container_id)
-            port = await asyncio.to_thread(
-                self.client.port_of, container_id, container_control_port
-            )
+            host, port = await self.control_address(container_id, container_control_port)
         except Exception as err:
             # 반쯤 만들어진 컨테이너를 남기면 유령 컨테이너가 쌓인다
             await self._discard(container_id, agent=agent, image=spec.image)
@@ -200,7 +221,11 @@ class DockerEngine:
             ) from err
 
         handle = ContainerHandle(
-            agent=agent, container_id=container_id, image=spec.image, control_port=port
+            agent=agent,
+            container_id=container_id,
+            image=spec.image,
+            control_port=port,
+            control_host=host,
         )
         self.started[agent] = handle
         log.info(
@@ -211,6 +236,18 @@ class DockerEngine:
             port=port,
         )
         return handle
+
+    async def control_address(self, container_id: str, container_port: int) -> tuple[str, int]:
+        """Where the control plane reaches this container's Control API — (host, port).
+
+        게시 포트면 루프백의 호스트 포트, 내부 네트워크면 그 네트워크에서의 컨테이너 주소와
+        컨테이너 포트다. 재부착도 같은 길로 주소를 다시 구한다 — 재시작이 주소를 바꾼다.
+        """
+        if self.internal:
+            address = await asyncio.to_thread(self.client.address_of, container_id, self.network)
+            return address, container_port
+        port = await asyncio.to_thread(self.client.port_of, container_id, container_port)
+        return LOOPBACK, port
 
     async def inspect(self, handle: ContainerHandle) -> dict[str, Any]:
         """컨테이너 상태를 조회한다."""

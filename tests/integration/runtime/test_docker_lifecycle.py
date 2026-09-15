@@ -79,8 +79,17 @@ class CliDockerClient:
         if not docker("images", "-q", image, check=False):
             raise RuntimeError(f"image not built: {image}")
 
-    def ensure_network(self, name: str) -> None:
-        docker("network", "create", "--driver", "bridge", name, check=False)
+    def ensure_network(self, name: str, *, internal: bool = False) -> None:
+        flags = ["--internal"] if internal else []
+        docker("network", "create", "--driver", "bridge", *flags, name, check=False)
+
+    def address_of(self, container_id: str, network: str) -> str:
+        return docker(
+            "inspect",
+            "-f",
+            f'{{{{(index .NetworkSettings.Networks "{network}").IPAddress}}}}',
+            container_id,
+        ).strip()
 
     def create(self, **kwargs: Any) -> str:
         args = [

@@ -84,6 +84,45 @@ async def test_start_uses_the_declared_network():
     assert client.created[0]["network"] == "malkuth-net"
 
 
+async def test_an_isolated_engine_publishes_nothing_and_is_reached_inside_the_network():
+    """내부 네트워크에는 게시가 먹지 않는다 — control plane 은 네트워크 안 주소로 닿는다 (#280)."""
+    client = FakeDockerClient(address="172.30.0.7")
+
+    handle = await DockerEngine(client=client, network="agents", internal=True).start(spec())
+
+    assert client.internal_requests == [True]
+    assert client.created[0]["ports"] == {}
+    assert client.addressed == [(handle.container_id, "agents")]
+    assert (handle.control_host, handle.control_port) == ("172.30.0.7", 8080)
+    assert handle.control_url == "http://172.30.0.7:8080"
+
+
+async def test_a_plain_engine_publishes_on_loopback_and_asks_for_a_normal_network():
+    client = FakeDockerClient(host_port=49153)
+
+    handle = await engine(client).start(spec())
+
+    assert client.internal_requests == [False]
+    assert client.created[0]["ports"] == {"8080/tcp": ("127.0.0.1", None)}
+    assert client.addressed == []
+    assert handle.control_url == "http://127.0.0.1:49153"
+
+
+async def test_a_network_with_the_wrong_isolation_is_refused_before_creating_anything():
+    from malkuth.runtime.docker.errors import NetworkIsolationError
+
+    client = FakeDockerClient(
+        network_error=NetworkIsolationError("agents", expected=True, actual=False)
+    )
+
+    with pytest.raises(MalkuthError) as exc_info:
+        await DockerEngine(client=client, network="agents", internal=True).start(spec())
+
+    assert (exc_info.value.code, exc_info.value.retryable) == ("RT_001", False)
+    assert exc_info.value.details["network"] == "agents"
+    assert client.created == []
+
+
 async def test_missing_image_is_rt_004():
     """이미지 문제는 설정 문제 — 재시도해도 같다."""
     client = FakeDockerClient(image_error=RuntimeError("not found"))

@@ -17,6 +17,8 @@ import docker
 from docker.errors import BuildError, ImageNotFound, NotFound
 from docker.utils import parse_repository_tag
 
+from malkuth.runtime.docker.errors import NetworkIsolationError
+
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
 
@@ -89,12 +91,20 @@ class SdkDockerClient:
             repository, tag = image_reference(image)
             self._sdk.images.pull(repository, tag=tag)
 
-    def ensure_network(self, name: str) -> None:
-        """네트워크를 확보한다 — 없으면 bridge 로 생성 (02 Network)."""
+    def ensure_network(self, name: str, *, internal: bool = False) -> None:
+        """네트워크를 확보한다 — 없으면 bridge 로 생성 (02 Network).
+
+        이미 있는 네트워크가 요청한 격리와 다르면 쓰지 않는다: 외부 경로가 있는 네트워크에 격리된
+        에이전트를 올리면 프록시를 우회할 수 있고, 반대로 내부 네트워크에는 포트가 게시되지 않는다.
+        """
         try:
-            self._sdk.networks.get(name)
+            network = self._sdk.networks.get(name)
         except NotFound:
-            self._sdk.networks.create(name, driver=BRIDGE)
+            self._sdk.networks.create(name, driver=BRIDGE, internal=internal)
+            return
+        actual = bool(network.attrs.get("Internal"))
+        if actual != internal:
+            raise NetworkIsolationError(name, expected=internal, actual=actual)
 
     def create(self, **kwargs: Any) -> str:
         """컨테이너를 만들고 id 를 돌려준다.
@@ -121,6 +131,15 @@ class SdkDockerClient:
         if not bindings:
             raise LookupError(f"container port {container_port} is not published")
         return int(bindings[0]["HostPort"])
+
+    def address_of(self, container_id: str, network: str) -> str:
+        container = self._sdk.containers.get(container_id)
+        container.reload()
+        attached = container.attrs["NetworkSettings"]["Networks"].get(network) or {}
+        address: str = attached.get("IPAddress") or ""
+        if not address:
+            raise LookupError(f"container has no address on network {network}")
+        return address
 
     def stop(self, container_id: str, *, timeout_s: float) -> None:
         """SIGTERM 후 유예가 지나면 SIGKILL (02 Lifecycle 5)."""

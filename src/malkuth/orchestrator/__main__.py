@@ -189,12 +189,11 @@ def _deployment_manager(
         return None
     from malkuth.runtime.deployments import DeploymentManager, SqliteDeploymentStore
     from malkuth.runtime.docker.client import SdkDockerClient
-    from malkuth.runtime.docker.engine import DockerEngine
     from malkuth.runtime.launcher import AgentLauncher
     from malkuth.runtime.ports import A2APortAllocator
 
     launcher = AgentLauncher(
-        engine=DockerEngine(client=SdkDockerClient(), network=config.runtime.network),
+        engine=agent_engine(config.runtime, SdkDockerClient()),
         ports=A2APortAllocator(port_range=config.protocols.a2a.port_range),
         health_interval_s=config.runtime.health_check.interval_s,
     )
@@ -211,6 +210,19 @@ def _deployment_manager(
         agent_env=dict(config.runtime.agent_env),
         memory_url=os.environ.get(MEMORY_URL_ENV),
         memory_tokens=memory_tokens,
+    )
+
+
+def agent_engine(runtime: Any, client: Any) -> Any:
+    """The Docker engine agents run on — isolated whenever an egress proxy is configured.
+
+    프록시를 켜면 그것이 유일한 출구여야 한다 — 에이전트 네트워크에 외부 경로가 남으면 컨테이너 안
+    코드가 프록시를 건너뛰고 판정을 우회한다 (#280, 02 Network).
+    """
+    from malkuth.runtime.docker.engine import DockerEngine
+
+    return DockerEngine(
+        client=client, network=runtime.network, internal=runtime.egress_proxy is not None
     )
 
 

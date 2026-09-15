@@ -542,3 +542,17 @@ def test_an_egress_proxy_without_the_registry_is_refused(tmp_path, monkeypatch):
         entrypoint.main()
 
     assert exc_info.value.details["setting"] == "runtime.egress_proxy"
+
+
+def test_agents_run_on_an_internal_network_exactly_when_an_egress_proxy_is_configured():
+    """프록시가 유일한 출구여야 판정을 우회하지 못한다 — 없으면 게시 포트 그대로다 (#280)."""
+    from malkuth.config import RuntimeConfig
+    from tests.fixtures.fake_docker import FakeDockerClient
+
+    isolated = entrypoint.agent_engine(
+        RuntimeConfig(network="agents", egress_proxy=EGRESS), FakeDockerClient()
+    )
+    plain = entrypoint.agent_engine(RuntimeConfig(network="agents"), FakeDockerClient())
+
+    assert (isolated.network, isolated.internal) == ("agents", True)
+    assert plain.internal is False

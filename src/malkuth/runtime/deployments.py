@@ -527,7 +527,8 @@ class DeploymentManager:
                     replica=agent.replica,
                     container_id=live[0],
                     image=agent.image,
-                    control_port=live[1],
+                    control_host=live[1],
+                    control_port=live[2],
                     token=agent.token,
                     a2a_port=agent.a2a_port,
                     restart_args=restart_args[agent.name],
@@ -539,19 +540,19 @@ class DeploymentManager:
                 touched.append(self._refresh(record))
         return touched
 
-    async def _live(self, agent: DeployedAgent) -> tuple[str, int] | None:
-        """이 자리에 지금 서 있는 컨테이너의 (id, control 포트) — 없으면 None."""
-        client = self.launcher.engine.client
+    async def _live(self, agent: DeployedAgent) -> tuple[str, str, int] | None:
+        """이 자리에 지금 서 있는 컨테이너의 (id, control 주소, control 포트) — 없으면 None."""
+        engine = self.launcher.engine
         container_id = await asyncio.to_thread(
-            client.find, container_name(agent.name, agent.replica)
+            engine.client.find, container_name(agent.name, agent.replica)
         )
         if container_id is None:
             return None
         try:
-            port = await asyncio.to_thread(client.port_of, container_id, DEFAULT_CONTROL_PORT)
-        except Exception:  # noqa: BLE001 — 포트가 없으면 붙을 수 없는 컨테이너다
+            host, port = await engine.control_address(container_id, DEFAULT_CONTROL_PORT)
+        except Exception:  # noqa: BLE001 — 주소가 없으면 붙을 수 없는 컨테이너다
             return None
-        return container_id, port
+        return container_id, host, port
 
     def _refresh(self, record: DeploymentRecord) -> DeploymentRecord:
         """launcher 가 아는 현재 컨테이너로 기록을 맞춘다 — 재시작이 id/포트를 바꾼다."""

@@ -44,6 +44,16 @@ DEFAULT_MAX_DEPTH = 3
 log = structlog.get_logger(__name__)
 
 
+VERIFIED_CALLER_STATE = "malkuth_verified_caller"
+"""요청 입구가 확인한 호출자를 실행기에 넘기는 자리 — SDK 의 호출 컨텍스트 상태."""
+
+
+def _verified_caller(context: Any) -> str | None:
+    state = getattr(context, "state", None) or {}
+    found = state.get(VERIFIED_CALLER_STATE)
+    return found if isinstance(found, str) else None
+
+
 def headers_of(context: Any) -> Mapping[str, str]:
     """수신 컨텍스트에서 헤더를 꺼낸다 — SDK 가 ``state`` 에 실어 준다."""
     state = getattr(context, "state", None) or {}
@@ -82,15 +92,22 @@ class InboundGuard:
     """레지스트리 모드 — 있으면 호출마다 받은 표를 **자기 신원으로** 레지스트리에 확인한다.
     per-edge token 은 그래프의 모든 에이전트가 같은 서명 키로 만들 수 있어 경계가 아니다."""
 
-    def check_task(self, headers: Mapping[str, str], task: TaskRequest) -> None:
-        """What the executor checks once the body is decoded.
+    def check_task(
+        self, headers: Mapping[str, str], task: TaskRequest, verified: str | None = None
+    ) -> str:
+        """What the executor checks once the body is decoded — returns the verified caller.
 
-        레지스트리 모드에서는 표를 이미 요청 입구에서 확인했다(``admit``) — 여기서는 깊이만 본다.
+        레지스트리 모드에서는 표를 이미 요청 입구에서 확인했다(``admit`` → ``verified``) — 여기서는
+        깊이만 본다. 입구를 거치지 않은 레지스트리 모드 호출은 확인된 호출자가 없으니 거부한다.
         """
         if self.verifier is None:
-            self.check(headers, task)
-            return
-        self._check_depth(headers.get(CALLER_HEADER, "") or "unknown", task)
+            return self.check(headers, task)
+        if verified is None:
+            raise not_allowed(
+                "unknown", self.server.agent, owner=self.server.agent, reason="no ticket"
+            )
+        self._check_depth(verified, task)
+        return verified
 
     async def admit(self, headers: Mapping[str, str]) -> str | None:
         """Authorize one inbound call by its ticket — before the SDK starts the task.
@@ -190,7 +207,10 @@ class GuardedExecutor(AgentExecutor):
     async def execute(self, context: Any, event_queue: Any) -> None:
         """수신 태스크 하나를 검증하고 실행한다."""
         task = read_task(context.get_user_input())
-        self._guard.check_task(headers_of(context.call_context), task)
+        call = context.call_context
+        caller = self._guard.check_task(headers_of(call), task, _verified_caller(call))
+        # 확인된 호출자를 태스크에 싣는다 — 본문의 주장이 아니라 입구가 확인한 이름이다
+        task = task.model_copy(update={"caller": caller})
 
         result = await self._invoke(task)
         await event_queue.enqueue_event(
@@ -230,9 +250,12 @@ class GuardedRequestHandler(DefaultRequestHandler):
         사유(``a2a:A2A_004`` 표기)를 메시지에 남겨야 호출자가 설정 문제와 peer 실패를 가른다.
         """
         try:
-            await self._guard.admit(headers_of(context))
+            caller = await self._guard.admit(headers_of(context))
         except MalkuthError as err:
             raise A2AError(message=str(err)) from err
+        state = getattr(context, "state", None)
+        if caller is not None and state is not None:
+            state[VERIFIED_CALLER_STATE] = caller
 
 
 def encode_result(result: TaskResult) -> str:

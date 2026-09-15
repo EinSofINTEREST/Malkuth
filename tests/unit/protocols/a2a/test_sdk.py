@@ -225,9 +225,11 @@ def test_a_deep_chain_is_rejected_with_a2a_005():
 async def test_a_call_round_trips_between_two_agents():
     """#118 완료 조건 — 내 transport 를 mock 으로 대체하면 증명되지 않는다."""
     received: list[str] = []
+    callers: list[str | None] = []
 
     async def handler(task):
         received.append(task.input["query"])
+        callers.append(task.caller)
         return TaskResult.completed(task, output={"plan": "먼저 문서를 읽는다"})
 
     app = serve(guard_for((CALLER, CALLEE)), handler)
@@ -241,6 +243,7 @@ async def test_a_call_round_trips_between_two_agents():
     )
 
     assert received == ["무엇부터?"]
+    assert callers == [CALLER], "토큰이 확인한 호출자가 태스크에 실리지 않았다"
     assert result.output == {"plan": "먼저 문서를 읽는다"}
     assert result.status is TaskStatus.COMPLETED
 

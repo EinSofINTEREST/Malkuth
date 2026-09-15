@@ -68,7 +68,10 @@ class Stack:
             server=A2AServer(agent="planner", allowlist=_allowlist()), verifier=self.verifier
         )
 
+        self.callers: list[str | None] = []
+
         async def handle(task):
+            self.callers.append(task.caller)
             return TaskResult.completed(task, output={"plan": "ok"})
 
         self.planner = serve(guard, handle)
@@ -130,6 +133,7 @@ async def test_a_declared_call_goes_through_on_a_ticket(stack):
     result = await stack.caller().call("planner", make_task())
 
     assert result.output == {"plan": "ok"}
+    assert stack.callers == ["researcher"], "표가 확인한 호출자가 태스크에 실리지 않았다"
 
 
 async def test_revoking_the_connection_denies_the_next_call_and_lifting_restores_it(stack):

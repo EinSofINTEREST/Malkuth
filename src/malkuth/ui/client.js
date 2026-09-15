@@ -65,7 +65,32 @@ export function createClient({ baseUrl = "", token = null, fetchImpl = globalThi
       call("POST", "/v1/runs", { deployment_id: deploymentId, input, run_id: runId || null }),
     drain: (id) => call("POST", `/v1/runs/${encodeURIComponent(id)}/drain`),
     resume: (id) => call("POST", `/v1/runs/${encodeURIComponent(id)}/resume`),
+    // 권한 (#283) — 운영자 경로. 레지스트리가 꺼져 있으면 라우트가 없다 (404)
+    accessAgent: (name) => call("GET", `/v1/access/agents/${encodeURIComponent(name)}`),
+    revoke: (revocation) => call("POST", "/v1/access/revocations", revocation),
+    liftRule: (ruleId) => call("DELETE", `/v1/access/rules/${encodeURIComponent(ruleId)}`),
   };
+}
+
+// 기록 하나의 지금 상태 — 되돌렸거나(lifted) 만료됐거나(expired) 아직 유효하거나(active)
+export function ruleState(rule, nowSeconds) {
+  if (rule.lifted_at !== null && rule.lifted_at !== undefined) return "lifted";
+  if (rule.expires_at !== null && rule.expires_at !== undefined && rule.expires_at <= nowSeconds) return "expired";
+  return "active";
+}
+
+// 선언 권한 한 줄에서 운영자가 할 수 있는 회수 — 메모리 rw 는 쓰기만 막는 강등과 전체 회수 둘이다.
+// `server/*` 는 "그 서버의 모든 도구" 를 뜻하는 표시일 뿐 판정 대상 이름이 아니므로 회수할 수 없다
+export function revocationsFor(permission) {
+  if (permission.kind === "mcp_tool" && permission.target.endsWith("/*")) return [];
+  const base = { kind: permission.kind, target: permission.target };
+  if (permission.kind === "memory" && permission.mode === "rw") {
+    return [
+      { label: "쓰기 회수", revocation: { ...base, mode: "rw" } },
+      { label: "전체 회수", revocation: base },
+    ];
+  }
+  return [{ label: "회수", revocation: base }];
 }
 
 // --- 편집기의 순수 함수: 폼 상태 ↔ 선언 문서 --------------------------------------

@@ -15,6 +15,7 @@
       <button data-tab="agent">에이전트 편집기</button>
       <button data-tab="deployments">배포</button>
       <button data-tab="runs">Run</button>
+      <button data-tab="access">권한</button>
     </nav>
     <form id="auth">
       <label>토큰 <input id="token" type="password" placeholder="MALKUTH_CONTROL_TOKEN" /></label>
@@ -146,6 +147,24 @@
       </form>
       <table id="runs"><thead><tr><th>run_id</th><th>그래프</th><th>모드</th><th>상태</th><th>iteration</th><th></th></tr></thead><tbody></tbody></table>
       <pre id="run-detail" class="detail muted">run 을 고르면 결과가 보입니다</pre>
+    </section>
+
+    <section id="tab-access" class="tab">
+      <form id="access-form">
+        <label>에이전트 <select id="access-agent"></select></label>
+        <label>사유 <input id="access-reason" value="운영자 회수" maxlength="1000" /></label>
+        <button type="submit">조회</button>
+        <span class="hint">회수·강등은 재배포 없이 다음 요청부터 적용됩니다</span>
+      </form>
+      <p id="access-off" class="muted" hidden>권한 레지스트리가 꺼져 있습니다 — control plane 설정의 orchestrator.access_store 를 켜세요</p>
+      <h2>선언 권한 <span class="hint">매니페스트·그룹·배포된 그래프가 주는 기본값</span></h2>
+      <table id="access-declared"><thead><tr><th>종류</th><th>대상</th><th>모드</th><th></th></tr></thead><tbody></tbody></table>
+      <h2>부여·회수 기록 <span class="hint">결정 주체: operator / 권한 에이전트 — 기록은 지우지 않습니다</span></h2>
+      <table id="access-rules"><thead><tr><th>효과</th><th>종류</th><th>대상</th><th>모드</th><th>결정</th><th>요청</th><th>사유</th><th>만료</th><th>상태</th><th></th></tr></thead><tbody></tbody></table>
+      <h2>확장 상한 <span class="hint">권한 에이전트가 넘길 수 없는 범위 — 그룹 선언에서 바꿉니다</span></h2>
+      <pre id="access-ceilings" class="detail muted">상한이 없으면 확장도 없습니다</pre>
+      <h2>최근 거부 <span class="hint">레지스트리가 내린 판정만 — 강제 지점의 캐시 적중은 보이지 않습니다</span></h2>
+      <table id="access-denials"><thead><tr><th>시각</th><th>종류</th><th>대상</th><th>모드</th><th>결정</th></tr></thead><tbody></tbody></table>
     </section>
   </main>
   <footer><span id="status" class="muted"></span></footer>

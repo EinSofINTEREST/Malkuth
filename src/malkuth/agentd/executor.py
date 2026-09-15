@@ -14,7 +14,14 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Final, Protocol
 
-from malkuth.agentd.telemetry import STATUS_COMPLETED, STATUS_FAILED, STATUS_RATE_LIMITED
+import structlog
+
+from malkuth.agentd.telemetry import (
+    DIRECT_GRAPH,
+    STATUS_COMPLETED,
+    STATUS_FAILED,
+    STATUS_RATE_LIMITED,
+)
 from malkuth.core.agent import (
     DEFAULT_MAX_TURNS,
     DEFAULT_TOOL_TIMEOUT_S,
@@ -28,6 +35,7 @@ from malkuth.core.errors import (
     ErrorCategory,
     ErrorCode,
     MalkuthError,
+    MalkuthErrorPayload,
 )
 from malkuth.core.events import (
     DoneEvent,
@@ -50,6 +58,8 @@ if TYPE_CHECKING:
 
     TaskRecall = Callable[[TaskRequest], Awaitable[str]]
     """태스크 진입 시 1회 회상해 프롬프트에 붙일 텍스트를 만드는 콜러블."""
+
+log = structlog.get_logger(__name__)
 
 
 MODEL_RETRY_POLICIES: Final = (RATE_LIMIT_RETRY, NETWORK_RETRY)
@@ -304,13 +314,55 @@ class Executor:
                 ),
             )
 
-        self._record_task(result, task=task, duration_s=time.perf_counter() - started)
+        duration_s = time.perf_counter() - started
+        self._record_task(result, task=task, duration_s=duration_s)
+        self._log_outcome(task, error=result.error, usage=result.usage, duration_s=duration_s)
 
         # 재시도 가능한 실패를 캐싱하면 이 계층이 유일한 재시도 계층인데도
         # 재시도가 영원히 무효화된다 — 성공과 영구 실패만 기억한다
         if result.error is None or not result.error.retryable:
             self._completed[task.task_id] = result
         return result
+
+    def _log_outcome(
+        self,
+        task: TaskRequest,
+        *,
+        error: MalkuthErrorPayload | None,
+        usage: ModelUsage | None,
+        duration_s: float,
+    ) -> None:
+        """태스크 종료를 로그로 남긴다 — 실패는 ERROR (05 Log Levels).
+
+        실패를 ``TaskResult`` 로만 돌려주면 데몬은 살지만 원인이 컨테이너 로그에서 사라진다:
+        호출자는 코드만 받고, 피호출자 쪽에는 무엇이 실패했는지 남지 않는다 (#290).
+        """
+        fields: dict[str, Any] = {
+            "agent": self._agent,
+            "task_id": task.task_id,
+            "run_id": task.run_id,
+            "graph": task.trace.graph or DIRECT_GRAPH,
+            "duration_ms": int(duration_s * 1000),
+        }
+        if task.node_id is not None:
+            fields["node_id"] = task.node_id
+        if error is not None:
+            log.error(
+                "agent task failed",
+                status=STATUS_FAILED,
+                error_code=error.code,
+                retryable=error.retryable,
+                error_message=error.message,
+                **fields,
+            )
+            return
+        log.info(
+            "agent task completed",
+            status=STATUS_COMPLETED,
+            input_tokens=usage.input_tokens if usage else 0,
+            output_tokens=usage.output_tokens if usage else 0,
+            **fields,
+        )
 
     def _record_task(self, result: TaskResult, *, task: TaskRequest, duration_s: float) -> None:
         """태스크 종료를 메트릭에 남긴다 — telemetry 미주입 시 무동작."""
@@ -505,21 +557,33 @@ class Executor:
             Token, tool call/result, and terminal done/error events.
         """
         deadline = asyncio.get_running_loop().time() + task.config.timeout_s
+        started = time.perf_counter()
         events = self._stream(task)
+
+        def finished(event: TaskEvent) -> TaskEvent:
+            if isinstance(event, ErrorEvent):
+                self._log_outcome(
+                    task, error=event.error, usage=None, duration_s=time.perf_counter() - started
+                )
+            elif isinstance(event, DoneEvent):
+                self._log_outcome(
+                    task, error=None, usage=event.usage, duration_s=time.perf_counter() - started
+                )
+            return event
 
         while True:
             remaining = deadline - asyncio.get_running_loop().time()
             if remaining <= 0:
-                yield self._timeout_event(task)
+                yield finished(self._timeout_event(task))
                 return
             try:
                 event = await asyncio.wait_for(anext(events), timeout=remaining)
             except StopAsyncIteration:
                 return
             except TimeoutError:
-                yield self._timeout_event(task)
+                yield finished(self._timeout_event(task))
                 return
-            yield event
+            yield finished(event)
 
     def _recall_failure(self, err: BaseException) -> MalkuthError:
         """회상 실패를 구조화 에러로 만든다 — 기억이 없다고 태스크가 죽지는 않는다."""

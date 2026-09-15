@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections import OrderedDict
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -42,6 +43,8 @@ if TYPE_CHECKING:
 log = structlog.get_logger(__name__)
 
 REQUEST_TIMEOUT_S = 10.0
+REMEMBERED_ANSWERS = 1024
+"""재시도에 같은 답을 주려고 기억하는 답의 수 — 넘치면 오래된 것부터 잊는다 (상주 프로세스)."""
 
 
 class ExpansionRequest(BaseModel):
@@ -90,23 +93,28 @@ class PermissionAgent:
                 details={"settings": [ACCESS_URL_ENV, ACCESS_CREDENTIAL_ENV]},
             )
         self._http = http or httpx.AsyncClient(base_url=self._base_url, timeout=REQUEST_TIMEOUT_S)
-        self._completed: dict[str, TaskResult] = {}
+        self._completed: OrderedDict[tuple[str | None, str], TaskResult] = OrderedDict()
 
     async def execute(self, task: TaskRequest) -> TaskResult:
-        cached = self._completed.get(task.task_id)
+        # 호출자까지 키에 넣는다 — task id 는 호출자가 고르므로, 남의 id 로 남의 답을 받으면 안 된다
+        key = (task.caller, task.task_id)
+        cached = self._completed.get(key)
         if cached is not None:
             # 같은 요청의 재시도가 부여를 두 번 기록하지 않게 (02 Rule 3)
             return cached
         try:
-            output = await self._grant(task)
+            result = TaskResult.completed(task, output=await self._grant(task))
         except MalkuthError as err:
             result = TaskResult.failed(task, err)
-            if not err.retryable:
-                self._completed[task.task_id] = result
-            return result
-        result = TaskResult.completed(task, output=output)
-        self._completed[task.task_id] = result
+            if err.retryable:
+                return result
+        self._remember(key, result)
         return result
+
+    def _remember(self, key: tuple[str | None, str], result: TaskResult) -> None:
+        self._completed[key] = result
+        while len(self._completed) > REMEMBERED_ANSWERS:
+            self._completed.popitem(last=False)
 
     async def stream(self, task: TaskRequest) -> AsyncIterator[TaskEvent]:
         result = await self.execute(task)

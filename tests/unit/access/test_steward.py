@@ -184,6 +184,28 @@ async def test_a_retried_request_is_granted_once(registry):
     assert len(allows(registry, "worker")) == 1
 
 
+async def test_another_caller_reusing_a_task_id_gets_its_own_answer(registry):
+    steward = steward_for(registry)
+
+    mine = await steward.execute(request(caller="worker", task_id="same"))
+    theirs = await steward.execute(request(caller="peer", task_id="same"))
+
+    assert theirs.output["rule_id"] != mine.output["rule_id"], "남의 task id 로 남의 답을 받았다"
+    assert len(allows(registry, "worker")) == len(allows(registry, "peer")) == 1
+
+
+async def test_remembered_answers_are_bounded(registry, monkeypatch):
+    monkeypatch.setattr("malkuth.access.steward.REMEMBERED_ANSWERS", 2)
+    steward = steward_for(registry)
+
+    for task_id in ("a", "b", "c"):
+        await steward.execute(request(task_id=task_id))
+    await steward.execute(request(task_id="c"))
+    assert len(allows(registry, "worker")) == 3, "최근 답은 기억해야 한다"
+    await steward.execute(request(task_id="a"))
+    assert len(allows(registry, "worker")) == 4, "상한을 넘긴 오래된 답을 계속 쥐고 있다"
+
+
 async def test_an_unreachable_registry_is_a_retryable_failure_that_is_not_remembered(registry):
     link = Link(down=True)
     steward = steward_for(registry, link=link)

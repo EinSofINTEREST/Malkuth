@@ -27,6 +27,9 @@ def _require_http_url(value: str, what: str) -> None:
         raise ValueError(f"{what} has an invalid port: {value!r}") from err
     if parts.scheme not in ("http", "https") or not parts.hostname or port == 0:
         raise ValueError(f"{what} must be an http(s) URL with a host: {value!r}")
+    if parts.username is not None or parts.password is not None:
+        # 자격증명은 auth.token_env 로만 — URL 에 실리면 로그·카드·에러 곳곳에 샌다
+        raise ValueError(f"{what} must not carry credentials; use auth.token_env")
 
 
 _HOST_LABEL = r"[a-z0-9]([a-z0-9-]*[a-z0-9])?"

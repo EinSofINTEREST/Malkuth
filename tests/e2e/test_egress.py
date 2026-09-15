@@ -87,6 +87,7 @@ def start_proxy(mode: str = "enforce") -> None:
         "-e", f"MALKUTH_EGRESS_MODE={mode}",
         "-e", f"MALKUTH_EGRESS_PRIVATE_DESTINATIONS={TARGET},{UNDECLARED}",
         "-e", "MALKUTH_EGRESS_ANTHROPIC_UPSTREAM=http://fake-provider:8000",
+        "-e", "MALKUTH_EGRESS_ALLOW_PLAINTEXT_UPSTREAM=true",  # 대역 provider 는 평문이다
         "-e", f"ANTHROPIC_API_KEY={PROXY_KEY}",
         "malkuth/egress-proxy:0.1.0",
     )  # fmt: skip

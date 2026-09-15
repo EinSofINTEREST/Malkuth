@@ -8,9 +8,10 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import os
+from collections.abc import Awaitable, Mapping
 from typing import Any
+from urllib.parse import urlsplit
 
 import structlog
 import uvicorn
@@ -26,6 +27,10 @@ MODE_ENV = "MALKUTH_EGRESS_MODE"
 PRIVATE_DESTINATIONS_ENV = "MALKUTH_EGRESS_PRIVATE_DESTINATIONS"
 """사설 주소로 풀려도 되는 목적지 — 쉼표로. 운영자가 명시한 것만 (예: 사내 provider 대역)."""
 ANTHROPIC_UPSTREAM_ENV = "MALKUTH_EGRESS_ANTHROPIC_UPSTREAM"
+PLAINTEXT_UPSTREAM_ENV = "MALKUTH_EGRESS_ALLOW_PLAINTEXT_UPSTREAM"
+"""``true`` 일 때만 http provider upstream 을 받는다.
+
+프록시가 키를 실어 보내는 곳이므로 평문은 테스트용 대역에만 쓴다."""
 ANTHROPIC_KEY_ENV = "ANTHROPIC_API_KEY"  # noqa: S105 — 키 이름이지 값이 아니다
 LOG_LEVEL_ENV = "MALKUTH_LOG_LEVEL"
 LOG_FORMAT_ENV = "MALKUTH_LOG_FORMAT"
@@ -34,9 +39,10 @@ METRICS_PORT_ENV = "MALKUTH_METRICS_PORT"
 DEFAULT_CONNECT_PORT = 8080
 DEFAULT_PROVIDER_PORT = 8081
 DEFAULT_ANTHROPIC_UPSTREAM = "https://api.anthropic.com"
+MAX_PORT = 65536
 
 
-def settings(environ: dict[str, str]) -> dict[str, Any]:
+def settings(environ: Mapping[str, str]) -> dict[str, Any]:
     """Validated process settings.
 
     Raises:
@@ -65,11 +71,54 @@ def settings(environ: dict[str, str]) -> dict[str, Any]:
         "enforcer_token": token,
         "mode": mode,
         "private_destinations": private,
-        "connect_port": int(environ.get(CONNECT_PORT_ENV, DEFAULT_CONNECT_PORT)),
-        "provider_port": int(environ.get(PROVIDER_PORT_ENV, DEFAULT_PROVIDER_PORT)),
-        "anthropic_upstream": environ.get(ANTHROPIC_UPSTREAM_ENV, DEFAULT_ANTHROPIC_UPSTREAM),
+        "connect_port": port_setting(environ, CONNECT_PORT_ENV, DEFAULT_CONNECT_PORT),
+        "provider_port": port_setting(environ, PROVIDER_PORT_ENV, DEFAULT_PROVIDER_PORT),
+        "anthropic_upstream": _upstream(environ),
         "anthropic_key": environ.get(ANTHROPIC_KEY_ENV, ""),
     }
+
+
+def port_setting(environ: Mapping[str, str], key: str, default: int) -> int:
+    """A listener port from the environment — ``CFG_001`` unless it is an integer in 1..65535."""
+    raw = environ.get(key, str(default))
+    try:
+        port = int(raw)
+    except ValueError as err:
+        raise _config(f"invalid port: {raw!r}", [key]) from err
+    if not 0 < port < MAX_PORT:
+        raise _config(f"port out of range: {raw!r}", [key])
+    return port
+
+
+def _upstream(environ: Mapping[str, str]) -> str:
+    """provider upstream — 프록시가 여기에 API 키를 실어 보내므로 평문 전송을 기본으로 막는다."""
+    raw = environ.get(ANTHROPIC_UPSTREAM_ENV, DEFAULT_ANTHROPIC_UPSTREAM)
+    parts = urlsplit(raw)
+    try:
+        port = parts.port
+    except ValueError as err:
+        raise _config(f"invalid provider upstream port: {raw!r}", [ANTHROPIC_UPSTREAM_ENV]) from err
+    malformed = (
+        parts.scheme not in ("http", "https")
+        or not parts.hostname
+        or port == 0
+        or parts.username is not None
+        or parts.password is not None
+        or parts.query
+        or parts.fragment
+    )
+    if malformed:
+        raise _config(
+            "provider upstream must be an http(s) URL with a host and no credentials, query or "
+            "fragment",
+            [ANTHROPIC_UPSTREAM_ENV],
+        )
+    if parts.scheme == "http" and environ.get(PLAINTEXT_UPSTREAM_ENV, "").lower() != "true":
+        raise _config(
+            "provider upstream must use https — the proxy sends the provider key to it",
+            [ANTHROPIC_UPSTREAM_ENV, PLAINTEXT_UPSTREAM_ENV],
+        )
+    return raw
 
 
 def _config(message: str, keys: list[str]) -> MalkuthError:
@@ -89,10 +138,11 @@ def main() -> None:
         json_output=os.environ.get(LOG_FORMAT_ENV, "json") == "json",
     )
     metrics = Metrics()
+    config = settings(os.environ)
     start_metrics_server(
-        int(os.environ.get(METRICS_PORT_ENV, DEFAULT_METRICS_PORT)), registry=metrics.registry
+        port_setting(os.environ, METRICS_PORT_ENV, DEFAULT_METRICS_PORT), registry=metrics.registry
     )
-    asyncio.run(run(settings(dict(os.environ)), metrics=metrics))
+    asyncio.run(run(config, metrics=metrics))
 
 
 async def run(config: dict[str, Any], *, metrics: Metrics | None = None) -> None:
@@ -134,15 +184,35 @@ async def run(config: dict[str, Any], *, metrics: Metrics | None = None) -> None
         providers=sorted(upstreams),
         port=config["connect_port"],
     )
-    watching = asyncio.create_task(access.watch())
     try:
         async with connect:
-            await asyncio.gather(connect.serve_forever(), provider.serve())
+            await supervise(access.watch(), connect.serve_forever(), provider.serve())
     finally:
-        watching.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await watching
         await access.aclose()
+
+
+async def supervise(*parts: Awaitable[Any]) -> None:
+    """Run the parts as one lifecycle — the first to end, for any reason, ends them all.
+
+    판정 피드가 멈춘 채 두 창구가 계속 받으면 캐시된 허용이 회수를 모른 채 남는다. 창구 하나가
+    닫혔는데 다른 쪽이 붙잡으면 프로세스가 끝나지 않는다. 그래서 하나라도 끝나면 나머지를 취소하고,
+    끝난 쪽의 예외를 그대로 올려 컨테이너 재시작 정책에 맡긴다.
+    """
+    tasks = [asyncio.ensure_future(part) for part in parts]
+    try:
+        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for task in tasks:
+            task.cancel()
+        # 취소된 나머지의 결과는 버린다 — 알려야 할 실패는 먼저 끝난 쪽의 것이다
+        await asyncio.gather(*tasks, return_exceptions=True)
+    for task in done:
+        failure = None if task.cancelled() else task.exception()
+        if failure is not None:
+            log.error("egress proxy stopping", reason="a listener or the access feed failed",
+                      exc_info=failure)  # fmt: skip
+            raise failure
+    log.warning("egress proxy stopping", reason="a listener or the access feed ended")
 
 
 if __name__ == "__main__":

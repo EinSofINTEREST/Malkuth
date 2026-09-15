@@ -534,6 +534,8 @@ def test_an_egress_port_outside_the_valid_range_is_refused(destination):
         "ftp://mcp.example/mcp",
         "mcp.example/mcp",
         "https://:443/mcp",
+        "https://user:secret@mcp.example/mcp",
+        "https://token@mcp.example/mcp",
     ],
 )
 def test_an_external_mcp_url_must_be_a_valid_http_url(url):

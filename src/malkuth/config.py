@@ -8,8 +8,8 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from urllib.parse import urlsplit
 from typing import TYPE_CHECKING, Any, Literal
+from urllib.parse import urlsplit
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
@@ -202,8 +202,8 @@ class OrchestratorConfig(BaseModel):
     def _access_agent_url_is_a_plain_http_url(self) -> OrchestratorConfig:
         """에이전트가 신원을 싣고 부르는 주소 — 스킴·호스트가 있는 http(s) URL 만.
 
-        자격을 URL 에 넣거나(userinfo) 경로·쿼리를 붙이면 로그와 프록시에 새거나 요청이 엉뚱한 곳으로
-        간다. 평문 ``http`` 는 에이전트 전용 사설 네트워크 안에서만 쓴다 — 문서에 명시한다.
+        자격을 URL 에 넣거나(userinfo) 경로·쿼리를 붙이면 로그와 프록시에 새거나 요청이 엉뚱한
+        곳으로 간다. 평문 ``http`` 는 에이전트 전용 사설 네트워크 안에서만 쓴다 — 문서에 명시한다.
         """
         if self.access_agent_url is None:
             return self

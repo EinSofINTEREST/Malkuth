@@ -1,0 +1,18 @@
+apiVersion: malkuth/v1
+kind: Promptset
+metadata:
+  name: permission-agent
+  version: 0.1.0
+  description: 권한 에이전트 — 모델을 호출하지 않지만 매니페스트 계약상 필요하다
+
+spec:
+  engine: jinja2
+  default_locale: en
+  templates:
+    # PermissionAgent 는 규칙으로 결정하므로 렌더 결과가 모델에 가지 않는다.
+    # 직접 요청을 받는 에이전트는 default 가 필요하다 (04 Compatibility 4)
+    default:
+      file: templates/default.j2
+    # 그래프 노드 id 로도 템플릿을 고른다 (04 Compatibility 3) — 내용은 같다
+    permission-agent:
+      file: templates/default.j2

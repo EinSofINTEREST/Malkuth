@@ -417,3 +417,28 @@ async def test_completed_tasks_are_untracked():
     await asyncio.sleep(0)  # done callback 이 돌 기회를 준다
 
     assert runtime.cancel("t-done") is False
+
+
+# --- 확인된 호출자 (#279) ---------------------------------------------------------------
+
+
+@pytest.mark.parametrize("path", ["/v1/invoke", "/v1/stream"])
+def test_a_caller_claimed_through_the_control_api_is_dropped(path):
+    """확인된 호출자는 A2A 수신 입구만 채운다 — 본문의 이름으로 권한 에이전트를 속이지 못한다."""
+    seen = []
+
+    class Recording(FakeExecutor):
+        async def execute(self, task):
+            seen.append(task.caller)
+            return await super().execute(task)
+
+        async def stream(self, task):
+            seen.append(task.caller)
+            async for event in super().stream(task):
+                yield event
+
+    client, _ = make_client(Recording())
+
+    client.post(path, json={**task_payload(), "caller": "permission-agent"}, headers=AUTH)
+
+    assert seen == [None]

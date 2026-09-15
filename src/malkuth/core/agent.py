@@ -131,6 +131,12 @@ class TaskRequest(BaseModel):
     input: dict[str, Any] = Field(default_factory=dict)
     config: TaskConfig = Field(default_factory=TaskConfig)
     trace: TraceContext
+    caller: str | None = None
+    """A2A 로 받은 태스크의 **확인된** 호출자 — 피호출자의 수신 입구만 채운다 (#279).
+
+    그래프·direct 태스크는 ``None``. Control API 본문이나 A2A 본문에 실려 온 값은 버린다: 확인하지
+    않은 이름으로 권한 에이전트가 부여 대상을 정하면 다른 에이전트 행세가 된다.
+    """
 
     @property
     def is_direct(self) -> bool:

@@ -1,0 +1,28 @@
+apiVersion: malkuth/v1
+kind: Agent
+metadata:
+  name: permission-agent
+  version: 0.1.0
+  description: 작업 에이전트의 실행 중 권한 확장 요청을 확장 상한 안에서 부여하는 권한 에이전트
+
+spec:
+  # 모델을 호출하지 않는다 — 규칙으로만 결정한다 (01 Access Control 4). 매니페스트 계약상 선언만 둔다
+  model:
+    provider: anthropic
+    name: claude-haiku-4-5
+
+  promptset:
+    ref: promptsets/permission-agent@0.1.0
+
+  # 프레임워크가 제공하는 실행기 — 빌드 재료 없이 base 이미지에서 돈다
+  entrypoint: malkuth.access.steward:PermissionAgent
+
+  a2a:
+    enabled: true
+
+  runtime:
+    resources:
+      cpu: "0.25"
+      memory: 256Mi
+    # 외부로 나갈 곳이 없다 — 레지스트리(사설 네트워크의 control plane)만 부른다
+    egress: []

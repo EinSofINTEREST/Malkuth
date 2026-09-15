@@ -64,14 +64,19 @@ class MemorySpace:
     mode: MemoryMode = MemoryMode.RW
     writers: tuple[str, ...] = ()
     """global scope 에서 write 가 허용된 에이전트 — 미지정 시 read-only."""
+    name: str | None = None
+    """space 의 선언 이름 — 요청한 이름(``alias``)이 space id 그대로일 때만 다르다 (#279).
+
+    선언하지 않고 **부여받은** space 는 에이전트에게 별칭이 없어 space id 로 부른다. 그때
+    ``alias`` 는 요청한 문자열(``group:research:knowledge``), ``name`` 은 선언 이름이다."""
 
     @property
     def space_id(self) -> str:
-        """저장소가 쓰는 실제 식별자 — ``(scope, owner, alias)`` 로 유일하다.
+        """저장소가 쓰는 실제 식별자 — ``(scope, owner, name)`` 으로 유일하다.
 
         같은 별칭이 스코프마다 달라야 서로의 기억을 덮어쓰지 않는다.
         """
-        return f"{self.scope}:{self.owner}:{self.alias}"
+        return f"{self.scope}:{self.owner}:{self.name or self.alias}"
 
     def may_write(self, agent: str) -> bool:
         """이 에이전트가 쓸 수 있는지."""

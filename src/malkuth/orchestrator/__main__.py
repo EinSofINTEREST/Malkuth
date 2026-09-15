@@ -297,7 +297,9 @@ def _access_registry(orchestrator: Any, catalog: Catalog, *, metrics: Any = None
         # a2a 는 피호출자의 A2A 서버 (#281), egress 는 이그레스 프록시 (#293)
         baselines={
             ResourceKind.MEMORY: MemoryBaseline(catalog),
-            ResourceKind.A2A: A2ABaseline(catalog, store),
+            ResourceKind.A2A: A2ABaseline(
+                catalog, store, stewards=frozenset(orchestrator.access_stewards)
+            ),
             ResourceKind.EGRESS: EgressBaseline(catalog),
         },
         metrics=metrics,

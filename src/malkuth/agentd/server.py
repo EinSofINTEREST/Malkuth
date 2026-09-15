@@ -161,6 +161,7 @@ def create_app(runtime: AgentRuntime, *, token: str | None = None) -> FastAPI:
     async def invoke(task: TaskRequest) -> TaskResult:
         """태스크를 동기 실행한다 (202+polling 아님)."""
         _reject_when_draining(runtime)
+        task = _unverified(task)
         async with runtime.semaphore:
             running = asyncio.create_task(runtime.executor.execute(task))
             runtime.track(task.task_id, running)
@@ -174,6 +175,7 @@ def create_app(runtime: AgentRuntime, *, token: str | None = None) -> FastAPI:
     async def stream(task: TaskRequest) -> StreamingResponse:
         """태스크 이벤트를 SSE 로 스트리밍한다."""
         _reject_when_draining(runtime)
+        task = _unverified(task)
 
         async def events() -> AsyncIterator[bytes]:
             async with runtime.semaphore:
@@ -244,6 +246,11 @@ def _reject_when_draining(runtime: AgentRuntime) -> None:
             agent=runtime.agent,
             retryable=True,
         )
+
+
+def _unverified(task: TaskRequest) -> TaskRequest:
+    """Control API 로 온 태스크의 호출자 주장은 버린다 — 확인된 호출자는 A2A 수신 입구만 채운다."""
+    return task.model_copy(update={"caller": None}) if task.caller is not None else task
 
 
 __all__ = [

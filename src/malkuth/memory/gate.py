@@ -93,7 +93,7 @@ class RegistryGate:
         mode = Mode.RW if write else Mode.RO
         allowed: list[MemorySpace] = []
         for alias in dict.fromkeys(aliases):
-            space = token.resolve(alias)
+            space = token.resolve(alias) or _addressed_by_id(alias)
             if space is None:
                 continue  # 미선언 — 서비스가 MEM_001 로 거부하고 감사 로그를 남긴다
             verdict = await self.client.decide(presented, ResourceKind.MEMORY, space.space_id, mode)
@@ -124,6 +124,25 @@ class RegistryGate:
             group=groups.get(manifest.metadata.group or ""),
             global_spaces=global_group.spec.memory if global_group else None,
         )
+
+
+def _addressed_by_id(alias: str) -> MemorySpace | None:
+    """선언하지 않은 space 를 space id 로 부른 경우 — 부여받은 space 에 닿는 길 (#279).
+
+    해석만 넓힌다: 허용 여부는 여전히 요청마다 레지스트리가 판정한다. 선언도 부여도 없으면 거부.
+    """
+    from malkuth.access.baselines import SPACE_ID
+    from malkuth.modules.memoryset import MemoryScope
+
+    matched = SPACE_ID.fullmatch(alias)
+    if matched is None:
+        return None
+    return MemorySpace(
+        alias=alias,
+        scope=MemoryScope(matched["scope"]),
+        owner=matched["owner"],
+        name=matched["alias"],
+    )
 
 
 def _log_decision(

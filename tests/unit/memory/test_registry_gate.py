@@ -197,3 +197,43 @@ async def test_while_the_registry_is_down_known_spaces_keep_working_and_new_ones
     assert (await refused(researcher.append("knowledge", entry=fact(KNOWLEDGE)))).code == (
         ErrorCode.MEM_001
     )
+
+
+# --- 부여받은 선언 밖 space (#279) --------------------------------------------------------
+
+
+async def test_a_granted_undeclared_space_is_reachable_by_its_space_id(stack):
+    """권한 에이전트가 선언 밖 space 를 부여하면 에이전트에게는 별칭이 없다 — space id 로 부른다."""
+    import time
+
+    from malkuth.access.model import Effect, Rule
+
+    elsewhere = "group:ops:runbook"
+    researcher = stack.agent(stack.registry.issue_identity("researcher", "dep-1"))
+    await settled(stack)
+    assert (await refused(researcher.read(elsewhere))).code == ErrorCode.MEM_001, "부여 전에 열렸다"
+
+    now = time.time()
+    stack.registry._record(  # noqa: SLF001 — 권한 에이전트 부여와 같은 기록 경로
+        Rule(
+            rule_id="rule-granted",
+            agent="researcher",
+            kind=ResourceKind.MEMORY,
+            target=elsewhere,
+            mode=Mode.RW,
+            effect=Effect.ALLOW,
+            decided_by="permission-agent",
+            requested_by="researcher",
+            reason="needs the runbook",
+            created_at=now,
+            expires_at=now + 600,
+        ),
+        op="grant",
+    )
+    await settled(stack)
+
+    await researcher.append(elsewhere, entry=fact(elsewhere, "runbook step"))
+    assert [e.content for e in await researcher.read(elsewhere)] == ["runbook step"]
+    assert (await refused(researcher.read("local:writer:longterm"))).code == ErrorCode.MEM_001, (
+        "space id 로 부른다고 선언·부여 없는 space 가 열리면 안 된다"
+    )

@@ -205,6 +205,10 @@ class SdkPeerTransport:
         name = state_name(final.status.state)
         if name == "completed":
             return TaskResult.completed(task, output=read_output(final))
+        peer_error = read_output(final).get("error")
+        if isinstance(peer_error, dict):
+            # 피호출자가 실어 보낸 사유 — 코드로 대응을 가를 수 있게 그대로 싣는다
+            raise task_rejected(self.agent, callee, state=name, peer_error=peer_error)
         raise task_rejected(self.agent, callee, state=name)
 
     async def _client(self, callee: str, *, token: str, headers: Mapping[str, str]) -> Client:

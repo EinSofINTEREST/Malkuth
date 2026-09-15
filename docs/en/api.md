@@ -877,8 +877,8 @@ a private address must be listed in `MALKUTH_EGRESS_PRIVATE_DESTINATIONS`, like 
 **Sessions belong to one agent and one server.** Every agent reaches a server with the same proxy
 credential, so the server cannot tell their sessions apart. The proxy signs each `mcp-session-id` it
 returns with the agent and server it was issued to, and strips and checks the signature on the way in.
-A session id used by another agent, for another server, or altered is `404`, which MCP clients answer
-by opening a new session. The signing key is derived from the proxy's registry credential, so sessions
+A session id used by another agent, for another server, or altered is `404` — what the MCP
+specification prescribes for an unknown session. The signing key is derived from the proxy's registry credential, so sessions
 survive a proxy restart.
 
 Deployments leave remote MCP credentials out of the agent's environment. Declare them in a scope as

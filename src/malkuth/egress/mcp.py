@@ -237,7 +237,7 @@ class McpTermination:
         sealed = request.headers.get(SESSION_HEADER)
         session = self.sessions.open(agent, server, sealed) if sealed is not None else None
         if sealed is not None and session is None:
-            # MCP 는 모르는 세션에 404 로 답한다 — 클라이언트가 새 세션을 연다
+            # MCP 명세는 모르는 세션에 404 로 답하게 한다
             log.warning("mcp session not issued to this agent", agent=agent, mcp_server=server,
                         resource=ResourceKind.MCP_TOOL.value, target=server)  # fmt: skip
             return _http_error(404, "unknown mcp session")

@@ -472,16 +472,21 @@ The surface opens when `orchestrator.access_store` is set:
 orchestrator:
   access_store: ./var/access.db          # identities, grants, revocations — survives restarts
   access_enforcer_token: ${ENFORCER}     # must differ from control_token
+  access_agent_url: http://control-plane:8700   # the control plane as agent containers reach it
   access_stewards: [permission-agent]    # the only agents that may grant
 ```
 
 Binding a non-loopback address with `access_store` but no `access_enforcer_token` refuses to
-start (`CFG_001`), for the same reason the control token is required there.
+start (`CFG_001`), for the same reason the control token is required there. `access_store`
+without `access_agent_url` also refuses to start (`CFG_001`): agents need it to prove who they
+are on A2A calls, and without it they would fall back to a signing key every agent in the graph
+holds.
 
-**Enforcement is being rolled out point by point.** Memory is enforced today: the Memory
-Service in registry mode asks for every request (see [Memory enforcement](#memory-enforcement)).
-Egress, remote MCP tools and A2A calls are recorded here but not yet enforced, so a decision for
-those kinds changes nothing the agent can reach.
+**Enforcement is being rolled out point by point.** Memory and A2A calls are enforced today —
+the Memory Service in registry mode and each callee's A2A server ask for every request (see
+[Memory enforcement](#memory-enforcement) and [A2A enforcement](#a2a-enforcement)). Egress and
+remote MCP tools are recorded here but not yet enforced, so a decision for those kinds changes
+nothing the agent can reach.
 
 ### Three callers, three credentials
 
@@ -492,7 +497,8 @@ agent the ability to read every decision. So each audience authenticates as itse
 |---|---|---|
 | Operator | control plane token | read records, revoke, lift |
 | Permission agent | **its own agent identity** | grant |
-| Enforcement point | `access_enforcer_token` | decide, change feed |
+| Any agent (A2A) | **its own agent identity** | call tickets, verify a received ticket, change feed |
+| Enforcement point | `access_enforcer_token` | decide, identities, change feed |
 
 ### Agent identity
 
@@ -513,7 +519,9 @@ In order, first match wins:
 A revocation therefore beats both the declaration and any grant. For memory, revoking with
 `mode: "rw"` removes writing only — reading stays.
 
-Step 2 counts only for a resource kind whose enforcement point is in place — today, `memory`.
+Step 2 counts only for a resource kind whose enforcement point is in place — today, `memory` and
+`a2a`. For `a2a` the declaration is the `connections` of the graph the caller is **currently
+deployed in**; a graph on disk that is not deployed grants nothing.
 Each kind's declaration check is wired together with the enforcement point that uses it, so the
 declaration and its enforcement cannot drift apart. Until then, a declaration contributes
 nothing for that kind, and a request with no grant is `deny` with `decided_by: "default"`.
@@ -613,11 +621,13 @@ An enforcement point that must resolve a name before it can ask for a decision �
 Service turns an alias into a space id through the agent's declarations — first learns who is
 asking. An unknown or revoked identity is `200` with `"agent": null`, cacheable like a denial.
 
-### `GET /v1/access/changes?after=<version>&wait_s=<seconds>` — enforcement point
+### `GET /v1/access/changes?after=<version>&wait_s=<seconds>` — enforcement point or agent
 
 Long-poll. Answers `{"version": N}` as soon as the registry version moves past `after`, or when
 `wait_s` (at most 30) passes. Every grant, revocation and lift moves the version, and so does
-tearing down a deployment (its identities stop working); an enforcement point drops its cache when it sees a new one.
+tearing down a deployment (its identities stop working); an enforcement point drops its cache
+when it sees a new one. The bearer is `access_enforcer_token` or a live agent identity — a callee
+follows the feed to drop cached A2A decisions, and the feed carries only version numbers.
 
 ### `GET /v1/access/agents/{name}` — operator
 
@@ -672,6 +682,59 @@ answers, cached decisions older than two seconds are asked again.
 tokens; a Memory Service still in token mode does not know them and refuses every agent. The
 reverse — a registry-mode Memory Service with a control plane that has no registry — refuses
 every agent too, because nothing issues identities.
+
+### A2A enforcement
+
+Without a registry, a callee checks an HMAC token signed with a key the runtime gives **every
+agent in the graph** — any of them can mint a token claiming to be any other. With a registry,
+the callee decides each call itself:
+
+1. The caller asks the registry for a **ticket** for one callee, authenticating with its own
+   identity. The ticket lives five minutes and is reused until thirty seconds before it expires.
+2. The caller sends the ticket in `x-malkuth-a2a-ticket`. Its identity never leaves for the callee.
+3. The callee's A2A server sends the ticket to the registry, authenticating with **its own**
+   identity. The registry refuses a ticket issued for another callee, an expired one, and one
+   whose caller identity was revoked; otherwise it decides `a2a` for (caller, callee).
+4. A denial — or no decision while the registry is unreachable and nothing is cached — is
+   `A2A_004`, before the task reaches the agent. The callee caches decisions, follows the change
+   feed with its own identity, and never keeps one past the ticket's expiry.
+
+What this gives you:
+
+- **Revoking a connection applies to the next call** of a running caller; lifting it restores
+  calls without a redeploy. Nothing restarts.
+- **Skipping the caller's own check does not help.** A caller that calls a port directly with an
+  edge token, with another agent's name, or without a ticket is refused by the callee.
+- **A ticket is useless elsewhere.** It is not an identity: the Memory Service does not accept it,
+  and another agent rejects it because it names a different callee.
+
+The caller still checks the declared connections first — it spares a round trip and gives a clear
+`A2A_004` locally — but that check is a convenience, not the boundary.
+
+### `POST /v1/access/a2a/tickets` — any agent
+
+```json
+{"callee": "planner"}
+```
+
+`201` with `{"ticket": "...", "callee": "planner", "expires_at": 1789381500.0}`. A ticket is proof
+of identity, not permission: it is issued even for a revoked connection, and the callee refuses
+the call. An unknown or revoked identity is `403` (`ACC_001`); an unknown callee is `404`.
+
+### `POST /v1/access/a2a/verify` — the callee
+
+```json
+{"ticket": "<the ticket the caller sent>"}
+```
+
+```json
+{"agent": "researcher", "decision": "allow", "decided_by": "declaration", "version": 42,
+ "valid_until": 1789381500.0}
+```
+
+A ticket that is not for this callee, expired, forged, or from a revoked caller is `200` with
+`"agent": null, "decision": "deny", "decided_by": "invalid-ticket"`. The bearer must be a live
+agent identity — `403` (`ACC_001`) otherwise.
 
 ## Operational notes
 

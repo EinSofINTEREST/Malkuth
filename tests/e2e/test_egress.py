@@ -548,6 +548,11 @@ class McpSession:
         self.process.wait(timeout=30)
 
 
+def succeeded(answer: str, expected: str) -> bool:
+    """성공한 도구 결과에 기대한 값이 있는가 — 에러 사유에 같은 글자가 섞여도 통과하지 않게."""
+    return answer.startswith("OK:") and expected in answer.removeprefix("OK:")
+
+
 def test_remote_mcp_tools_are_decided_one_by_one_through_the_proxy(plane):
     status, record = api("POST", "/v1/deployments", {"graph": "research-pipeline"})
     assert status == 201, record
@@ -564,8 +569,10 @@ def test_remote_mcp_tools_are_decided_one_by_one_through_the_proxy(plane):
     assert {"mcp__corp__echo", "mcp__corp__add"} <= set(advertised), advertised
 
     session = McpSession(RESEARCHER)
-    assert "e2e" in session.call("echo", {"text": "e2e"})
-    assert session.call("add", {"a": 2, "b": 3}).startswith("OK:")
+    first = session.call("echo", {"text": "e2e"})
+    assert succeeded(first, "e2e"), first
+    added = session.call("add", {"a": 2, "b": 3})
+    assert succeeded(added, "5"), added
 
     # --- 도구 하나 회수: 다음 호출부터 거부, 같은 서버의 다른 도구는 계속
     status, revoked = api(
@@ -580,9 +587,12 @@ def test_remote_mcp_tools_are_decided_one_by_one_through_the_proxy(plane):
         what="revoked mcp tool refused in the open session",
         timeout_s=30,
     )
-    assert "5" in session.call("add", {"a": 2, "b": 3}), "회수가 같은 서버의 다른 도구까지 막았다"
+    added = session.call("add", {"a": 2, "b": 3})
+    assert succeeded(added, "5"), f"회수가 같은 서버의 다른 도구까지 막았다: {added}"
 
     api("DELETE", f"/v1/access/rules/{revoked['rule_id']}")
-    until(lambda: "e2e" in session.call("echo", {"text": "e2e"}), what="lifted", timeout_s=30)
+    until(
+        lambda: succeeded(session.call("echo", {"text": "e2e"}), "e2e"), what="lifted", timeout_s=30
+    )
     session.close()
     assert started_at(RESEARCHER) == started, "권한 변경이 컨테이너를 재시작했다"

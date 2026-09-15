@@ -36,7 +36,7 @@ from malkuth.access.model import (
     Rule,
     mode_problem,
 )
-from malkuth.access.store import Identity
+from malkuth.access.store import Identity, Ticket
 from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
 from malkuth.core.manifest import RESERVED_GLOBAL_GROUP, AccessCeiling
 
@@ -62,10 +62,20 @@ class Baseline(Protocol):
     ``connections`` — 그래서 종류별로 꽂는다.
     """
 
-    def allows(self, agent: str, target: str, mode: Mode | None) -> bool: ...
+    def allows(
+        self, agent: str, target: str, mode: Mode | None, identity: Identity | None = None
+    ) -> bool:
+        """``identity`` 는 요청을 보낸 **그 신원** — 배포마다 다른 선언(A2A 의 그래프)을 고른다."""
+        ...
 
 
 DECLARATIONS_POLL_S = 2.0
+
+TICKET_TTL_S = 300.0
+"""A2A 호출 표의 수명 — 호출자는 만료 전까지 같은 피호출자에게 재사용한다."""
+
+INVALID_TICKET = "invalid-ticket"
+"""표가 없거나, 만료됐거나, 다른 피호출자의 것이거나, 발급받은 신원이 폐기된 판정의 출처."""
 
 
 def declaration_fingerprint(catalog: Catalog) -> tuple[tuple[str, int, int, int], ...]:
@@ -143,10 +153,11 @@ class AccessRegistry:
 
     # --- 신원 ---------------------------------------------------------------
 
-    def issue_identity(self, agent: str, deployment_id: str) -> str:
+    def issue_identity(self, agent: str, deployment_id: str, *, graph: str = "") -> str:
         """Mint a credential for one agent in one deployment and return it once.
 
-        값은 여기서 한 번만 돌려준다 — 레지스트리는 해시만 저장한다.
+        값은 여기서 한 번만 돌려준다 — 레지스트리는 해시만 저장한다. ``graph`` 는 A2A 선언 판정이
+        이 에이전트의 ``connections`` 를 찾는 곳이다.
         """
         credential = secrets.token_urlsafe(32)
         self.store.put_identity(
@@ -155,6 +166,7 @@ class AccessRegistry:
                 agent=agent,
                 deployment_id=deployment_id,
                 issued_at=self.clock(),
+                graph=graph,
             )
         )
         log.info("agent identity issued", agent=agent, deployment_id=deployment_id)
@@ -174,17 +186,34 @@ class AccessRegistry:
         Raises:
             MalkuthError: FORBIDDEN/``ACC_001`` if the credential is unknown or revoked.
         """
+        return self.identity_of(credential).agent
+
+    def identity_of(self, credential: str) -> Identity:
+        """The live identity record behind a credential — agent, deployment, graph.
+
+        Raises:
+            MalkuthError: FORBIDDEN/``ACC_001`` if the credential is unknown or revoked.
+        """
         found = self.store.identity(credential_hash(credential)) if credential else None
         if found is None or found.revoked_at is not None:
             raise _unknown_identity()
-        return found.agent
+        return found
 
     # --- 판정 ---------------------------------------------------------------
 
     def decide(
-        self, agent: str, kind: ResourceKind, target: str, mode: Mode | None = None
+        self,
+        agent: str,
+        kind: ResourceKind,
+        target: str,
+        mode: Mode | None = None,
+        *,
+        identity: Identity | None = None,
     ) -> Decision:
         """Decide one request — revocation, then declaration, then grant.
+
+        ``identity`` 가 있으면 선언 판정이 그 신원의 배포를 본다 — 같은 이름의 다른 배포가 선언한
+        권한을 이 요청이 빌려 쓰지 않는다.
 
         Raises:
             MalkuthError: VALIDATION/``VAL_002`` if the mode does not fit the kind.
@@ -206,12 +235,76 @@ class AccessRegistry:
         if denial is not None:
             return answer(Outcome.DENY, denial.decided_by)
         baseline = self.baselines.get(kind)
-        if baseline is not None and baseline.allows(agent, target, mode):
+        if baseline is not None and baseline.allows(agent, target, mode, identity):
             return answer(Outcome.ALLOW, DECLARATION)
         grant = next((r for r in active if r.effect is Effect.ALLOW), None)
         if grant is not None:
             return answer(Outcome.ALLOW, grant.decided_by)
         return answer(Outcome.DENY, DEFAULT_OUTCOME_SOURCE)
+
+    # --- A2A 호출 표 ------------------------------------------------------------
+
+    def issue_ticket(self, caller_credential: str, callee: str) -> tuple[str, float]:
+        """Mint a ticket the caller presents to one callee.
+
+        표는 **신원 증명**일 뿐 허가가 아니다 — 허가는 피호출자가 표를 들고 물을 때 판정한다.
+        그래서 연결이 회수돼도 표 발급은 되고, 피호출자가 거부한다.
+
+        Raises:
+            MalkuthError: FORBIDDEN/``ACC_001`` unknown caller, NOT_FOUND/``NF_001`` unknown callee.
+        """
+        caller = self.identify(caller_credential)
+        self.catalog.agent(callee)
+        ticket = secrets.token_urlsafe(32)
+        now = self.clock()
+        self.store.put_ticket(
+            Ticket(
+                ticket_hash=credential_hash(ticket),
+                caller_hash=credential_hash(caller_credential),
+                caller=caller,
+                callee=callee,
+                issued_at=now,
+                expires_at=now + TICKET_TTL_S,
+            )
+        )
+        return ticket, now + TICKET_TTL_S
+
+    def verify_ticket(self, callee_credential: str, ticket: str) -> Decision:
+        """Decide an inbound A2A call for the callee holding ``callee_credential``.
+
+        표가 이 피호출자의 것이 아니면 거부한다 — 표를 받은 피호출자가 그것을 들고 다른 에이전트를
+        호출자 행세로 부르지 못하게 한다.
+
+        Raises:
+            MalkuthError: FORBIDDEN/``ACC_001`` if the callee credential is unknown.
+        """
+        callee = self.identify(callee_credential)
+        found = self.store.ticket(credential_hash(ticket)) if ticket else None
+        now = self.clock()
+        caller_identity = self.store.identity(found.caller_hash) if found else None
+        if (
+            found is None
+            or found.callee != callee
+            or now >= found.expires_at
+            or caller_identity is None
+            or caller_identity.revoked_at is not None
+        ):
+            self._count_decision(ResourceKind.A2A, Outcome.DENY)
+            return Decision(
+                agent="",
+                kind=ResourceKind.A2A,
+                target=callee,
+                mode=None,
+                outcome=Outcome.DENY,
+                decided_by=INVALID_TICKET,
+                version=self.store.version(),
+            )
+        # 판정은 표를 발급받은 **그 신원**의 배포 선언으로 한다
+        decision = self.decide(found.caller, ResourceKind.A2A, callee, identity=caller_identity)
+        until = found.expires_at
+        if decision.valid_until is not None:
+            until = min(until, decision.valid_until)
+        return replace(decision, valid_until=until)
 
     # --- 운영자: 좁히기 --------------------------------------------------------
 
@@ -483,6 +576,8 @@ def _ceiling_covers(
 
 
 __all__ = [
+    "INVALID_TICKET",
+    "TICKET_TTL_S",
     "ACCESS_CREDENTIAL_ENV",
     "AccessRegistry",
     "Baseline",

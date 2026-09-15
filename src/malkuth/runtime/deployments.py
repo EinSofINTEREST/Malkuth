@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 import structlog
 
+from malkuth.access.client import ACCESS_URL_ENV
 from malkuth.access.registry import ACCESS_CREDENTIAL_ENV
 from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
 from malkuth.runtime.images import image_tag
@@ -354,6 +355,8 @@ class DeploymentManager:
     access: AccessRegistry | None = None
     """권한 레지스트리 (#277) — 있으면 에이전트마다 신원을 발급해 주입하고,
     해체·되감기 때 폐기한다."""
+    access_url: str | None = None
+    """에이전트 컨테이너에서 닿는 레지스트리 주소 (#281) — A2A 표를 받고 확인하는 곳."""
     ready_timeout_s: float = DEFAULT_READY_TIMEOUT_S
     ready_poll_s: float = DEFAULT_READY_POLL_S
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
@@ -426,7 +429,7 @@ class DeploymentManager:
         provisions: dict[str, Provision] = {}
         launched: list[LaunchedAgent] = []
         try:
-            credentials = self._issue_identities(manifests, deployment_id)
+            credentials = self._issue_identities(manifests, deployment_id, graph_name)
             provisions = self._provision(
                 topology, manifests, a2a_secret=record.a2a_secret, credentials=credentials
             )
@@ -633,9 +636,14 @@ class DeploymentManager:
             if credential:
                 # 강제 지점에 내미는 에이전트 신원 (01 Access Control 6) — 배선이라 provision 에
                 env[ACCESS_CREDENTIAL_ENV] = credential
+                if self.access_url:
+                    env[ACCESS_URL_ENV] = self.access_url
             if edges:
                 env[A2A_EDGES_ENV] = ",".join(f"{caller}>{callee}" for caller, callee in edges)
-                env[A2A_SECRET_ENV] = a2a_secret
+                if not (credential and self.access_url):
+                    # 레지스트리 모드에서는 공유 서명 키를 넣지 않는다 — 그래프의 모든 에이전트가
+                    # 쥐는 키로는 누구든 다른 에이전트 행세의 토큰을 만든다 (#281)
+                    env[A2A_SECRET_ENV] = a2a_secret
             peers = [
                 f"{callee}={container_name(callee, 0)}:{assigned[callee]}"
                 for caller, callee in edges
@@ -652,12 +660,15 @@ class DeploymentManager:
         return provisions
 
     def _issue_identities(
-        self, manifests: Sequence[AgentManifest], deployment_id: str
+        self, manifests: Sequence[AgentManifest], deployment_id: str, graph: str
     ) -> dict[str, str]:
         """배포할 에이전트마다 신원 하나 — 레지스트리가 없으면 발급하지 않는다."""
         if self.access is None:
             return {}
-        return {m.name: self.access.issue_identity(m.name, deployment_id) for m in manifests}
+        return {
+            m.name: self.access.issue_identity(m.name, deployment_id, graph=graph)
+            for m in manifests
+        }
 
     def _revoke_identities(self, deployment_id: str) -> None:
         if self.access is not None:

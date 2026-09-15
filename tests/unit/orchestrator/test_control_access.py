@@ -264,3 +264,52 @@ async def test_without_a_registry_the_routes_do_not_exist():
         transport=httpx.ASGITransport(app=app), base_url="http://cp"
     ) as client:
         assert (await client.post("/v1/access/grants", json=GRANT)).status_code == 404
+
+
+# --- A2A 호출 표 (#281) ---------------------------------------------------------
+
+
+async def test_an_agent_gets_a_ticket_and_the_callee_verifies_it_with_its_own_identity(
+    api, registry
+):
+    caller = registry.issue_identity("worker", "dep-1")
+    callee = registry.issue_identity("peer", "dep-1")
+
+    issued = await api.post(
+        "/v1/access/a2a/tickets", json={"callee": "peer"}, headers=bearer(caller)
+    )
+    verified = await api.post(
+        "/v1/access/a2a/verify", json={"ticket": issued.json()["ticket"]}, headers=bearer(callee)
+    )
+
+    assert issued.status_code == 201, issued.text
+    body = verified.json()
+    assert body["agent"] == "worker"
+    assert body["decision"] == "deny", "이 작업공간에는 연결 선언이 없다 — 표는 허가가 아니다"
+
+
+@pytest.mark.parametrize(
+    ("path", "body"),
+    [
+        ("/v1/access/a2a/tickets", {"callee": "peer"}),
+        ("/v1/access/a2a/verify", {"ticket": "anything"}),
+    ],
+)
+@pytest.mark.parametrize("token", [CONTROL, ENFORCER, "made-up"])
+async def test_ticket_routes_take_only_an_agent_identity(api, path, body, token):
+    """운영자 토큰도 강제 지점 토큰도 에이전트 신원이 아니다."""
+    response = await api.post(path, json=body, headers=bearer(token))
+
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "ACC_001"
+
+
+async def test_the_change_feed_takes_an_enforcer_token_or_a_live_agent_identity(api, registry):
+    agent = registry.issue_identity("worker", "dep-1")
+    url = "/v1/access/changes?wait_s=0"
+
+    assert (await api.get(url, headers=bearer(ENFORCER))).status_code == 200
+    assert (await api.get(url, headers=bearer(agent))).status_code == 200
+    assert (await api.get(url, headers=bearer(CONTROL))).status_code == 401
+    registry.revoke_deployment("dep-1")
+    assert (await api.get(url, headers=bearer(agent))).status_code == 401

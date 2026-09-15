@@ -88,7 +88,8 @@ class AccessClient:
 
     Attributes:
         base_url: control plane 주소.
-        enforcer_token: 강제 지점 자격 — 운영자 토큰과 다르다.
+        enforcer_token: 강제 지점 자격 — 운영자 토큰과 다르다. 피호출자 에이전트의 A2A 서버에서는
+            그 에이전트 **자신의 신원**이다 (강제 지점 토큰을 에이전트 컨테이너에 넣지 않는다).
         component: 계측 라벨 (``memory`` / ``egress`` / ``a2a``).
         clock: epoch 초 — ``valid_until`` 과 같은 시계. 테스트는 주입한다.
     """
@@ -152,6 +153,24 @@ class AccessClient:
                 decision="deny",
                 decision_source=source.value,
             )
+        return verdict
+
+    async def verify_ticket(self, ticket: str) -> Verdict:
+        """Decide an inbound A2A call — the bearer is the callee's own identity (#281)."""
+
+        async def fetch() -> tuple[Any, int, float | None]:
+            body = await self._post("/v1/access/a2a/verify", {"ticket": ticket})
+            answer = (body["agent"], body["decision"] == "allow", body["decided_by"])
+            return answer, int(body["version"]), body.get("valid_until")
+
+        answer, source = await self._cached(
+            self._decisions, ("ticket", _hash(ticket), "", ""), fetch
+        )
+        if answer is None:
+            verdict = Verdict(None, False, "unreachable", source)
+        else:
+            verdict = Verdict(answer[0], answer[1], answer[2], source)
+        self._count(ResourceKind.A2A, verdict)
         return verdict
 
     # --- 변경 알림 ------------------------------------------------------------

@@ -91,6 +91,7 @@ def plane(stack, tmp_path) -> Iterator[dict[str, Any]]:
             "control_host": "0.0.0.0",  # noqa: S104 — 레지스트리 모드 Memory Service 가 닿아야 한다
             "access_store": str(tmp_path / "access.db"),
             "access_enforcer_token": ENFORCER_TOKEN,
+            "access_agent_url": f"http://host.docker.internal:{CONTROL_PORT}",
         },
     )
     tokens_path = tmp_path / "memory.json"

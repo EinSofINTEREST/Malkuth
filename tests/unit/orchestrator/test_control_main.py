@@ -417,17 +417,22 @@ async def test_the_registry_reaches_deployments_and_the_served_app(tmp_path, mon
         {
             "access_store": str(tmp_path / "access.db"),
             "access_enforcer_token": "enforcer",
+            "access_agent_url": "http://control-plane:8700",
             "access_stewards": ["permission-agent"],
         },
     )
 
     assert isinstance(deployments.access, AccessRegistry)
     assert deployments.access.stewards == frozenset({"permission-agent"})
-    from malkuth.access.baselines import MemoryBaseline
+    assert deployments.access_url == "http://control-plane:8700", "에이전트가 표를 받을 곳을 모른다"
+    from malkuth.access.baselines import A2ABaseline, MemoryBaseline
     from malkuth.access.model import ResourceKind
 
-    # 선언 판정이 빠지면 선언된 메모리가 전부 기본 거부된다
+    # 선언 판정이 빠지면 선언된 메모리·연결이 전부 기본 거부된다
     assert isinstance(deployments.access.baselines[ResourceKind.MEMORY], MemoryBaseline)
+    a2a = deployments.access.baselines[ResourceKind.A2A]
+    assert isinstance(a2a, A2ABaseline)
+    assert a2a.store is deployments.access.store, "배포 기록과 다른 저장소를 보면 그래프를 모른다"
     # 계측기는 노출되는 것 하나 — 따로 만들면 기록은 되는데 아무도 못 본다
     assert deployments.access.metrics is served_metrics
     assert captured["run_metrics"] is served_metrics
@@ -458,3 +463,24 @@ def test_an_exposed_registry_without_an_enforcer_token_is_refused(tmp_path, monk
 
     assert exc_info.value.code == ErrorCode.CFG_001
     assert exc_info.value.details["setting"] == "orchestrator.access_enforcer_token"
+
+
+def test_a_registry_without_an_agent_url_is_refused(tmp_path, monkeypatch):
+    """주소가 없으면 A2A 가 그래프 전체가 쥔 공유 키로 되돌아간다 — 기동하지 않는다 (#281)."""
+    write_config(
+        tmp_path,
+        {
+            "run_store": str(tmp_path / "runs.db"),
+            "access_store": str(tmp_path / "access.db"),
+            "access_enforcer_token": "enforcer",
+        },
+    )
+    monkeypatch.setenv("MALKUTH_ENV", "local")
+    monkeypatch.setenv("MALKUTH_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr(entrypoint, "_setup_observability", lambda: None)
+
+    with pytest.raises(MalkuthError) as exc_info:
+        entrypoint.main()
+
+    assert exc_info.value.code == ErrorCode.CFG_001
+    assert exc_info.value.details["setting"] == "orchestrator.access_agent_url"

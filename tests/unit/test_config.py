@@ -8,6 +8,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from malkuth.config import (
     ENV_PREFIX,
@@ -373,3 +374,28 @@ def test_the_enforcer_token_must_differ_from_the_control_token():
         OrchestratorConfig(control_token="a", access_enforcer_token="b").access_enforcer_token
         == "b"
     )
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "control-plane:8700",
+        "ftp://control-plane",
+        "http://agent:secret@control-plane:8700",
+        "http://control-plane:8700/v1?x=1",
+        "http://",
+    ],
+)
+def test_the_agent_facing_registry_url_must_be_a_plain_http_url(url):
+    """자격을 URL 에 넣거나 경로를 붙이면 새거나 엉뚱한 곳으로 간다 (#291 리뷰)."""
+    from malkuth.config import OrchestratorConfig
+
+    with pytest.raises(ValidationError):
+        OrchestratorConfig(access_agent_url=url)
+
+
+@pytest.mark.parametrize("url", ["http://control-plane:8700", "https://cp.example.com/"])
+def test_an_agent_facing_registry_url_is_accepted(url):
+    from malkuth.config import OrchestratorConfig
+
+    assert OrchestratorConfig(access_agent_url=url).access_agent_url == url

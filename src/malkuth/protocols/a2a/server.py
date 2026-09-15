@@ -13,15 +13,19 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 from a2a.server.agent_execution import AgentExecutor
+from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.types import a2a_pb2 as pb
+from a2a.utils.errors import A2AError
 
 from malkuth.core.agent import TaskConfig, TaskRequest, TaskStatus, TraceContext
+from malkuth.core.errors import MalkuthError
 from malkuth.protocols.a2a.errors import depth_exceeded, not_allowed
 from malkuth.protocols.a2a.sdk import CALLER_HEADER, TOKEN_HEADER
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Mapping
+    from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
 
+    from malkuth.access.client import AccessClient
     from malkuth.core.agent import TaskResult
     from malkuth.protocols.a2a.client import A2AServer
 
@@ -74,6 +78,69 @@ class InboundGuard:
 
     server: A2AServer
     max_depth: int = DEFAULT_MAX_DEPTH
+    verifier: AccessClient | None = None
+    """레지스트리 모드 — 있으면 호출마다 받은 표를 **자기 신원으로** 레지스트리에 확인한다.
+    per-edge token 은 그래프의 모든 에이전트가 같은 서명 키로 만들 수 있어 경계가 아니다."""
+
+    def check_task(self, headers: Mapping[str, str], task: TaskRequest) -> None:
+        """What the executor checks once the body is decoded.
+
+        레지스트리 모드에서는 표를 이미 요청 입구에서 확인했다(``admit``) — 여기서는 깊이만 본다.
+        """
+        if self.verifier is None:
+            self.check(headers, task)
+            return
+        self._check_depth(headers.get(CALLER_HEADER, "") or "unknown", task)
+
+    async def admit(self, headers: Mapping[str, str]) -> str | None:
+        """Authorize one inbound call by its ticket — before the SDK starts the task.
+
+        SDK 가 태스크 실행을 시작한 뒤에 await 하고 거부하면 호출자는 거부 사유 대신 끝나지 않은
+        스트림을 본다 — 그래서 레지스트리 확인은 실행 전에 한다.
+
+        Returns:
+            The verified caller name, or None when no verifier is wired (per-edge token mode).
+
+        Raises:
+            MalkuthError: A2A/``A2A_004`` if the call is not allowed or cannot be decided.
+        """
+        if self.verifier is None:
+            return None
+        from malkuth.protocols.a2a.tickets import TICKET_HEADER
+
+        claimed = headers.get(CALLER_HEADER, "") or "unknown"
+        ticket = headers.get(TICKET_HEADER, "")
+        if not ticket:
+            raise not_allowed(
+                claimed, self.server.agent, owner=self.server.agent, reason="no ticket"
+            )
+        verdict = await self.verifier.verify_ticket(ticket)
+        if not verdict.allowed or verdict.agent is None:
+            log.info(
+                "a2a inbound denied by registry",
+                a2a_caller=claimed,
+                a2a_callee=self.server.agent,
+                decision="deny",
+                decided_by=verdict.decided_by,
+                decision_source=verdict.source.value,
+            )
+            raise not_allowed(
+                claimed, self.server.agent, owner=self.server.agent, reason=verdict.decided_by
+            )
+        if claimed not in ("unknown", verdict.agent):
+            # 표는 다른 호출자의 것이다 — 이름 주장이 표와 어긋나면 누구의 호출인지 믿을 수 없다
+            raise not_allowed(
+                claimed, self.server.agent, owner=self.server.agent, reason="caller mismatch"
+            )
+        return verdict.agent
+
+    def _check_depth(self, caller: str, task: TaskRequest) -> None:
+        # 깊이 검사는 **수신 측에서도** 한다: caller 가 자기 depth 를 정직하게
+        # 실었다고 믿으면 순환 위임을 caller 하나가 뚫을 수 있다
+        if task.trace.depth > self.max_depth:
+            raise depth_exceeded(
+                caller, self.server.agent, depth=task.trace.depth, limit=self.max_depth
+            )
 
     def check(self, headers: Mapping[str, str], task: TaskRequest) -> str:
         """Authorize one inbound call.
@@ -98,13 +165,7 @@ class InboundGuard:
             raise not_allowed(caller or "unknown", self.server.agent)
 
         self.server.authorize(caller, token)
-
-        # 깊이 검사는 **수신 측에서도** 한다: caller 가 자기 depth 를 정직하게
-        # 실었다고 믿으면 순환 위임을 caller 하나가 뚫을 수 있다
-        if task.trace.depth > self.max_depth:
-            raise depth_exceeded(
-                caller, self.server.agent, depth=task.trace.depth, limit=self.max_depth
-            )
+        self._check_depth(caller, task)
 
         log.debug(
             "a2a inbound authorized",
@@ -129,7 +190,7 @@ class GuardedExecutor(AgentExecutor):
     async def execute(self, context: Any, event_queue: Any) -> None:
         """수신 태스크 하나를 검증하고 실행한다."""
         task = read_task(context.get_user_input())
-        self._guard.check(headers_of(context.call_context), task)
+        self._guard.check_task(headers_of(context.call_context), task)
 
         result = await self._invoke(task)
         await event_queue.enqueue_event(
@@ -147,6 +208,33 @@ class GuardedExecutor(AgentExecutor):
         """취소는 상위 계층이 관리한다 — 여기서는 no-op."""
 
 
+class GuardedRequestHandler(DefaultRequestHandler):
+    """The SDK request handler with the registry check in front of task execution."""
+
+    def __init__(self, *, guard: InboundGuard, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._guard = guard
+
+    async def on_message_send(self, params: Any, context: Any) -> Any:
+        await self._admit(context)
+        return await super().on_message_send(params, context)
+
+    async def on_message_send_stream(self, params: Any, context: Any) -> AsyncGenerator[Any]:
+        await self._admit(context)
+        async for event in super().on_message_send_stream(params, context):
+            yield event
+
+    async def _admit(self, context: Any) -> None:
+        """거부를 SDK 오류로 옮긴다 — 실행 전 오류는 SDK 가 오류 응답으로만 실어 보낸다.
+
+        사유(``a2a:A2A_004`` 표기)를 메시지에 남겨야 호출자가 설정 문제와 peer 실패를 가른다.
+        """
+        try:
+            await self._guard.admit(headers_of(context))
+        except MalkuthError as err:
+            raise A2AError(message=str(err)) from err
+
+
 def encode_result(result: TaskResult) -> str:
     """결과를 peer 가 읽을 본문으로 — ``read_output`` 의 짝."""
     return json.dumps(result.output, ensure_ascii=False)
@@ -155,6 +243,7 @@ def encode_result(result: TaskResult) -> str:
 __all__ = [
     "DEFAULT_MAX_DEPTH",
     "GuardedExecutor",
+    "GuardedRequestHandler",
     "InboundGuard",
     "encode_result",
     "headers_of",

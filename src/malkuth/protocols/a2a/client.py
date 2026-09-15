@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from malkuth.core.agent import TaskRequest, TaskResult
     from malkuth.observability.metrics import Metrics
     from malkuth.protocols.a2a.allowlist import Allowlist
+    from malkuth.protocols.a2a.tickets import TicketSource
 
 DEFAULT_CALL_TIMEOUT_S = 120.0
 
@@ -108,6 +109,8 @@ class A2AClient:
     # 주입 지점은 하나다 — telemetry 와 metrics 를 따로 받으면 한쪽만 주입됐을 때
     # 계측이 조용히 반쪽이 되거나 서로 다른 registry 로 흩어진다
     metrics: Metrics | None = None
+    tickets: TicketSource | None = None
+    """레지스트리 모드의 신원 증명 — 있으면 per-edge token 대신 피호출자 하나에만 쓰는 표."""
     _telemetry: A2aTelemetry | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
@@ -165,13 +168,13 @@ class A2AClient:
             self._record(callee, status=STATUS_FAILED)
             raise unreachable(self.agent, callee, reason="circuit open")
 
-        token = self.allowlist.token_for(self.agent, callee)
+        token, headers = await self._credentials(callee)
         # 위임 체인이 이어지도록 trace 를 자식으로 넘긴다 — run 전체가 단일 trace
         delegated = task.model_copy(update={"trace": task.trace.child(span_id=task.task_id)})
 
         started = time.monotonic()
         try:
-            result = await self._attempt(callee, delegated, token)
+            result = await self._attempt(callee, delegated, token, headers)
         except MalkuthError as err:
             # A2A_003 은 peer 가 살아서 "그 태스크는 못 한다" 고 답한 것이다.
             # 이를 실패로 세면 멀쩡한 peer 가 도달 불가(A2A_002)로 차단된다
@@ -211,7 +214,25 @@ class A2AClient:
         self._record(callee, status=STATUS_COMPLETED)
         return result
 
-    async def _attempt(self, callee: str, task: TaskRequest, token: str) -> TaskResult:
+    async def _credentials(self, callee: str) -> tuple[str, dict[str, str]]:
+        """피호출자에게 내밀 증명 — 레지스트리 모드면 표, 아니면 per-edge token.
+
+        표를 못 받은 것은 호출 실패다 — 피호출자까지 가 봐야 거부된다.
+        """
+        if self.tickets is None:
+            return self.allowlist.token_for(self.agent, callee), {}
+        from malkuth.protocols.a2a.tickets import TICKET_HEADER
+
+        try:
+            ticket = await self.tickets.ticket_for(callee)
+        except MalkuthError:
+            self._record(callee, status=STATUS_FAILED)
+            raise
+        return "", {TICKET_HEADER: ticket}
+
+    async def _attempt(
+        self, callee: str, task: TaskRequest, token: str, headers: Mapping[str, str]
+    ) -> TaskResult:
         """Send once, retrying only what the policy allows.
 
         정책이 허용하는 실패만 재시도하며 보냅니다.
@@ -224,10 +245,10 @@ class A2AClient:
         한다" 고 답한 것이라, 다시 보내도 같은 답이 온다 (retryable=False).
         """
         if self.retry is None:
-            return await self._send(callee, task, token)
+            return await self._send(callee, task, token, headers)
 
         async def send() -> TaskResult:
-            return await self._send(callee, task, token)
+            return await self._send(callee, task, token, headers)
 
         return await retrying(
             self.retry,
@@ -243,11 +264,13 @@ class A2AClient:
         if self._telemetry is not None:
             self._telemetry.call_finished(callee=callee, status=status)
 
-    async def _send(self, callee: str, task: TaskRequest, token: str) -> TaskResult:
+    async def _send(
+        self, callee: str, task: TaskRequest, token: str, headers: Mapping[str, str]
+    ) -> TaskResult:
         """전송 예외를 A2A 코드로 변환한다."""
         try:
             result = await asyncio.wait_for(
-                self.transport.send(callee=callee, task=task, token=token, headers={}),
+                self.transport.send(callee=callee, task=task, token=token, headers=headers),
                 timeout=self.timeout_s,
             )
         except TimeoutError as err:
@@ -256,6 +279,10 @@ class A2AClient:
             ) from err
         except (ConnectionError, OSError) as err:
             raise unreachable(self.agent, callee, reason=type(err).__name__) from err
+        except MalkuthError:
+            # transport 가 이미 분류했다 — 피호출자의 A2A_004 를 A2A_001 로 뭉개면 회수(설정)와
+            # 제출 실패(운영)가 구분되지 않는다
+            raise
         except Exception as err:
             raise submit_failed(self.agent, callee, reason=type(err).__name__) from err
 

@@ -1157,3 +1157,17 @@ def test_a_proxy_terminated_key_never_leaves_even_without_an_identity_override(m
     env = manager._env_for(manifest, Provision(env={}, mounts=(), a2a_port=None, image=None))  # noqa: SLF001
 
     assert "ANTHROPIC_API_KEY" not in env
+
+
+def test_an_ipv6_proxy_address_keeps_its_brackets():
+    """hostname 은 IPv6 괄호를 벗긴다 — `@::1:8080` 은 프록시 주소가 아니다 (#294 리뷰)."""
+    from urllib.parse import urlsplit
+
+    from malkuth.runtime.deployments import EgressEndpoints
+
+    env = EgressEndpoints(
+        connect_url="http://[fd00::5]:8080", providers_url="http://[fd00::5]:8081"
+    ).env_for("alpha", "cred")
+
+    parsed = urlsplit(env["HTTPS_PROXY"])
+    assert (parsed.hostname, parsed.port, parsed.password) == ("fd00::5", 8080, "cred")

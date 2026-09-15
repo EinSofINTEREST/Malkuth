@@ -53,6 +53,11 @@ class Upstream:
     logical_host: str
     api_key: str
     key_header: str = "x-api-key"
+    endpoints: frozenset[tuple[str, str]] = frozenset()
+    """키를 붙여 보내도 되는 ``(METHOD, path)`` — 모델 API 만. 여기 없는 경로는 보내지 않는다.
+
+    호스트 단위 판정만으로 경로를 열어 두면 모델 호출을 허락받은 에이전트가 프록시의 키로
+    provider 의 다른(상태를 바꾸는) API 까지 부른다."""
 
 
 def create_provider_app(
@@ -71,6 +76,15 @@ def create_provider_app(
         upstream = upstreams.get(provider)
         if upstream is None:
             return _error(404, "unknown provider")
+        if (request.method.upper(), path.strip("/")) not in upstream.endpoints:
+            log.warning(
+                "provider endpoint not allowed",
+                agent="",
+                resource=ResourceKind.EGRESS.value,
+                target=f"{upstream.logical_host}/{path}",
+                error_code="ACC_001",
+            )
+            return _error(403, "provider endpoint not allowed through the proxy", code="ACC_001")
         credential = _credential(request)
         if not credential:
             return _error(401, "agent identity required")
@@ -157,4 +171,14 @@ def _error(status: int, message: str, *, code: str | None = None) -> JSONRespons
     )
 
 
-__all__ = ["Upstream", "create_provider_app"]
+ANTHROPIC_ENDPOINTS = frozenset(
+    {
+        ("POST", "v1/messages"),
+        ("POST", "v1/messages/count_tokens"),
+        ("GET", "v1/models"),
+    }
+)
+"""에이전트가 모델을 쓰는 데 필요한 Anthropic API — 메시지 생성, 토큰 세기, 모델 목록."""
+
+
+__all__ = ["ANTHROPIC_ENDPOINTS", "Upstream", "create_provider_app"]

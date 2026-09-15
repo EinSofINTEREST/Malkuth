@@ -6,7 +6,7 @@ import httpx
 import pytest
 
 from malkuth.egress.connect import EgressMode
-from malkuth.egress.providers import Upstream, create_provider_app
+from malkuth.egress.providers import ANTHROPIC_ENDPOINTS, Upstream, create_provider_app
 from tests.unit.egress.test_connect import Registry
 
 KEY = "sk-real-provider-key"
@@ -34,7 +34,10 @@ def app_for(registry: Registry, provider: Provider, mode: EgressMode = EgressMod
         registry,
         {
             "anthropic": Upstream(
-                base_url="https://api.anthropic.com", logical_host="api.anthropic.com", api_key=KEY
+                base_url="https://api.anthropic.com",
+                logical_host="api.anthropic.com",
+                api_key=KEY,
+                endpoints=ANTHROPIC_ENDPOINTS,
             )
         },
         mode=mode,
@@ -120,3 +123,32 @@ async def test_an_unknown_provider_is_not_found():
         response = await client.post("/openai/v1/chat", headers={"x-api-key": "cred-researcher"})
 
     assert response.status_code == 404
+
+
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("DELETE", "/anthropic/v1/files/file-1"),
+        ("POST", "/anthropic/v1/organizations/keys"),
+        ("GET", "/anthropic/v1/messages"),
+    ],
+)
+async def test_only_model_api_endpoints_get_the_key(method, path):
+    """호스트 판정만으로 경로를 열면 모델 호출 허락이 프록시 키로 다른 API 를 부르는 권한이 된다."""
+    provider = Provider()
+    async with app_for(Registry(), provider) as client:
+        response = await client.request(method, path, headers={"x-api-key": "cred-researcher"})
+
+    assert response.status_code == 403 and response.json()["error"]["code"] == "ACC_001"
+    assert provider.seen == []
+
+
+async def test_counting_tokens_and_listing_models_are_model_api_calls():
+    provider = Provider()
+    async with app_for(Registry(), provider) as client:
+        counted = await client.post(
+            "/anthropic/v1/messages/count_tokens", json={}, headers={"x-api-key": "cred-researcher"}
+        )
+        listed = await client.get("/anthropic/v1/models", headers={"x-api-key": "cred-researcher"})
+
+    assert (counted.status_code, listed.status_code) == (200, 200)

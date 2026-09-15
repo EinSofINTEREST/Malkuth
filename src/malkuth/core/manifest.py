@@ -11,10 +11,23 @@ import re
 from enum import StrEnum
 from pathlib import PurePosixPath
 from typing import Annotated, Literal
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 RESERVED_GLOBAL_GROUP = "global"
+
+
+def _require_http_url(value: str, what: str) -> None:
+    """스킴·호스트·유효한 포트가 있는 http(s) URL 인가 — 판정이 이 값을 풀다 터지지 않게."""
+    parts = urlsplit(value)
+    try:
+        port = parts.port
+    except ValueError as err:
+        raise ValueError(f"{what} has an invalid port: {value!r}") from err
+    if parts.scheme not in ("http", "https") or not parts.hostname or port == 0:
+        raise ValueError(f"{what} must be an http(s) URL with a host: {value!r}")
+
 
 _HOST_LABEL = r"[a-z0-9]([a-z0-9-]*[a-z0-9])?"
 EGRESS_TARGET = re.compile(rf"^{_HOST_LABEL}(\.{_HOST_LABEL})*(:[0-9]{{1,5}})?$")
@@ -269,6 +282,8 @@ class McpServerSpec(BaseModel):
             raise ValueError("http transport requires exactly one of 'sidecar' or 'url'")
         if self.sidecar is not None and self.auth is not None:
             raise ValueError("sidecar servers must not declare 'auth' — url is runtime-injected")
+        if self.url is not None:
+            _require_http_url(self.url, "mcp server url")
         return self
 
 
@@ -426,7 +441,10 @@ class RuntimeSpec(BaseModel):
     @classmethod
     def _explicit_destinations(cls, values: tuple[str, ...]) -> tuple[str, ...]:
         for value in values:
-            if not EGRESS_TARGET.fullmatch(value):
+            matched = EGRESS_TARGET.fullmatch(value)
+            port = value.rpartition(":")[2] if ":" in value else ""
+            # 범위 밖 포트는 어떤 CONNECT 와도 맞지 않는다 — 선언이 조용히 쓸모없어진다
+            if matched is None or (port and not 0 < int(port) < 65536):
                 raise ValueError(
                     f"egress destination must be host or host:port without wildcards: {value!r}"
                 )

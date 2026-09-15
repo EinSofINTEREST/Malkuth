@@ -512,3 +512,35 @@ def test_a_vague_egress_destination_is_refused(destination):
 
     with pytest.raises(ValidationError):
         RuntimeSpec(egress=(destination,))
+
+
+@pytest.mark.parametrize(
+    "destination", ["api.example.com:0", "api.example.com:65536", "api.example.com:99999"]
+)
+def test_an_egress_port_outside_the_valid_range_is_refused(destination):
+    """범위 밖 포트는 어떤 CONNECT 와도 맞지 않는다 — 선언이 조용히 쓸모없어진다 (#294 리뷰)."""
+    from pydantic import ValidationError
+
+    from malkuth.core.manifest import RuntimeSpec
+
+    with pytest.raises(ValidationError):
+        RuntimeSpec(egress=(destination,))
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://mcp.example:99999/mcp",
+        "ftp://mcp.example/mcp",
+        "mcp.example/mcp",
+        "https://:443/mcp",
+    ],
+)
+def test_an_external_mcp_url_must_be_a_valid_http_url(url):
+    """판정이 선언을 풀다 터지면 그 에이전트의 판정 전체가 멈춘다 (#294 리뷰)."""
+    from pydantic import ValidationError
+
+    from malkuth.core.manifest import McpServerSpec
+
+    with pytest.raises(ValidationError):
+        McpServerSpec(name="corp", transport="streamable-http", url=url)

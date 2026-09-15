@@ -100,13 +100,20 @@ class EgressProxyConfig(BaseModel):
             ("providers_url", self.providers_url),
         ):
             parts = urlsplit(value)
+            try:
+                port = parts.port
+            except ValueError:
+                port = None
+            # 포트가 없으면 80 으로 가서 8080·8081 창구에 닿지 않는다
             if (
                 parts.scheme != "http"
                 or not parts.hostname
+                or not port
                 or parts.username
                 or parts.password
                 or parts.path not in ("", "/")
                 or parts.query
+                or parts.fragment
             ):
                 # 자격은 배포가 에이전트마다 붙인다 — 설정에 박힌 자격은 모든 에이전트가 나눠 갖는다
                 raise ValueError(f"runtime.egress_proxy.{name} must be http://host:port")

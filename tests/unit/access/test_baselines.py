@@ -162,3 +162,21 @@ def test_the_target_name_drops_only_the_https_port():
 
     assert egress_target("API.Example.com.", 443) == "api.example.com"
     assert egress_target("api.example.com", 8443) == "api.example.com:8443"
+
+
+def test_a_broken_mcp_url_that_slipped_past_validation_does_not_break_decisions(tmp_path):
+    """선언 검증을 거치지 않고 들어온 값에도 판정이 터지지 않는다 — 그 목적지가 없는 것으로."""
+    from malkuth.access.baselines import EgressBaseline
+    from malkuth.core.manifest import McpServerSpec
+
+    write(tmp_path / "agents" / "researcher" / "manifest.yaml", agent("researcher"))
+    manifest = Catalog.under(tmp_path).agent("researcher")
+    broken = McpServerSpec.model_construct(
+        name="corp", transport="streamable-http", url="https://x:99999/"
+    )
+    mcp = manifest.spec.mcp.model_copy(update={"servers": (broken,)})
+    manifest = manifest.model_copy(update={"spec": manifest.spec.model_copy(update={"mcp": mcp})})
+
+    declared = EgressBaseline.declared(manifest)
+
+    assert "api.anthropic.com" in declared and not any(t.startswith("x") for t in declared)

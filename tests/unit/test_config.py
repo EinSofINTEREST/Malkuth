@@ -417,3 +417,12 @@ def test_egress_proxy_urls_are_bare_http_addresses(field):
     values = {"connect_url": "http://egress:8080", "providers_url": "http://egress:8081", **field}
     with pytest.raises(ValidationError):
         EgressProxyConfig(**values)
+
+
+@pytest.mark.parametrize("url", ["http://egress", "http://egress:8080#frag"])
+def test_egress_proxy_urls_need_a_port_and_nothing_extra(url):
+    """포트가 없으면 80 으로 가서 8080·8081 창구에 닿지 않는다 (#294 리뷰)."""
+    from malkuth.config import EgressProxyConfig
+
+    with pytest.raises(ValidationError):
+        EgressProxyConfig(connect_url=url, providers_url="http://egress:8081")

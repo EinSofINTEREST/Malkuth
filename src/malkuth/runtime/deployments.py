@@ -904,9 +904,10 @@ class EgressEndpoints:
     def env_for(self, agent: str, credential: str) -> dict[str, str]:
         """이 에이전트의 외부 호출 배선 — 프록시 자격은 **그 에이전트의 신원**이다."""
         parts = urlsplit(self.connect_url)
-        port = f":{parts.port}" if parts.port else ""
         user = f"{quote(agent, safe='')}:{quote(credential, safe='')}"
-        proxy = f"{parts.scheme}://{user}@{parts.hostname}{port}"
+        # netloc 을 그대로 쓴다 — hostname 은 IPv6 괄호를 벗겨 `@::1:8080` 같은 깨진 주소가 된다.
+        # 설정 검증이 userinfo 를 막으므로 netloc 은 host[:port] 뿐이다
+        proxy = f"{parts.scheme}://{user}@{parts.netloc}"
         return {
             # 대소문자 둘 다 — 도구마다 읽는 쪽이 다르다. http 는 프록시로 보내지 않는다: 프레임워크
             # 서비스(메모리·레지스트리·peer)는 사설 네트워크의 http 다

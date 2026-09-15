@@ -188,9 +188,14 @@ class EgressBaseline:
             if server.url is None:
                 continue
             parts = urlsplit(server.url)
+            try:
+                port = parts.port
+            except ValueError:
+                # 선언 검증이 막지만, 한 에이전트의 잘못된 선언으로 판정이 터지면 안 된다
+                continue
             if parts.hostname:
                 default = HTTPS_PORT if parts.scheme == "https" else 80
-                targets.add(egress_target(parts.hostname, parts.port or default))
+                targets.add(egress_target(parts.hostname, port or default))
         return frozenset(targets)
 
 

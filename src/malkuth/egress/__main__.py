@@ -100,7 +100,7 @@ async def run(config: dict[str, Any], *, metrics: Metrics | None = None) -> None
     from malkuth.access.baselines import PROVIDER_HOSTS
     from malkuth.access.client import AccessClient
     from malkuth.egress.connect import ConnectProxy
-    from malkuth.egress.providers import Upstream, create_provider_app
+    from malkuth.egress.providers import ANTHROPIC_ENDPOINTS, Upstream, create_provider_app
 
     access = AccessClient(
         base_url=config["access_url"],
@@ -114,6 +114,7 @@ async def run(config: dict[str, Any], *, metrics: Metrics | None = None) -> None
             base_url=config["anthropic_upstream"],
             logical_host=PROVIDER_HOSTS["anthropic"],
             api_key=config["anthropic_key"],
+            endpoints=ANTHROPIC_ENDPOINTS,
         )
     proxy = ConnectProxy(
         access=access, mode=config["mode"], private_destinations=config["private_destinations"]

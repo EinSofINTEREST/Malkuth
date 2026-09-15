@@ -19,8 +19,11 @@ other way out (#280).
 from __future__ import annotations
 
 import json
+import queue
 import shutil
 import subprocess
+import threading
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -110,17 +113,17 @@ async def main():
     client = build_mcp_client(manifest)
     [spec] = [s for s in manifest.spec.mcp.servers if s.name == "corp"]
     await client.start(spec)
-    print("READY", flush=True)
+    print("@@READY", flush=True)
     loop = asyncio.get_running_loop()
     try:
         while line := await loop.run_in_executor(None, sys.stdin.readline):
             tool, arguments = line.rstrip("\\n").split(" ", 1)
             try:
                 result = await client.call_tool("mcp__corp__" + tool, json.loads(arguments))
-                print("OK:" + json.dumps(result.content), flush=True)
+                print("@@OK:" + json.dumps(result.content), flush=True)
             except MalkuthError as err:
                 detail = str(err.details.get("detail", ""))[:200]
-                print("ERR:" + err.code + ":" + detail, flush=True)
+                print("@@ERR:" + err.code + ":" + detail, flush=True)
     finally:
         await client.shutdown()
 
@@ -490,25 +493,55 @@ print(json.dumps([s["name"] for s in json.load(urllib.request.urlopen(request))[
 """
 
 
+ANSWER = "@@"
+
+
 class McpSession:
-    """떠 있는 에이전트 컨테이너 안의 MCP 세션 하나 — 도구를 부를 때마다 같은 세션을 쓴다."""
+    """떠 있는 에이전트 컨테이너 안의 MCP 세션 하나 — 도구를 부를 때마다 같은 세션을 쓴다.
+
+    stdout 은 스레드가 줄 단위로 큐에 옮긴다 — ``select`` 는 파이썬 버퍼에 이미 읽힌 줄을 보지 못해
+    답이 와 있는데도 기다린다.
+    """
 
     def __init__(self, container: str) -> None:
         self.process = subprocess.Popen(  # noqa: S603
             ["docker", "exec", "-i", container, "python", "-c", MCP_SESSION],  # noqa: S607
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             text=True,
         )
-        ready = self.process.stdout.readline().strip()
-        assert ready == "READY", ready + self.process.stderr.read()[-800:]
+        self.lines: queue.Queue[str] = queue.Queue()
+        self.seen: list[str] = []
+        threading.Thread(target=self._pump, daemon=True).start()
+        ready = self._answer()
+        assert ready == "READY", ready
 
     def call(self, tool: str, arguments: dict[str, Any]) -> str:
         self.process.stdin.write(f"{tool} {json.dumps(arguments)}\n")
         self.process.stdin.flush()
-        answer = self.process.stdout.readline().strip()
-        return answer or "CLOSED:" + self.process.stderr.read()[-800:]
+        return self._answer()
+
+    def _pump(self) -> None:
+        for line in self.process.stdout:
+            self.lines.put(line)
+        self.lines.put("")
+
+    def _answer(self, timeout_s: float = 60.0) -> str:
+        """다음 답 한 줄 — 로그 줄은 건너뛰되 남겨 둔다. 답이 없으면 그 로그로 원인을 보인다."""
+        deadline = time.monotonic() + timeout_s
+        while (left := deadline - time.monotonic()) > 0:
+            try:
+                line = self.lines.get(timeout=left)
+            except queue.Empty:
+                break
+            if not line:
+                return "CLOSED:" + "".join(self.seen[-20:])
+            if line.startswith(ANSWER):
+                return line[len(ANSWER) :].strip()
+            self.seen.append(line)
+        self.process.kill()
+        raise AssertionError("mcp session did not answer:\n" + "".join(self.seen[-20:]))
 
     def close(self) -> None:
         self.process.stdin.close()

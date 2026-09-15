@@ -508,3 +508,24 @@ async def test_a_waiter_wakes_when_a_declaration_file_changes(registry, workspac
     write(workspace / "agents" / "worker" / "manifest.yaml", agent("worker"))
 
     assert await asyncio.wait_for(waiter, 2) > before
+
+
+def test_recent_denials_are_newest_first_and_bounded(tmp_path, monkeypatch):
+    """화면용 기억 — 새것부터, 상한까지만 (#283)."""
+    from malkuth.access import registry as module
+    from malkuth.access.model import ResourceKind
+    from malkuth.access.registry import AccessRegistry
+    from malkuth.access.store import InMemoryAccessStore
+    from malkuth.catalog import Catalog
+    from tests.fixtures.access import access_workspace
+
+    monkeypatch.setattr(module, "RECENT_DENIALS", 2)
+    access = AccessRegistry(
+        store=InMemoryAccessStore(), catalog=Catalog.under(access_workspace(tmp_path))
+    )
+
+    for target in ("a.example", "b.example", "c.example"):
+        access.decide("worker", ResourceKind.EGRESS, target)
+
+    assert [d.target for d in access.recent_denials("worker")] == ["c.example", "b.example"]
+    assert access.recent_denials("peer") == []

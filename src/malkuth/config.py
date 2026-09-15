@@ -78,6 +78,48 @@ class HealthCheckConfig(BaseModel):
         return self
 
 
+class EgressProxyConfig(BaseModel):
+    """Where agents reach the egress proxy (#293) — both listeners of one proxy.
+
+    에이전트 컨테이너에서 닿는 주소다. 설정하면 배포가 에이전트의 외부 HTTPS 를 이 프록시로 보내고
+    (``HTTPS_PROXY``), 모델 API 를 프록시로 부르게 하며(``ANTHROPIC_BASE_URL``), 모델 API 키를
+    에이전트 env 에 넣지 않는다. 판정에 에이전트 신원이 필요하므로 권한 레지스트리를 함께 켠다.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    connect_url: str = Field(min_length=1)
+    """CONNECT 창구 — ``http://egress:8080``."""
+    providers_url: str = Field(min_length=1)
+    """provider 종단 창구 — ``http://egress:8081``."""
+
+    @model_validator(mode="after")
+    def _plain_urls(self) -> EgressProxyConfig:
+        for name, value in (
+            ("connect_url", self.connect_url),
+            ("providers_url", self.providers_url),
+        ):
+            parts = urlsplit(value)
+            try:
+                port = parts.port
+            except ValueError:
+                port = None
+            # 포트가 없으면 80 으로 가서 8080·8081 창구에 닿지 않는다
+            if (
+                parts.scheme != "http"
+                or not parts.hostname
+                or not port
+                or parts.username
+                or parts.password
+                or parts.path not in ("", "/")
+                or parts.query
+                or parts.fragment
+            ):
+                # 자격은 배포가 에이전트마다 붙인다 — 설정에 박힌 자격은 모든 에이전트가 나눠 갖는다
+                raise ValueError(f"runtime.egress_proxy.{name} must be http://host:port")
+        return self
+
+
 class RuntimeConfig(BaseModel):
     """Agent runtime settings."""
 
@@ -88,6 +130,8 @@ class RuntimeConfig(BaseModel):
     agent_base_image: str = "malkuth/agent-base:0.1.0"
     default_resources: ResourceDefaults = Field(default_factory=ResourceDefaults)
     health_check: HealthCheckConfig = Field(default_factory=HealthCheckConfig)
+    egress_proxy: EgressProxyConfig | None = None
+    """이그레스 프록시 (#293). 없으면 에이전트는 기존대로 직접 나가고 모델 키를 env 로 받는다."""
     agent_env: dict[str, str] = Field(default_factory=dict)
     """모든 에이전트 컨테이너에 주입하는 **비밀이 아닌** 인프라 env — provider base URL
     처럼 "어디에 있는가" 를 알리는 값. secrets 는 여기가 아니라 env_allowlist 로 간다

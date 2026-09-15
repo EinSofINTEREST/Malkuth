@@ -106,6 +106,9 @@ def main() -> None:
     ):
         # 판정 라우트를 무인증으로 밖에 열면 누구나 자격의 유효성을 떠볼 수 있다
         raise config_missing_enforcer_token(orchestrator.control_host)
+    if config.runtime.egress_proxy is not None and orchestrator.access_store is None:
+        # 프록시는 에이전트 신원으로 판정한다 — 레지스트리 없이 켜면 외부 호출이 전부 막힌다
+        raise config_egress_without_registry()
     if orchestrator.access_store is not None and orchestrator.access_agent_url is None:
         raise config_missing_agent_url()
 
@@ -119,6 +122,13 @@ def main() -> None:
         # 배포가 에이전트마다 신원을 발급해 주입한다 (#277)
         deployments.access = access
         deployments.access_url = orchestrator.access_agent_url
+        if config.runtime.egress_proxy is not None:
+            from malkuth.runtime.deployments import EgressEndpoints
+
+            deployments.egress = EgressEndpoints(
+                connect_url=config.runtime.egress_proxy.connect_url,
+                providers_url=config.runtime.egress_proxy.providers_url,
+            )
     # 실행 중 run 과 배포가 참조하는 선언은 지우거나 덮어쓰지 못한다 (#242 리뷰 / #243)
     pins: list[InUse] = [run_backed(store, catalog)]
     if deployments is not None:
@@ -273,7 +283,7 @@ def _access_registry(orchestrator: Any, catalog: Catalog, *, metrics: Any = None
     if orchestrator.access_store is None:
         log.warning("access control disabled — orchestrator.access_store is not set")
         return None
-    from malkuth.access.baselines import A2ABaseline, MemoryBaseline
+    from malkuth.access.baselines import A2ABaseline, EgressBaseline, MemoryBaseline
     from malkuth.access.model import ResourceKind
     from malkuth.access.registry import AccessRegistry
     from malkuth.access.store import SqliteAccessStore
@@ -284,14 +294,26 @@ def _access_registry(orchestrator: Any, catalog: Catalog, *, metrics: Any = None
         catalog=catalog,
         stewards=frozenset(orchestrator.access_stewards),
         # 선언 판정은 그것을 쓰는 강제 지점과 함께 연결한다 — memory 는 Memory Service (#278),
-        # a2a 는 피호출자의 A2A 서버 (#281)
+        # a2a 는 피호출자의 A2A 서버 (#281), egress 는 이그레스 프록시 (#293)
         baselines={
             ResourceKind.MEMORY: MemoryBaseline(catalog),
             ResourceKind.A2A: A2ABaseline(
                 catalog, store, stewards=frozenset(orchestrator.access_stewards)
             ),
+            ResourceKind.EGRESS: EgressBaseline(catalog),
         },
         metrics=metrics,
+    )
+
+
+def config_egress_without_registry() -> Exception:
+    from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
+
+    return MalkuthError(
+        category=ErrorCategory.CONFIG,
+        code=ErrorCode.CFG_001,
+        message="runtime.egress_proxy requires the access registry (orchestrator.access_store)",
+        details={"setting": "runtime.egress_proxy"},
     )
 
 

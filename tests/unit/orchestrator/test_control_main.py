@@ -433,6 +433,9 @@ async def test_the_registry_reaches_deployments_and_the_served_app(tmp_path, mon
     a2a = deployments.access.baselines[ResourceKind.A2A]
     assert isinstance(a2a, A2ABaseline)
     assert a2a.store is deployments.access.store, "배포 기록과 다른 저장소를 보면 그래프를 모른다"
+    from malkuth.access.baselines import EgressBaseline
+
+    assert isinstance(deployments.access.baselines[ResourceKind.EGRESS], EgressBaseline)
     # 계측기는 노출되는 것 하나 — 따로 만들면 기록은 되는데 아무도 못 본다
     assert deployments.access.metrics is served_metrics
     assert captured["run_metrics"] is served_metrics
@@ -484,3 +487,58 @@ def test_a_registry_without_an_agent_url_is_refused(tmp_path, monkeypatch):
 
     assert exc_info.value.code == ErrorCode.CFG_001
     assert exc_info.value.details["setting"] == "orchestrator.access_agent_url"
+
+
+# --- 이그레스 프록시 (#293) ------------------------------------------------------------
+
+
+EGRESS = {
+    "connect_url": "http://malkuth-egress:8080",
+    "providers_url": "http://malkuth-egress:8081",
+}
+
+
+def test_the_egress_proxy_reaches_deployments(tmp_path, monkeypatch):
+    """배포에 물리지 않으면 에이전트는 설정과 무관하게 모델 키를 받고 직접 나간다."""
+    from malkuth.runtime.deployments import EgressEndpoints
+
+    orchestrator = {
+        "access_store": str(tmp_path / "access.db"),
+        "access_enforcer_token": "enforcer",
+        "access_agent_url": "http://control-plane:8700",
+    }
+    original = write_config
+
+    def with_runtime(directory, values):
+        (directory / "local.yaml").write_text(
+            yaml.safe_dump({"orchestrator": values, "runtime": {"egress_proxy": EGRESS}}),
+            encoding="utf-8",
+        )
+
+    monkeypatch.setitem(globals(), "write_config", with_runtime)
+    try:
+        _, deployments, _ = _serve_with(tmp_path, monkeypatch, orchestrator)
+    finally:
+        globals()["write_config"] = original
+
+    assert deployments.egress == EgressEndpoints(**EGRESS)
+
+
+def test_an_egress_proxy_without_the_registry_is_refused(tmp_path, monkeypatch):
+    (tmp_path / "local.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "orchestrator": {"run_store": str(tmp_path / "runs.db")},
+                "runtime": {"egress_proxy": EGRESS},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("MALKUTH_ENV", "local")
+    monkeypatch.setenv("MALKUTH_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr(entrypoint, "_setup_observability", lambda: None)
+
+    with pytest.raises(MalkuthError) as exc_info:
+        entrypoint.main()
+
+    assert exc_info.value.details["setting"] == "runtime.egress_proxy"

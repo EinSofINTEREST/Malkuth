@@ -157,9 +157,13 @@ async def test_an_undeclared_caller_that_skips_its_own_check_is_refused_by_the_c
 
 
 async def test_claiming_another_callers_name_with_your_own_ticket_is_refused(stack):
-    """이름 주장과 표의 주인이 어긋나면 누구의 호출인지 믿을 수 없다."""
-    impostor = stack.caller("writer")
-    impostor.transport.agent = "researcher"  # 헤더에는 researcher 라고 적는다
+    """이름 주장과 표의 주인이 어긋나면 누구의 호출인지 믿을 수 없다.
+
+    표의 주인(researcher)은 planner 를 부를 권한이 **있다** — 그래도 헤더에 writer 라고 적으면
+    거부한다. 권한이 없는 호출자로 시험하면 이름 대조를 지워도 판정이 거부해 통과한다.
+    """
+    impostor = stack.caller("researcher")
+    impostor.transport.agent = "writer"  # 헤더에는 writer 라고 적는다
 
     assert (await refused(impostor.call("planner", make_task()))).code == ErrorCode.A2A_004
 

@@ -168,6 +168,7 @@ class DeployValidator:
         findings.extend(self._check_module_refs())
         findings.extend(self._check_groups())
         findings.extend(self._check_env_allowlists())
+        findings.extend(self._check_mcp_sidecars())
         findings.extend(self._check_a2a_ports(topologies))
         findings.extend(self._check_quotas())
 
@@ -394,6 +395,23 @@ class DeployValidator:
                     )
                 )
         return findings
+
+    def _check_mcp_sidecars(self) -> list[Finding]:
+        """사이드카 MCP 서버는 아직 띄울 수 없다 — 기동에서 MCP_001 로 넘어지기 전에 거절한다.
+
+        runtime 에 사이드카 컨테이너를 띄우는 코드가 없어 주소도 주입되지 않는다 (결정 D2 기록).
+        """
+        return [
+            Finding(
+                check="mcp_sidecar",
+                code=ErrorCode.VAL_002,
+                message=f"mcp sidecar servers are not supported by this runtime yet: {server.name}",
+                details={"agent": name, "mcp_server": server.name},
+            )
+            for name, manifest in self.manifests.items()
+            for server in manifest.spec.mcp.servers
+            if server.sidecar is not None
+        ]
 
     # --- 5. connections --------------------------------------------------
 

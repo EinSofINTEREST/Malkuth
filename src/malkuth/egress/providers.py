@@ -10,13 +10,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 import httpx
 import structlog
-from fastapi import FastAPI, Request
+from fastapi import APIRouter, FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.background import BackgroundTask
 
@@ -66,10 +66,17 @@ def create_provider_app(
     *,
     mode: EgressMode = EgressMode.ENFORCE,
     http: httpx.AsyncClient | None = None,
+    routers: Sequence[APIRouter] = (),
 ) -> FastAPI:
-    """Build the termination app — ``/{provider}/{path}`` forwards to that provider."""
+    """Build the termination app — ``/{provider}/{path}`` forwards to that provider.
+
+    ``routers`` 는 provider 경로보다 **먼저** 붙는다 — 원격 MCP 종단(``/mcp/{server}``)이
+    ``mcp`` 라는 provider 로 잘못 잡히지 않게.
+    """
     client = http or httpx.AsyncClient(timeout=UPSTREAM_TIMEOUT_S)
     app = FastAPI(title="Malkuth egress — provider termination")
+    for router in routers:
+        app.include_router(router)
 
     @app.api_route("/{provider}/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
     async def forward(provider: str, path: str, request: Request) -> Response:

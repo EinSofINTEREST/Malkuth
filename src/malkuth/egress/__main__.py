@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 from collections.abc import Awaitable, Mapping
 from typing import Any
@@ -32,6 +33,13 @@ PLAINTEXT_UPSTREAM_ENV = "MALKUTH_EGRESS_ALLOW_PLAINTEXT_UPSTREAM"
 
 프록시가 키를 실어 보내는 곳이므로 평문은 테스트용 대역에만 쓴다."""
 ANTHROPIC_KEY_ENV = "ANTHROPIC_API_KEY"  # noqa: S105 — 키 이름이지 값이 아니다
+PROXY_HELD_SECRETS = frozenset({ANTHROPIC_KEY_ENV})
+"""프록시가 provider 호출에만 쓰는 비밀 — 원격 MCP 자격 목록에 올릴 수 없다."""
+MCP_TOKENS_ENV = "MALKUTH_EGRESS_MCP_TOKENS"
+"""원격 MCP 서버에 붙여도 되는 자격 이름 — 쉼표로. 선언의 ``auth.token_env`` 가 이 목록에 있을 때만
+그 값을 보낸다 (모델 키 같은 다른 비밀을 선언으로 끌어내지 못하게)."""
+REPO_ROOT_ENV = "MALKUTH_REPO_ROOT"
+"""선언 루트 — 원격 MCP 서버의 주소·자격 이름을 에이전트 선언에서 읽는다. 없으면 MCP 종단이 없다."""
 LOG_LEVEL_ENV = "MALKUTH_LOG_LEVEL"
 LOG_FORMAT_ENV = "MALKUTH_LOG_FORMAT"
 METRICS_PORT_ENV = "MALKUTH_METRICS_PORT"
@@ -61,11 +69,7 @@ def settings(environ: Mapping[str, str]) -> dict[str, Any]:
         mode = EgressMode(raw_mode)
     except ValueError as err:
         raise _config(f"unknown egress mode: {raw_mode}", [MODE_ENV]) from err
-    private = frozenset(
-        entry.strip()
-        for entry in environ.get(PRIVATE_DESTINATIONS_ENV, "").split(",")
-        if entry.strip()
-    )
+    private = _names(environ.get(PRIVATE_DESTINATIONS_ENV, ""))
     return {
         "access_url": url,
         "enforcer_token": token,
@@ -75,7 +79,28 @@ def settings(environ: Mapping[str, str]) -> dict[str, Any]:
         "provider_port": port_setting(environ, PROVIDER_PORT_ENV, DEFAULT_PROVIDER_PORT),
         "anthropic_upstream": _upstream(environ),
         "anthropic_key": environ.get(ANTHROPIC_KEY_ENV, ""),
+        "allow_plaintext": environ.get(PLAINTEXT_UPSTREAM_ENV, "").lower() == "true",
+        "repo_root": environ.get(REPO_ROOT_ENV, ""),
+        "mcp_tokens": _mcp_tokens(environ),
     }
+
+
+def _mcp_tokens(environ: Mapping[str, str]) -> frozenset[str]:
+    """원격 MCP 서버에 보낼 수 있는 자격 이름 — 프록시가 따로 쥐는 비밀은 올리지 못한다.
+
+    목록이 유일한 문이다: 운영자가 실수로 모델 키나 레지스트리 자격 이름을 넣으면, 선언의
+    ``auth.token_env`` 하나로 그 값이 선언된 MCP 호스트로 나간다.
+    """
+    names = _names(environ.get(MCP_TOKENS_ENV, ""))
+    reserved = sorted(n for n in names if n in PROXY_HELD_SECRETS or n.startswith("MALKUTH_"))
+    if reserved:
+        raise _config(f"proxy-held secrets cannot be sent to mcp servers: {reserved}",
+                      [MCP_TOKENS_ENV])  # fmt: skip
+    return names
+
+
+def _names(raw: str) -> frozenset[str]:
+    return frozenset(entry.strip() for entry in raw.split(",") if entry.strip())
 
 
 def port_setting(environ: Mapping[str, str], key: str, default: int) -> int:
@@ -172,7 +197,9 @@ async def run(config: dict[str, Any], *, metrics: Metrics | None = None) -> None
     connect = await asyncio.start_server(proxy.handle, "0.0.0.0", config["connect_port"])  # noqa: S104
     provider = uvicorn.Server(
         uvicorn.Config(
-            create_provider_app(access, upstreams, mode=config["mode"]),
+            create_provider_app(
+                access, upstreams, mode=config["mode"], routers=_mcp_routers(config, access)
+            ),
             host="0.0.0.0",  # noqa: S104
             port=config["provider_port"],
             log_config=None,
@@ -189,6 +216,35 @@ async def run(config: dict[str, Any], *, metrics: Metrics | None = None) -> None
             await supervise(access.watch(), connect.serve_forever(), provider.serve())
     finally:
         await access.aclose()
+
+
+def _mcp_routers(config: Mapping[str, Any], access: Any) -> list[Any]:
+    """원격 MCP 종단 — 선언 루트가 있을 때만. 없으면 원격 MCP 호출은 404 로 막힌다."""
+    if not config["repo_root"]:
+        return []
+    from pathlib import Path
+
+    from malkuth.catalog import Catalog
+    from malkuth.egress.mcp import McpTermination, McpUpstreams, SessionSeal
+
+    termination = McpTermination(
+        access=access,
+        upstreams=McpUpstreams(
+            catalog=Catalog.under(Path(config["repo_root"])),
+            environ=os.environ,
+            tokens=config["mcp_tokens"],
+        ),
+        mode=config["mode"],
+        private_destinations=config["private_destinations"],
+        allow_plaintext=config["allow_plaintext"],
+        # 재시작을 넘는 서명 키 — 프록시 비밀(레지스트리 자격)에서 용도를 붙여 끌어낸다
+        sessions=SessionSeal(key=session_key(config["enforcer_token"])),
+    )
+    return [termination.router()]
+
+
+def session_key(enforcer_token: str) -> bytes:
+    return hashlib.sha256(b"malkuth-mcp-session\0" + enforcer_token.encode()).digest()
 
 
 async def supervise(*parts: Awaitable[Any]) -> None:

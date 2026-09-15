@@ -1,4 +1,5 @@
-"""Egress through the proxy, decided per destination (#293), with no other way out (#280).
+"""Egress through the proxy, decided per destination (#293) and per remote MCP tool (#282), with no
+other way out (#280).
 
 떠 있는 에이전트 컨테이너 **안에서** 프록시를 거쳐 나간다 — 배포가 넣어 준 ``HTTPS_PROXY`` 그대로.
 
@@ -18,8 +19,11 @@
 from __future__ import annotations
 
 import json
+import queue
 import shutil
 import subprocess
+import threading
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -54,6 +58,77 @@ PROXY_KEY = "e2e-proxy-held-key"
 TARGET = "fake-provider:8000"
 UNDECLARED = f"{MEMORY_ALIAS}:8090"
 RESEARCHER, PLANNER = "malkuth-researcher-0", "malkuth-planner-0"
+MCP_SERVER = "malkuth-e2e-fake-mcp"
+MCP_TARGET = "fake-mcp:8000"
+MCP_TOKEN = "e2e-remote-mcp-token"  # noqa: S105 — 프록시만 쥐는 테스트 값
+MCP_TOKEN_ENV = "CORP_MCP_TOKEN"  # noqa: S105 — 키 이름이다
+
+# 원격 MCP 서버 대역 — 프록시가 쥔 자격이 없으면 401. 스택 네트워크에만 있다
+FAKE_MCP = f"""
+import uvicorn
+from mcp.server import MCPServer
+from mcp.server.transport_security import TransportSecuritySettings
+
+server = MCPServer(name="corp", version="0.1.0")
+
+def echo(text: str) -> str:
+    \"\"\"Echo the text back.\"\"\"
+    return text
+
+def add(a: int, b: int) -> int:
+    \"\"\"Add two numbers.\"\"\"
+    return a + b
+
+server.add_tool(echo)
+server.add_tool(add)
+inner = server.streamable_http_app(
+    host="0.0.0.0",
+    transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
+)
+
+async def app(scope, receive, send):
+    if scope["type"] == "http":
+        headers = dict(scope["headers"])
+        if headers.get(b"authorization") != b"Bearer {MCP_TOKEN}":
+            await send({{"type": "http.response.start", "status": 401, "headers": []}})
+            await send({{"type": "http.response.body", "body": b"credential required"}})
+            return
+    await inner(scope, receive, send)
+
+uvicorn.run(app, host="0.0.0.0", port=8000, log_level="warning")
+"""
+
+# 컨테이너 안에서 agentd 의 조립 그대로 **한 세션**을 열어 두고, 줄마다 도구를 부른다 — 회수 전후가
+# 같은 세션이어야 세션을 열 때만 판정하는 회귀를 잡는다. 결과 또는 에러 코드·사유를 한 줄로 답한다
+MCP_SESSION = """
+import asyncio, json, os, sys
+import yaml
+from malkuth.agentd.mcp import build_mcp_client
+from malkuth.core.errors import MalkuthError
+from malkuth.core.manifest import AgentManifest
+
+async def main():
+    with open(os.environ["MALKUTH_MANIFEST"], encoding="utf-8") as handle:
+        manifest = AgentManifest.model_validate(yaml.safe_load(handle))
+    client = build_mcp_client(manifest)
+    [spec] = [s for s in manifest.spec.mcp.servers if s.name == "corp"]
+    await client.start(spec)
+    print("@@READY", flush=True)
+    loop = asyncio.get_running_loop()
+    try:
+        while line := await loop.run_in_executor(None, sys.stdin.readline):
+            tool, arguments = line.rstrip("\\n").split(" ", 1)
+            try:
+                result = await client.call_tool("mcp__corp__" + tool, json.loads(arguments))
+                print("@@OK:" + json.dumps(result.content), flush=True)
+            except MalkuthError as err:
+                detail = str(err.details.get("detail", ""))[:200]
+                print("@@ERR:" + err.code + ":" + detail, flush=True)
+    finally:
+        await client.shutdown()
+
+asyncio.run(main())
+"""
 AGENTS = "malkuth-e2e-agents"
 """에이전트 네트워크 — ``--internal``. 이그레스 프록시를 켠 control plane 은 이 격리를 요구한다."""
 
@@ -85,7 +160,7 @@ def build_proxy_image() -> None:
 
 def agents_network() -> None:
     """외부 경로 없는 에이전트 네트워크를 새로 만든다 — 남은 것이 격리가 아닐 수 있다."""
-    for name in (PROXY, MEMORY, FORWARDER, *deployed_containers()):
+    for name in (PROXY, MEMORY, FORWARDER, MCP_SERVER, *deployed_containers()):
         docker("rm", "-f", name, check=False)
     docker("network", "rm", AGENTS, check=False)
     docker("network", "create", "--internal", AGENTS)
@@ -104,7 +179,28 @@ def start_forwarder() -> None:
     docker("network", "connect", "--alias", "control-plane", AGENTS, FORWARDER)
 
 
-def start_proxy(mode: str = "enforce") -> None:
+def start_fake_mcp() -> None:
+    docker("rm", "-f", MCP_SERVER, check=False)
+    docker(
+        "run", "-d", "--name", MCP_SERVER,
+        "--network", NETWORK, "--network-alias", "fake-mcp",
+        "--read-only", "--user", "1000:1000", "--cap-drop", "ALL",
+        "--security-opt", "no-new-privileges:true",
+        "--entrypoint", "python", "malkuth/agent-base:0.1.0", "-c", FAKE_MCP,
+    )  # fmt: skip
+
+
+def fake_mcp_ready() -> bool:
+    script = (
+        "import urllib.request,urllib.error\n"
+        "try: urllib.request.urlopen('http://fake-mcp:8000/mcp', timeout=3)\n"
+        "except urllib.error.HTTPError as e: print(e.code)\n"
+        "except OSError: print('down')"
+    )
+    return docker("exec", MEMORY, "python", "-c", script, check=False) == "401"
+
+
+def start_proxy(root: Path, mode: str = "enforce") -> None:
     docker("rm", "-f", PROXY, check=False)
     docker(
         "run", "-d", "--name", PROXY,
@@ -115,7 +211,10 @@ def start_proxy(mode: str = "enforce") -> None:
         "-e", f"MALKUTH_ACCESS_URL=http://host.docker.internal:{CONTROL_PORT}",
         "-e", f"MALKUTH_ACCESS_ENFORCER_TOKEN={ENFORCER_TOKEN}",
         "-e", f"MALKUTH_EGRESS_MODE={mode}",
-        "-e", f"MALKUTH_EGRESS_PRIVATE_DESTINATIONS={TARGET},{UNDECLARED}",
+        "-e", f"MALKUTH_EGRESS_PRIVATE_DESTINATIONS={TARGET},{UNDECLARED},{MCP_TARGET}",
+        # 원격 MCP 종단 — 서버 주소는 선언에서, 자격은 허용한 이름만 (#282)
+        "-v", f"{root}:/repo:ro", "-e", "MALKUTH_REPO_ROOT=/repo",
+        "-e", f"MALKUTH_EGRESS_MCP_TOKENS={MCP_TOKEN_ENV}", "-e", f"{MCP_TOKEN_ENV}={MCP_TOKEN}",
         "-e", "MALKUTH_EGRESS_ANTHROPIC_UPSTREAM=http://fake-provider:8000",
         "-e", "MALKUTH_EGRESS_ALLOW_PLAINTEXT_UPSTREAM=true",  # 대역 provider 는 평문이다
         "-e", f"ANTHROPIC_API_KEY={PROXY_KEY}",
@@ -138,7 +237,26 @@ def workspace(tmp_path: Path) -> Path:
     manifest_path = root / "agents" / "researcher" / "manifest.yaml"
     manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
     manifest["spec"]["runtime"]["egress"] = [TARGET]
+    manifest["spec"]["runtime"]["env_allowlist"] = [
+        *manifest["spec"]["runtime"].get("env_allowlist", []),
+        MCP_TOKEN_ENV,
+    ]
+    manifest["spec"]["mcp"] = {
+        "servers": [
+            {
+                "name": "corp",
+                "transport": "streamable-http",
+                "url": f"http://{MCP_TARGET}/mcp",
+                "auth": {"type": "bearer", "token_env": MCP_TOKEN_ENV},
+            }
+        ]
+    }
     manifest_path.write_text(yaml.safe_dump(manifest, sort_keys=False), encoding="utf-8")
+    # 자격은 스코프에 선언돼야 해석된다 — research 그룹 비밀로 둔다
+    group_path = root / "groups" / "research.yaml"
+    group = yaml.safe_load(group_path.read_text(encoding="utf-8"))
+    group["spec"]["secrets"] = [*group["spec"].get("secrets", []), MCP_TOKEN_ENV]
+    group_path.write_text(yaml.safe_dump(group, sort_keys=False), encoding="utf-8")
     return root
 
 
@@ -163,24 +281,29 @@ def plane(stack, tmp_path) -> Iterator[dict[str, Any]]:
     (config_dir / "e2e.yaml").write_text(yaml.safe_dump(config), encoding="utf-8")
     tokens_path = tmp_path / "memory.json"
     tokens_path.write_text(json.dumps(memory_tokens()), encoding="utf-8")
+    root = workspace(tmp_path)
     env = {
         "MALKUTH_MEMORY_URL": f"http://{MEMORY_ALIAS}:8090",
-        "MALKUTH_REPO_ROOT": str(workspace(tmp_path)),
+        "MALKUTH_REPO_ROOT": str(root),
+        # 선언 검증이 자격을 해석할 수 있어야 한다 — 에이전트 env 로는 나가지 않는다
+        MCP_TOKEN_ENV: MCP_TOKEN,
     }
-    state = {"start": lambda: start_plane(config_dir, tokens_path, env=env)}
+    state = {"start": lambda: start_plane(config_dir, tokens_path, env=env), "root": root}
     agents_network()
     state["process"] = state["start"]()
     start_memory(also=(AGENTS,))
     start_forwarder()
-    start_proxy()
+    start_fake_mcp()
+    start_proxy(root)
     try:
         until(plane_healthy, what="control plane health")
         until(memory_ready, what="registry-mode memory service health")
+        until(fake_mcp_ready, what="fake remote mcp server")
         until(proxy_ready, what="egress proxy health")
         yield state
     finally:
         stop(state["process"])
-        for name in (PROXY, MEMORY, FORWARDER, *deployed_containers()):
+        for name in (PROXY, MEMORY, FORWARDER, MCP_SERVER, *deployed_containers()):
             docker("rm", "-f", name, check=False)
         docker("network", "rm", AGENTS, check=False)
 
@@ -253,7 +376,7 @@ def test_egress_is_decided_per_destination_through_the_proxy(plane):
     until(lambda: tunnel(RESEARCHER, TARGET) == "200", what="CONNECT allowed after lifting")
 
     # --- record 모드: 선언 밖 목적지를 기록하되 통과시킨다
-    start_proxy(mode="record")
+    start_proxy(plane["root"], mode="record")
     until(proxy_ready, what="egress proxy health in record mode")
     until(
         lambda: tunnel(PLANNER, TARGET) == "200",
@@ -266,7 +389,7 @@ def test_egress_is_decided_per_destination_through_the_proxy(plane):
         check=False,
     )
     assert "egress denied but recorded only" in logs.stdout + logs.stderr
-    start_proxy(mode="enforce")
+    start_proxy(plane["root"], mode="enforce")
     until(proxy_ready, what="egress proxy health back in enforce mode")
     until(lambda: tunnel(RESEARCHER, TARGET) == "200", what="declared CONNECT after proxy restart")
 
@@ -358,3 +481,118 @@ def test_isolated_agents_have_no_way_out_but_the_proxy(plane):
     status, _ = api("DELETE", f"/v1/deployments/{record['deployment_id']}")
     assert status in (200, 202, 204), status
     until(lambda: not deployed_containers(), what="isolated containers torn down")
+
+
+CARD = """
+import json, os, urllib.request
+request = urllib.request.Request(
+    "http://127.0.0.1:8080/v1/card",
+    headers={"Authorization": "Bearer " + os.environ["MALKUTH_AGENT_TOKEN"]},
+)
+print(json.dumps([s["name"] for s in json.load(urllib.request.urlopen(request))["skills"]]))
+"""
+
+
+ANSWER = "@@"
+
+
+class McpSession:
+    """떠 있는 에이전트 컨테이너 안의 MCP 세션 하나 — 도구를 부를 때마다 같은 세션을 쓴다.
+
+    stdout 은 스레드가 줄 단위로 큐에 옮긴다 — ``select`` 는 파이썬 버퍼에 이미 읽힌 줄을 보지 못해
+    답이 와 있는데도 기다린다.
+    """
+
+    def __init__(self, container: str) -> None:
+        self.process = subprocess.Popen(  # noqa: S603
+            ["docker", "exec", "-i", container, "python", "-c", MCP_SESSION],  # noqa: S607
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        self.lines: queue.Queue[str] = queue.Queue()
+        self.seen: list[str] = []
+        threading.Thread(target=self._pump, daemon=True).start()
+        ready = self._answer()
+        assert ready == "READY", ready
+
+    def call(self, tool: str, arguments: dict[str, Any]) -> str:
+        self.process.stdin.write(f"{tool} {json.dumps(arguments)}\n")
+        self.process.stdin.flush()
+        return self._answer()
+
+    def _pump(self) -> None:
+        for line in self.process.stdout:
+            self.lines.put(line)
+        self.lines.put("")
+
+    def _answer(self, timeout_s: float = 60.0) -> str:
+        """다음 답 한 줄 — 로그 줄은 건너뛰되 남겨 둔다. 답이 없으면 그 로그로 원인을 보인다."""
+        deadline = time.monotonic() + timeout_s
+        while (left := deadline - time.monotonic()) > 0:
+            try:
+                line = self.lines.get(timeout=left)
+            except queue.Empty:
+                break
+            if not line:
+                return "CLOSED:" + "".join(self.seen[-20:])
+            if line.startswith(ANSWER):
+                return line[len(ANSWER) :].strip()
+            self.seen.append(line)
+        self.process.kill()
+        raise AssertionError("mcp session did not answer:\n" + "".join(self.seen[-20:]))
+
+    def close(self) -> None:
+        self.process.stdin.close()
+        self.process.wait(timeout=30)
+
+
+def succeeded(answer: str, expected: str) -> bool:
+    """성공한 도구 결과에 기대한 값이 있는가 — 에러 사유에 같은 글자가 섞여도 통과하지 않게."""
+    return answer.startswith("OK:") and expected in answer.removeprefix("OK:")
+
+
+def test_remote_mcp_tools_are_decided_one_by_one_through_the_proxy(plane):
+    status, record = api("POST", "/v1/deployments", {"graph": "research-pipeline"})
+    assert status == 201, record
+    started = started_at(RESEARCHER)
+
+    # --- 자격은 프록시에만, 원격 서버는 프록시 종단으로
+    env = container_env(RESEARCHER)
+    assert MCP_TOKEN_ENV not in env and MCP_TOKEN not in env.values(), (
+        "MCP 자격이 컨테이너에 들어갔다"
+    )
+    assert env["MALKUTH_MCP_PROXY_URL"] == "http://malkuth-egress:8081/mcp"
+    # --- agentd 가 기동 때 세션을 열어 도구를 광고한다
+    advertised = json.loads(run_in(RESEARCHER, CARD))
+    assert {"mcp__corp__echo", "mcp__corp__add"} <= set(advertised), advertised
+
+    session = McpSession(RESEARCHER)
+    first = session.call("echo", {"text": "e2e"})
+    assert succeeded(first, "e2e"), first
+    added = session.call("add", {"a": 2, "b": 3})
+    assert succeeded(added, "5"), added
+
+    # --- 도구 하나 회수: 다음 호출부터 거부, 같은 서버의 다른 도구는 계속
+    status, revoked = api(
+        "POST",
+        "/v1/access/revocations",
+        {"agent": "researcher", "kind": "mcp_tool", "target": "corp/echo", "reason": "e2e"},
+    )
+    assert status == 201, revoked
+    # 같은 세션의 다음 호출부터 — 세션을 다시 열지 않는다
+    until(
+        lambda: session.call("echo", {"text": "e2e"}).startswith("ERR:MCP_003:ACC_001"),
+        what="revoked mcp tool refused in the open session",
+        timeout_s=30,
+    )
+    added = session.call("add", {"a": 2, "b": 3})
+    assert succeeded(added, "5"), f"회수가 같은 서버의 다른 도구까지 막았다: {added}"
+
+    api("DELETE", f"/v1/access/rules/{revoked['rule_id']}")
+    until(
+        lambda: succeeded(session.call("echo", {"text": "e2e"}), "e2e"), what="lifted", timeout_s=30
+    )
+    session.close()
+    assert started_at(RESEARCHER) == started, "권한 변경이 컨테이너를 재시작했다"

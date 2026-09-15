@@ -119,3 +119,33 @@ async def test_a_failing_part_stops_the_rest_and_its_error_propagates():
     with pytest.raises(RuntimeError, match="feed broke"):
         await asyncio.wait_for(supervise(forever(), feed_breaks()), timeout=2)
     assert cancelled == ["listener"]
+
+
+def test_remote_mcp_needs_the_declarations_and_an_explicit_credential_list():
+    from malkuth.egress.__main__ import _mcp_routers
+
+    bare = settings(REGISTRY)
+    assert (bare["repo_root"], bare["mcp_tokens"]) == ("", frozenset())
+    assert _mcp_routers(bare, access=None) == [], "선언 없이 원격 MCP 를 종단하지 않는다"
+
+    found = settings(
+        {**REGISTRY, "MALKUTH_REPO_ROOT": "/repo", "MALKUTH_EGRESS_MCP_TOKENS": " CORP_TOKEN, ,X"}
+    )
+    assert found["mcp_tokens"] == frozenset({"CORP_TOKEN", "X"})
+    assert len(_mcp_routers(found, access=None)) == 1
+
+
+@pytest.mark.parametrize("name", ["ANTHROPIC_API_KEY", "MALKUTH_ACCESS_ENFORCER_TOKEN"])
+def test_proxy_held_secrets_cannot_be_listed_for_mcp_servers(name):
+    """목록이 유일한 문이다 — 모델 키·레지스트리 자격을 넣으면 선언 하나로 외부로 나간다."""
+    with pytest.raises(MalkuthError) as exc_info:
+        settings({**REGISTRY, "MALKUTH_EGRESS_MCP_TOKENS": f"CORP_TOKEN,{name}"})
+
+    assert exc_info.value.code == ErrorCode.CFG_001
+
+
+def test_the_session_key_survives_a_restart_but_differs_per_deployment_secret():
+    from malkuth.egress.__main__ import session_key
+
+    assert session_key("enforcer") == session_key("enforcer")
+    assert session_key("enforcer") != session_key("other")

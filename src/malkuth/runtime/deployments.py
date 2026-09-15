@@ -30,6 +30,7 @@ import structlog
 from malkuth.access.client import ACCESS_URL_ENV
 from malkuth.access.registry import ACCESS_CREDENTIAL_ENV
 from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
+from malkuth.protocols.mcp.transport import MCP_PROXY_URL_ENV
 from malkuth.runtime.images import image_tag
 from malkuth.runtime.launcher import LaunchedAgent, MemoryEndpoint
 from malkuth.runtime.scope import ScopedSecrets
@@ -855,7 +856,8 @@ class DeploymentManager:
         ).env_for(tuple(manifest.spec.runtime.env_allowlist))
         if self.egress is not None:
             # 프록시가 종단하는 서비스의 키는 에이전트에게 주지 않는다 — 프록시가 주입한다 (02)
-            scoped = {k: v for k, v in scoped.items() if k not in PROXY_TERMINATED_SECRETS}
+            terminated = PROXY_TERMINATED_SECRETS | remote_mcp_credentials(manifest)
+            scoped = {k: v for k, v in scoped.items() if k not in terminated}
         return {**self.agent_env, **scoped, **provision.env}
 
     def _memory_for(self, manifest: AgentManifest, provision: Provision) -> MemoryEndpoint | None:
@@ -957,6 +959,15 @@ PROXY_TERMINATED_SECRETS = frozenset({"ANTHROPIC_API_KEY"})
 """이그레스 프록시가 종단해 스스로 주입하는 자격 — 에이전트 env 로 나가지 않는다."""
 
 
+def remote_mcp_credentials(manifest: AgentManifest) -> frozenset[str]:
+    """원격 MCP 서버의 자격 이름 — 프록시가 붙이므로 에이전트 env 로 나가지 않는다 (02, #282)."""
+    return frozenset(
+        server.auth.token_env
+        for server in manifest.spec.mcp.servers
+        if server.url is not None and server.auth is not None
+    )
+
+
 @dataclass(frozen=True)
 class EgressEndpoints:
     """The egress proxy as agent containers reach it."""
@@ -977,6 +988,8 @@ class EgressEndpoints:
             "HTTPS_PROXY": proxy,
             "https_proxy": proxy,
             "ANTHROPIC_BASE_URL": f"{self.providers_url.rstrip('/')}/anthropic",
+            # 원격 MCP 서버도 프록시가 종단한다 — 도구 단위 판정과 자격 주입 (#282)
+            MCP_PROXY_URL_ENV: f"{self.providers_url.rstrip('/')}/mcp",
             # 키 자리에 신원을 싣는다 — 프록시가 떼고 진짜 키를 붙인다
             "ANTHROPIC_API_KEY": credential,
         }

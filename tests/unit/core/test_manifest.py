@@ -152,6 +152,25 @@ def test_http_mcp_server_requires_exactly_one_of_sidecar_or_url():
         )
 
 
+def test_a_remote_mcp_credential_must_not_reach_a_stdio_server():
+    """프록시가 켜지면 원격 자격은 env 에서 빠진다 — 같은 이름의 stdio 서버는 뜨지 못한다."""
+    from pydantic import ValidationError
+
+    from malkuth.core.manifest import McpSpec
+
+    remote = {
+        "name": "corp",
+        "transport": "streamable-http",
+        "url": "https://mcp.example/mcp",
+        "auth": {"type": "bearer", "token_env": "CORP_TOKEN"},
+    }
+    local = {"name": "fs", "transport": "stdio", "command": ["mcp-fs"], "env_allowlist": ["X"]}
+
+    McpSpec(servers=(remote, local))
+    with pytest.raises(ValidationError, match="CORP_TOKEN"):
+        McpSpec(servers=(remote, {**local, "env_allowlist": ["X", "CORP_TOKEN"]}))
+
+
 def test_http_mcp_server_rejects_both_sidecar_and_url():
     with pytest.raises(ValidationError, match="exactly one"):
         make_manifest(

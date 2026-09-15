@@ -310,6 +310,23 @@ class McpSpec(BaseModel):
             raise ValueError(f"duplicate mcp server name: {sorted(duplicates)}")
         return value
 
+    @field_validator("servers")
+    @classmethod
+    def _remote_credentials_stay_remote(
+        cls, value: tuple[McpServerSpec, ...]
+    ) -> tuple[McpServerSpec, ...]:
+        """원격 서버 자격 이름을 stdio 서버에 넘기지 않는다 (#282).
+
+        이그레스 프록시가 켜지면 원격 서버 자격은 프록시가 붙이고 에이전트 env 에서 빠진다 — 같은
+        이름을 stdio 서버가 받으면 그 서버는 기동에 실패하고, 받는다 해도 프록시가 쥔 자격을
+        컨테이너 안 프로세스에 다시 주는 셈이다.
+        """
+        remote = {s.auth.token_env for s in value if s.url is not None and s.auth is not None}
+        shared = sorted({key for s in value if s.command for key in s.env_allowlist} & remote)
+        if shared:
+            raise ValueError(f"remote mcp credentials must not reach stdio servers: {shared}")
+        return value
+
 
 class A2ACapabilities(BaseModel):
     """A2A capability flags advertised on the AgentCard."""

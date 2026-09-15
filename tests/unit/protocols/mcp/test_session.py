@@ -128,6 +128,8 @@ async def test_tool_execution_failure_is_mcp_003():
 
     assert exc_info.value.code == "MCP_003"
     assert exc_info.value.retryable is False
+    # 프록시의 도구 판정 거부(ACC_001)는 메시지에만 있다 — 사유가 호출자에게 닿아야 한다 (#282)
+    assert exc_info.value.details["detail"] == "bad args"
 
 
 async def test_transport_loss_is_retryable_mcp_004():

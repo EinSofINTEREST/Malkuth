@@ -191,9 +191,11 @@ def test_the_served_app_reloads_the_standard_executor(root, tmp_path, monkeypatc
     monkeypatch.setenv(agentd.TOKEN_ENV, "agent-token")
     monkeypatch.setattr(agentd, "_setup_observability", Metrics)
     served = {}
-    monkeypatch.setattr(
-        agentd, "_serve", lambda app, manifest, executor: served.update(app=app, executor=executor)
-    )
+
+    async def serve(app, manifest, executor):
+        served.update(app=app, executor=executor)
+
+    monkeypatch.setattr(agentd, "_serve", serve)
 
     agentd.main()
 
@@ -267,7 +269,11 @@ def test_a_custom_entrypoint_is_not_given_the_standard_reload(root, tmp_path, mo
 
     monkeypatch.setattr(agentd, "build_executor", build)
     served = {}
-    monkeypatch.setattr(agentd, "_serve", lambda app, manifest, executor: served.update(app=app))
+
+    async def serve(app, manifest, executor):
+        served.update(app=app)
+
+    monkeypatch.setattr(agentd, "_serve", serve)
 
     agentd.main()
 

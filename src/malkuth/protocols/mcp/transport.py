@@ -23,6 +23,9 @@ if TYPE_CHECKING:
 
 log = structlog.get_logger(__name__)
 
+MCP_PROXY_URL_ENV = "MALKUTH_MCP_PROXY_URL"
+"""runtime 이 이그레스 프록시를 켰을 때 넣는 원격 MCP 종단 주소."""
+
 
 def resolve_env(spec: McpServerSpec, environ: Mapping[str, str] | None = None) -> dict[str, str]:
     """Build the child process environment for a server.
@@ -134,9 +137,13 @@ class HttpTransport:
     """runtime 이 사이드카 기동 후 주입한 URL — manifest 에 수동 기입 금지."""
 
     environ: Mapping[str, str] | None = None
+    proxy_url: str | None = None
+    """이그레스 프록시의 원격 MCP 종단 (``…/mcp``) — 있으면 external 서버는 프록시로 간다 (#282)."""
+    identity: str | None = None
+    """프록시에 내미는 에이전트 신원 — 서버 자격은 프록시가 붙인다."""
 
     def url_for(self, spec: McpServerSpec) -> str:
-        """서버의 접속 URL — sidecar 는 주입값, external 은 선언값."""
+        """서버의 접속 URL — sidecar 는 주입값, external 은 선언값 또는 프록시 종단."""
         if spec.sidecar is not None:
             url = self.sidecar_urls.get(spec.name)
             if url is None:
@@ -144,10 +151,19 @@ class HttpTransport:
             return url
         if spec.url is None:
             raise startup_failed(self.agent, spec.name, reason="missing url")
+        if self.proxy_url is not None:
+            # 주소는 프록시가 **선언에서** 다시 찾는다 — 에이전트가 보내는 것은 서버 이름뿐이다
+            return f"{self.proxy_url.rstrip('/')}/{spec.name}"
         return spec.url
 
     def headers_for(self, spec: McpServerSpec) -> dict[str, str]:
         """인증 헤더 — 토큰 값은 env 에서 읽고 절대 로그로 남기지 않는다."""
+        if self.proxy_url is not None and spec.sidecar is None:
+            if not self.identity:
+                raise startup_failed(
+                    self.agent, spec.name, reason="agent identity unavailable for the egress proxy"
+                )
+            return {"authorization": f"Bearer {self.identity}"}
         if spec.auth is None:
             return {}
         source = os.environ if self.environ is None else self.environ
@@ -197,6 +213,7 @@ class TransportSelector:
 
 
 __all__ = [
+    "MCP_PROXY_URL_ENV",
     "HttpClient",
     "HttpTransport",
     "StdioClient",

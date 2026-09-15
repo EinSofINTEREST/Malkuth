@@ -1379,6 +1379,55 @@ def test_a_proxy_terminated_key_never_leaves_even_without_an_identity_override(m
     assert "ANTHROPIC_API_KEY" not in env
 
 
+def test_a_remote_mcp_credential_stays_with_the_proxy(manager):
+    """원격 MCP 서버 자격은 프록시가 붙인다 — 에이전트 env 에 있으면 회수가 재배포 없이 안 된다."""
+    from malkuth.core.manifest import AgentManifest
+    from malkuth.runtime.deployments import EgressEndpoints, Provision
+
+    doc = agent_doc("alpha")
+    doc["spec"]["runtime"] = {"env_allowlist": ["ANTHROPIC_API_KEY", "CORP_TOKEN", "LOCAL_TOKEN"]}
+    doc["spec"]["mcp"] = {
+        "servers": [
+            {
+                "name": "corp",
+                "transport": "streamable-http",
+                "url": "https://mcp.example.com/mcp",
+                "auth": {"type": "bearer", "token_env": "CORP_TOKEN"},
+            },
+            {
+                "name": "local",
+                "transport": "stdio",
+                "command": ["mcp-local"],
+                "env_allowlist": ["LOCAL_TOKEN"],
+            },
+        ]
+    }
+    manifest = AgentManifest.model_validate(doc)
+    manager.secrets_env = {"ANTHROPIC_API_KEY": "k", "CORP_TOKEN": "corp", "LOCAL_TOKEN": "local"}
+    provision = Provision(env={}, mounts=(), a2a_port=None, image=None)
+
+    plain = manager._env_for(manifest, provision)  # noqa: SLF001
+    manager.egress = EgressEndpoints(
+        connect_url="http://malkuth-egress:8080", providers_url="http://malkuth-egress:8081"
+    )
+    proxied = manager._env_for(manifest, provision)  # noqa: SLF001
+
+    assert plain["CORP_TOKEN"] == "corp", "프록시가 없으면 에이전트가 직접 붙는다"
+    assert "CORP_TOKEN" not in proxied
+    assert proxied["LOCAL_TOKEN"] == "local", "stdio 서버의 자격은 컨테이너 안에서 쓴다"
+
+
+def test_the_proxy_wiring_points_remote_mcp_at_the_termination():
+    from malkuth.protocols.mcp.transport import MCP_PROXY_URL_ENV
+    from malkuth.runtime.deployments import EgressEndpoints
+
+    env = EgressEndpoints(
+        connect_url="http://malkuth-egress:8080", providers_url="http://malkuth-egress:8081/"
+    ).env_for("alpha", "cred")
+
+    assert env[MCP_PROXY_URL_ENV] == "http://malkuth-egress:8081/mcp"
+
+
 def test_an_ipv6_proxy_address_keeps_its_brackets():
     """hostname 은 IPv6 괄호를 벗긴다 — `@::1:8080` 은 프록시 주소가 아니다 (#294 리뷰)."""
     from urllib.parse import urlsplit

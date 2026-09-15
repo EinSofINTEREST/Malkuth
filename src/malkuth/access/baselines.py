@@ -143,6 +143,7 @@ def _agent_name(ref: str) -> str:
 
 
 HTTPS_PORT = 443
+HTTP_PORT = 80
 
 PROVIDER_HOSTS = {"anthropic": "api.anthropic.com"}
 """모델 provider 의 논리 호스트 — 이그레스 프록시가 종단하는 호출은 이 이름으로 판정한다.
@@ -193,18 +194,55 @@ class EgressBaseline:
         if provider is not None:
             targets.add(provider)
         for server in manifest.spec.mcp.servers:
-            if server.url is None:
-                continue
-            parts = urlsplit(server.url)
-            try:
-                port = parts.port
-            except ValueError:
-                # 선언 검증이 막지만, 한 에이전트의 잘못된 선언으로 판정이 터지면 안 된다
-                continue
-            if parts.hostname:
-                default = HTTPS_PORT if parts.scheme == "https" else 80
-                targets.add(egress_target(parts.hostname, port or default))
+            target = url_target(server.url) if server.url is not None else None
+            if target is not None:
+                targets.add(target)
         return frozenset(targets)
+
+
+def url_target(url: str) -> str | None:
+    """An http(s) URL's egress target — the name a remote MCP server is decided under.
+
+    선언 판정과 프록시의 원격 MCP 종단이 같은 이름을 쓰게 한 곳에서 정한다. 풀 수 없는 URL 은
+    None — 선언 검증이 막지만, 한 에이전트의 잘못된 선언으로 판정이 터지면 안 된다.
+    """
+    parts = urlsplit(url)
+    try:
+        port = parts.port
+    except ValueError:
+        return None
+    if not parts.hostname:
+        return None
+    default = HTTPS_PORT if parts.scheme == "https" else HTTP_PORT
+    return egress_target(parts.hostname, port or default)
+
+
+@dataclass(frozen=True)
+class McpToolBaseline:
+    """Declared remote MCP tools — ``server/tool`` (#282).
+
+    원격(``url`` 이 있는) 서버만 대상이다 — stdio 서버의 도구는 컨테이너 안에서 돌아 프록시가 보지
+    못한다. ``allowed_tools`` 를 선언했으면 그 목록만, 아니면 그 서버의 모든 도구가 기본 권한이다.
+    """
+
+    catalog: Catalog
+
+    def allows(
+        self, agent: str, target: str, mode: Mode | None, identity: Identity | None = None
+    ) -> bool:
+        server, _, tool = target.partition("/")
+        if not (server and tool):
+            return False
+        try:
+            manifest = self.catalog.agent(agent)
+        except MalkuthError as err:
+            if err.code == ErrorCode.NF_001:
+                return False
+            raise
+        for declared in manifest.spec.mcp.servers:
+            if declared.name == server and declared.url is not None:
+                return not declared.allowed_tools or tool in declared.allowed_tools
+        return False
 
 
 __all__ = [
@@ -212,6 +250,8 @@ __all__ = [
     "SPACE_ID",
     "A2ABaseline",
     "EgressBaseline",
+    "McpToolBaseline",
     "MemoryBaseline",
     "egress_target",
+    "url_target",
 ]

@@ -35,7 +35,18 @@ def registry(tmp_path: Path) -> AccessRegistry:
     )
 
 
-def steward_for(registry: AccessRegistry, *, down: bool = False) -> PermissionAgent:
+class Link:
+    """control plane 까지의 연결 — 끊고 잇는다, 몇 번 불렸는지 센다."""
+
+    def __init__(self, down: bool = False) -> None:
+        self.down = down
+        self.calls = 0
+
+
+def steward_for(
+    registry: AccessRegistry, *, down: bool = False, link: Link | None = None
+) -> PermissionAgent:
+    link = link or Link(down)
     app = create_app(
         InMemoryRunStore(), catalog=registry.catalog, token="control", access=registry,
         enforcer_token="enforcer",
@@ -43,7 +54,8 @@ def steward_for(registry: AccessRegistry, *, down: bool = False) -> PermissionAg
     asgi = httpx.ASGITransport(app=app)
 
     async def route(request: httpx.Request) -> httpx.Response:
-        if down:
+        link.calls += 1
+        if link.down:
             raise httpx.ConnectError("control plane is down")
         return await asgi.handle_async_request(request)
 
@@ -117,10 +129,11 @@ async def test_requests_beyond_the_ceiling_are_refused_by_the_registry(registry,
 
 async def test_a_request_that_did_not_come_over_a2a_is_refused(registry):
     """확인된 호출자가 없으면 누구에게 줄지 모른다 — 직접 요청·그래프 태스크는 받지 않는다."""
-    result = await steward_for(registry).execute(request(caller=None))
+    link = Link()
+    result = await steward_for(registry, link=link).execute(request(caller=None))
 
     assert result.error.code == ErrorCode.ACC_003
-    assert allows(registry, "worker") == []
+    assert link.calls == 0, "누구의 요청인지 모르는 채 레지스트리에 물었다"
 
 
 @pytest.mark.parametrize(
@@ -172,10 +185,16 @@ async def test_a_retried_request_is_granted_once(registry):
 
 
 async def test_an_unreachable_registry_is_a_retryable_failure_that_is_not_remembered(registry):
-    result = await steward_for(registry, down=True).execute(request(task_id="later"))
+    link = Link(down=True)
+    steward = steward_for(registry, link=link)
+    result = await steward.execute(request(task_id="later"))
 
     assert (result.error.code, result.error.retryable) == (ErrorCode.ACC_002, True)
     assert allows(registry, "worker") == []
+
+    link.down = False
+    retried = await steward.execute(request(task_id="later"))
+    assert retried.status is TaskStatus.COMPLETED, "일시 장애를 기억해 재시도가 영원히 실패한다"
 
 
 async def test_the_stream_path_reports_the_same_outcome(registry):

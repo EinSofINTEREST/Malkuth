@@ -569,6 +569,56 @@ curl -X POST -H "Authorization: Bearer $MALKUTH_ACCESS_CREDENTIAL" \
 때, 상한이나 `max_ttl_s` 를 넘을 때, 운영자가 회수한 것을 요청할 때 거절한다 — 회수를 되돌리는
 것은 운영자뿐이다. 모르거나 폐기된 신원은 `403` + `ACC_001`, 없는 에이전트는 `404` 다.
 
+### 권한 에이전트
+
+작업 에이전트는 부여 경로를 부르지 않는다. A2A 로 **권한 에이전트**에게 요청하고, 권한 에이전트가
+자기 신원으로 그 경로를 부른다. 참조 구현은 `agents/permission-agent`
+(`malkuth.access.steward:PermissionAgent`) 이고 `graphs/permissions.yaml` 로 배포한다. 규칙만으로
+결정하며 매니페스트에 선언된 모델을 부르지 않는다 — 요청 문구로 무엇을 넘기도록 설득할 수 없다.
+어느 쪽이든 상한은 레지스트리가 강제한다.
+
+배선:
+
+- `orchestrator.access_stewards` 에 올린다. 모든 에이전트는 목록의 권한 에이전트를 부를 수 있다:
+  권한 에이전트는 모든 호출자의 선언에서 허용된 `a2a` 대상이고, 레지스트리가 설정되어 있으면
+  runtime 이 떠 있는 권한 에이전트를 모든 에이전트의 peer 에 넣는다.
+- **요청할 에이전트의 그래프보다 `permissions` 를 먼저 배포한다.** 에이전트는 기동할 때 peer 를
+  받는다. 권한 에이전트가 뜨기 전에 기동한 에이전트는 재배포할 때까지 권한 에이전트에 닿는 길이
+  없다.
+
+태스크 입력은 요청 자체이거나 `{"request": "<같은 요청의 JSON 문자열>"}` 이다 — `ask_peer` 가
+보내는 모양이다:
+
+```json
+{"kind": "memory", "target": "global:global:org", "mode": "rw", "ttl_s": 300,
+ "reason": "record the findings of run r-12"}
+```
+
+모르는 필드는 거절하고, `agent` 필드는 없다: 부여는 언제나 피호출자 A2A 서버가 티켓으로 확인한
+호출자에게 간다 — 다른 에이전트를 대신해 요청할 수 없다. 확인된 호출자가 없는 태스크(직접 요청,
+그래프 노드)는 레지스트리에 묻지 않고 거절한다. 부여되면 이렇게 답한다:
+
+```json
+{"granted": true, "rule_id": "rule-7c1e0a9b2d3f4e5a", "kind": "memory",
+ "target": "global:global:org", "mode": "rw", "expires_at": 1789381500.0}
+```
+
+실패는 호출자에게 `A2A_003` 으로 가고, 권한 에이전트의 에러가 `details.peer_error` 에 실린다:
+
+| `peer_error.code` | 언제 | 재시도 |
+|---|---|---|
+| `ACC_003` | 레지스트리가 거절했다 — 레지스트리의 코드는 `details.registry_code` 에 | 아니오 |
+| `VAL_002` | 확장 요청의 모양이 맞지 않는다 | 아니오 |
+| `ACC_002` | 레지스트리에 닿지 않았다 | 예 |
+
+같은 task id 를 다시 보내면 부여를 두 번 기록하지 않고 첫 답을 돌려준다. `ACC_002` 답은 기억하지
+않으므로 재시도는 다시 묻는다. 권한 에이전트를 멈추면 새 부여만 멈춘다 — 이미 준 부여는 만료까지
+유효하고, 운영자 회수도 그대로 동작한다.
+
+**부여받은 메모리 space 부르기.** 선언하지 않은 space 에는 별칭이 없다. 대신 space id 로 부른다 —
+Memory Service 요청에 `{"space": "global:global:org"}` — Memory Service 는 다른 space 와 똑같이
+판정한다.
+
 ### `POST /v1/access/decisions` — 강제 지점
 
 ```json

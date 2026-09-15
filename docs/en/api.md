@@ -592,6 +592,58 @@ ceiling or its `max_ttl_s`, or asks for something an operator revoked — only a
 undoes a revocation. An unknown or revoked identity is `403` with `ACC_001`; an unknown agent
 is `404`.
 
+### The permission agent
+
+Workers do not call the grant route; they ask the **permission agent** over A2A, and it calls the
+route with its own identity. The reference agent is `agents/permission-agent`
+(`malkuth.access.steward:PermissionAgent`), deployed by `graphs/permissions.yaml`. It decides by
+rules only — it never calls the model its manifest declares — so the text of a request cannot talk
+it past anything. The ceiling is enforced by the registry either way.
+
+Wiring:
+
+- List it in `orchestrator.access_stewards`. Every agent may call a listed steward: the steward is
+  an allowed `a2a` target in every caller's declaration, and when a registry is configured the
+  runtime adds each running steward to every agent's peers.
+- **Deploy `permissions` before the graphs whose agents will ask.** Agents learn their peers when
+  they start; an agent started before the steward was running has no route to it until it is
+  redeployed.
+
+The task input is the request itself, or `{"request": "<the same request as a JSON string>"}` —
+what `ask_peer` sends:
+
+```json
+{"kind": "memory", "target": "global:global:org", "mode": "rw", "ttl_s": 300,
+ "reason": "record the findings of run r-12"}
+```
+
+Unknown fields are refused, and there is no `agent` field: the grant always goes to the caller the
+callee's A2A server verified from its ticket, so an agent cannot ask on another's behalf. A task
+with no verified caller — a direct request, a graph node — is refused without asking the registry.
+A granted answer is:
+
+```json
+{"granted": true, "rule_id": "rule-7c1e0a9b2d3f4e5a", "kind": "memory",
+ "target": "global:global:org", "mode": "rw", "expires_at": 1789381500.0}
+```
+
+A failure reaches the caller as `A2A_003` with the permission agent's error in
+`details.peer_error`:
+
+| `peer_error.code` | When | Retry |
+|---|---|---|
+| `ACC_003` | the registry refused — its own code is in `details.registry_code` | no |
+| `VAL_002` | the request is not a well-formed expansion request | no |
+| `ACC_002` | the registry was unreachable | yes |
+
+Repeating a task id returns the first answer instead of recording a second grant; an `ACC_002`
+answer is not remembered, so a retry asks again. Stopping the permission agent stops new grants
+only — existing grants run to their expiry and operator revocations keep working.
+
+**Addressing a granted memory space.** A space the agent did not declare has no alias for it. Name
+it by space id instead — `{"space": "global:global:org"}` in a Memory Service request — and the
+Memory Service decides it like any other space.
+
 ### `POST /v1/access/decisions` — enforcement point
 
 ```json

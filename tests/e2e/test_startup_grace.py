@@ -12,8 +12,9 @@ from __future__ import annotations
 
 import json
 import shutil
+import time
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -91,21 +92,26 @@ def impatient(stack, tmp_path) -> Iterator[dict[str, Any]]:
     yield from plane_with(tmp_path, grace=0.0, ready_timeout=60.0)
 
 
-def started_at(container: str) -> datetime:
-    stamp = docker("inspect", "-f", "{{.State.StartedAt}}", container)
-    return datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+def first_container() -> str:
+    """배포가 도는 동안 **처음 선** writer 컨테이너의 id — 갈아 끼우면 id 가 바뀐다."""
+    for _ in range(600):
+        found = docker("inspect", "-f", "{{.Id}}", WRITER, check=False)
+        if found and not found.startswith("Error"):
+            return found
+        time.sleep(0.2)
+    raise AssertionError("writer container never appeared")
 
 
 def test_a_slow_starting_agent_becomes_ready_without_being_restarted(patient):
-    began = datetime.now(UTC)
-
-    status, record = api("POST", "/v1/deployments", {"graph": "research-pipeline"})
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        watching = pool.submit(first_container)
+        status, record = api("POST", "/v1/deployments", {"graph": "research-pipeline"})
+        started = watching.result(timeout=30)
 
     assert status == 201, record
     assert record["status"] == "ready", record
-    # **처음 세운 컨테이너 그대로** Ready 다 — 재시작했다면 확인 창(3초×3) 뒤에 다시 섰다
-    age = (started_at(WRITER) - began).total_seconds()
-    assert age < 10.0, f"기동 중에 컨테이너가 갈렸다 (배포 시작 {age:.1f}초 뒤에 선 컨테이너)"
+    # **처음 선 그 컨테이너**가 Ready 가 됐다 — 재시작이면 id 가 달라진다 (시간 비교로는 못 가른다)
+    assert docker("inspect", "-f", "{{.Id}}", WRITER) == started, "기동 중에 컨테이너가 갈렸다"
     logs = docker("logs", "--tail", "60", WRITER, check=False)
     assert "agentd starting" in logs, logs[-600:]
 

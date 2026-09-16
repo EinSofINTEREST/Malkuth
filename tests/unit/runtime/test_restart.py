@@ -286,3 +286,25 @@ async def test_restart_is_off_without_supervision():
     await spin(30)
 
     assert not agents._restarts
+
+
+async def test_a_reattached_agent_is_restarted_without_waiting_for_a_startup_grace():
+    """재부착은 이미 Ready 였던 기록만 붙인다 — 유예를 다시 주면 고장이 늦게 드러난다."""
+    client = FakeDockerClient()
+    agents = launcher(client, Recorder(), startup_grace_s=1_000.0)
+    first = await agents.start(manifest())
+    await agents.stop_all()
+
+    adopted = await agents.adopt(
+        first.agent,
+        replica=0,
+        container_id=first.handle.container_id,
+        image=first.handle.image,
+        control_port=first.handle.control_port,
+        token="remembered",  # noqa: S106 — 테스트 값
+        restart_args={"manifest": manifest()},
+    )
+
+    assert adopted is True
+    await until(lambda: len(client.created) > 1)
+    await agents.stop_all()

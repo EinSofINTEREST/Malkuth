@@ -1,7 +1,8 @@
 """A slow-starting agent reaches Ready without being restarted (#297).
 
 기동은 health 확인 창(`interval_s × unhealthy_threshold`)보다 길 수 있다 — MCP 서버 기동,
-원격 initialize. 유예가 없으면 뜨는 중인 컨테이너가 재시작되고, 같은 시간이 다시 걸려 배포가 실패한다.
+원격 initialize. 유예가 없으면 뜨는 중인 컨테이너가 재시작되고, 같은 시간이 다시 걸려 배포가
+실패한다.
 
 느린 기동은 **선언으로** 만든다: writer 에게 말하지 않는 stdio MCP 서버를 `optional` 로 붙이면
 agentd 가 기동 예산(서버당 15초)을 다 쓰고 degraded 로 계속한다 — E2E 의 확인 창(3초 × 3)보다 길다.
@@ -11,6 +12,7 @@ from __future__ import annotations
 
 import json
 import shutil
+from datetime import UTC, datetime
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -57,8 +59,9 @@ def workspace(tmp_path: Path) -> Path:
     return root
 
 
-def plane_with(tmp_path: Path, grace: float) -> Iterator[dict[str, Any]]:
-    config_dir = write_config(tmp_path)
+def plane_with(tmp_path: Path, grace: float, ready_timeout: float) -> Iterator[dict[str, Any]]:
+    """유예와 배포 대기는 함께 올린다 — 유예만 올리면 배포가 먼저 끝난다 (#297)."""
+    config_dir = write_config(tmp_path, orchestrator={"deployment_ready_timeout_s": ready_timeout})
     config = yaml.safe_load((config_dir / "e2e.yaml").read_text(encoding="utf-8"))
     config["runtime"]["health_check"]["startup_grace_s"] = grace
     (config_dir / "e2e.yaml").write_text(yaml.safe_dump(config), encoding="utf-8")
@@ -78,29 +81,33 @@ def plane_with(tmp_path: Path, grace: float) -> Iterator[dict[str, Any]]:
 
 @pytest.fixture
 def patient(stack, tmp_path) -> Iterator[dict[str, Any]]:
-    """기동 유예를 켠 control plane — 기본값과 같은 45초."""
-    yield from plane_with(tmp_path, grace=45.0)
+    """기동 유예를 켠 control plane — 느린 기동을 받도록 배포 대기도 함께 올린다."""
+    yield from plane_with(tmp_path, grace=90.0, ready_timeout=150.0)
 
 
 @pytest.fixture
 def impatient(stack, tmp_path) -> Iterator[dict[str, Any]]:
     """유예가 없는 control plane — #297 이전의 동작."""
-    yield from plane_with(tmp_path, grace=0.0)
+    yield from plane_with(tmp_path, grace=0.0, ready_timeout=60.0)
 
 
-def starts_of(container: str) -> str:
-    return docker("inspect", "-f", "{{.State.StartedAt}} {{.RestartCount}}", container, check=False)
+def started_at(container: str) -> datetime:
+    stamp = docker("inspect", "-f", "{{.State.StartedAt}}", container)
+    return datetime.fromisoformat(stamp.replace("Z", "+00:00"))
 
 
 def test_a_slow_starting_agent_becomes_ready_without_being_restarted(patient):
+    began = datetime.now(UTC)
+
     status, record = api("POST", "/v1/deployments", {"graph": "research-pipeline"})
 
     assert status == 201, record
     assert record["status"] == "ready", record
-    # 컨테이너를 갈아 끼우지 않았다 — 갈았다면 기동 시간이 처음부터 다시 걸린다
-    assert [a["name"] for a in record["agents"]].count("writer") == 1
-    logs = docker("logs", "--tail", "40", WRITER, check=False)
-    assert "agentd starting" in logs, logs[-500:]
+    # **처음 세운 컨테이너 그대로** Ready 가 됐다 — 재시작했다면 확인 창(3초×3) 뒤에 다시 섰을 것이다
+    age = (started_at(WRITER) - began).total_seconds()
+    assert age < 10.0, f"기동 중에 컨테이너가 갈렸다 (배포 시작 {age:.1f}초 뒤에 선 컨테이너)"
+    logs = docker("logs", "--tail", "60", WRITER, check=False)
+    assert "agentd starting" in logs, logs[-600:]
 
 
 def test_without_the_grace_the_same_agent_never_deploys(impatient):

@@ -162,7 +162,9 @@ class AgentLifecycle:
         """새 태스크를 받을 수 있는 상태인지 — drain 중에는 받지 않는다."""
         return self.state is AgentState.READY
 
-    def record_health(self, *, healthy: bool, threshold: int = 3) -> AgentState:
+    def record_health(
+        self, *, healthy: bool, threshold: int = 3, starting_up: bool = False
+    ) -> AgentState:
         """Fold a health check result into the lifecycle.
 
         Health 결과를 반영합니다. 연속 실패가 임계에 닿으면 Unhealthy 로 전이하고,
@@ -171,6 +173,9 @@ class AgentLifecycle:
         Args:
             healthy: Whether the check passed.
             threshold: Consecutive failures before marking unhealthy.
+            starting_up: 아직 기동 유예 안이다 — 실패를 세되 Unhealthy 로 전이하지 않는다.
+                기동이 확인 주기보다 길면(MCP 서버 기동, 원격 initialize) 뜨는 중인 컨테이너가
+                재시작돼 같은 시간이 다시 걸린다 (#297).
 
         Returns:
             The resulting state.
@@ -182,6 +187,9 @@ class AgentLifecycle:
             return self.state
 
         self.consecutive_health_failures += 1
+        if starting_up and self.state is AgentState.STARTING:
+            # 유예가 끝나면 아래 규칙이 그대로 적용된다 — 영원히 기다리지 않는다
+            return self.state
         # 기동 중(STARTING) 실패도 Unhealthy 로 — READY 만 보면 initialize 가
         # 끝내 성공하지 못한 컨테이너가 계속 STARTING 에 머문다
         if self.consecutive_health_failures >= threshold and self.state in (

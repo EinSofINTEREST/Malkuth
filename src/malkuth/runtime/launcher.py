@@ -20,6 +20,7 @@ from malkuth.core.errors import NETWORK_RETRY, ErrorCategory, ErrorCode, Malkuth
 from malkuth.memory.http import MEMORY_TOKEN_ENV, MEMORY_URL_ENV
 from malkuth.runtime.control import ControlClient
 from malkuth.runtime.docker.engine import DEFAULT_DRAIN_TIMEOUT_S, ContainerHandle
+from malkuth.runtime.health import DEFAULT_STARTUP_GRACE_S
 from malkuth.runtime.lifecycle import AgentLifecycle, AgentState
 from malkuth.runtime.ports import A2APortAllocator
 from malkuth.runtime.spec import LOOPBACK, build_container_spec
@@ -105,6 +106,8 @@ class AgentLauncher:
     분명해야 하므로 감시를 원하는 조립만 켠다 (02 Lifecycle Rules 3)."""
     health_sleep: Callable[[float], object] | None = None
     """06 은 시간 의존 로직이 테스트에서 실제로 자는 것을 금지한다."""
+    startup_grace_s: float = DEFAULT_STARTUP_GRACE_S
+    """Ready 가 되기 전의 유예 — 이 안의 health 실패는 재시작을 일으키지 않는다 (#297)."""
     drain_timeout_s: float = DEFAULT_DRAIN_TIMEOUT_S
     """정지 전 진행 중 태스크를 기다리는 상한 (02 Lifecycle 4, 기본 30s)."""
     launched: dict[tuple[str, int], LaunchedAgent] = field(default_factory=dict)
@@ -249,6 +252,8 @@ class AgentLauncher:
             probe=launched.client,
             lifecycle=launched.lifecycle,
             interval_s=self.health_interval_s,
+            # 기동이 확인 주기보다 길어도 뜨는 중인 컨테이너를 재시작하지 않는다 (#297)
+            startup_grace_s=self.startup_grace_s,
             metrics=self.metrics,
             sleep=self.health_sleep,
             on_state=lambda state, healthy: self._promote(launched, state, healthy=healthy),

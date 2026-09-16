@@ -67,6 +67,9 @@ def launcher(client: FakeDockerClient, waits: Recorder, **kwargs) -> AgentLaunch
         await asyncio.sleep(0)
 
     kwargs.setdefault("health_interval_s", 10.0)
+    # 이 파일은 **기동 유예가 끝난 뒤**의 재시작 계약을 본다 — 유예 자체는
+    # `test_the_startup_grace_does_not_restart_a_container_that_is_still_starting` 이 본다 (#297)
+    kwargs.setdefault("startup_grace_s", 0.0)
     return AgentLauncher(
         engine=DockerEngine(client=client),
         health_sleep=health_sleep,
@@ -114,6 +117,20 @@ async def test_a_restart_keeps_the_baked_image():
 
     images = [created["image"] for created in client.created]
     assert images == ["malkuth/agent-echo-baked:0.1.0"] * 2
+    await agents.stop_all()
+
+
+async def test_the_startup_grace_does_not_restart_a_container_that_is_still_starting():
+    """기동이 확인 주기보다 길면 뜨는 중인 컨테이너가 재시작돼 배포가 끝내 실패한다 (#297)."""
+    client = FakeDockerClient()
+    agents = launcher(client, Recorder(), startup_grace_s=1_000.0)
+    launched, _ = await start_sick(agents)
+
+    await spin(20)
+
+    assert len(client.created) == 1, "유예 안에서 재시작했다"
+    assert launched.lifecycle.state is AgentState.STARTING
+    assert launched.lifecycle.consecutive_health_failures > 0, "실패를 세지도 않았다"
     await agents.stop_all()
 
 

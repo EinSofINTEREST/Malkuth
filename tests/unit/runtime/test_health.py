@@ -322,3 +322,89 @@ async def test_run_awaits_a_future_returning_sleep():
     await monitor.run(iterations=2)
 
     assert awaited == [5.0]
+
+
+# --- 기동 유예 (#297) ------------------------------------------------------------
+
+
+class Clock:
+    """주입 시계 — 06 은 시간 의존 로직이 실제로 자는 것을 금지한다."""
+
+    def __init__(self) -> None:
+        self.now = 1_000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def starting_lifecycle() -> AgentLifecycle:
+    lifecycle = AgentLifecycle(agent="researcher")
+    lifecycle.transition(AgentState.BUILT)
+    lifecycle.transition(AgentState.STARTING)
+    return lifecycle
+
+
+async def test_failures_inside_the_startup_grace_do_not_mark_the_agent_unhealthy():
+    """기동이 확인 주기보다 길 수 있다 — 유예 안의 실패로 재시작하면 같은 시간이 다시 걸린다."""
+    clock = Clock()
+    lifecycle = starting_lifecycle()
+    monitor = make_monitor(
+        FakeProbe([unhealthy(), unhealthy(), unhealthy(), unhealthy()]),
+        lifecycle=lifecycle,
+        startup_grace_s=30.0,
+        clock=clock,
+    )
+
+    for _ in range(4):
+        clock.now += 5.0
+        state = await monitor.check_once()
+
+    assert state is AgentState.STARTING, "유예 안에서 Unhealthy 로 전이했다"
+    assert monitor.consecutive_failures == 4, "실패를 세지 않으면 유예가 끝난 뒤를 판단할 수 없다"
+
+
+async def test_the_grace_ends_and_the_usual_threshold_applies():
+    clock = Clock()
+    monitor = make_monitor(
+        FakeProbe([unhealthy()] * 6),
+        lifecycle=starting_lifecycle(),
+        startup_grace_s=30.0,
+        clock=clock,
+    )
+
+    for _ in range(3):
+        clock.now += 5.0
+        assert await monitor.check_once() is AgentState.STARTING
+
+    clock.now += 30.0  # 유예를 넘긴다 — 이제 뜨는 중이 아니라 뜨지 못한 것이다
+    assert await monitor.check_once() is AgentState.UNHEALTHY
+
+
+async def test_after_the_first_healthy_check_the_grace_is_over():
+    """한 번 Ready 가 된 뒤의 실패는 기동이 아니라 고장이다 — 유예 시간이 남아도 재시작한다."""
+    clock = Clock()
+    monitor = make_monitor(
+        FakeProbe([healthy(), unhealthy(), unhealthy(), unhealthy()]),
+        lifecycle=starting_lifecycle(),
+        startup_grace_s=1_000.0,
+        clock=clock,
+    )
+
+    assert await monitor.check_once() is AgentState.STARTING
+    monitor.lifecycle.transition(AgentState.READY)
+    for _ in range(3):
+        state = await monitor.check_once()
+
+    assert state is AgentState.UNHEALTHY
+    assert monitor.starting_up() is False
+
+
+async def test_no_grace_keeps_the_previous_behaviour():
+    monitor = make_monitor(
+        FakeProbe([unhealthy()] * 3), lifecycle=starting_lifecycle(), startup_grace_s=0.0
+    )
+
+    for _ in range(3):
+        state = await monitor.check_once()
+
+    assert state is AgentState.UNHEALTHY

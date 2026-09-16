@@ -558,3 +558,27 @@ def test_agents_run_on_an_internal_network_exactly_when_an_egress_proxy_is_confi
 
     assert (isolated.network, isolated.internal) == ("agents", True)
     assert plain.internal is False
+
+
+def test_the_startup_grace_and_ready_timeout_reach_the_runtime(tmp_path, monkeypatch):
+    """유예만 올리고 배포 대기를 안 올리면 배포가 먼저 끝난다 — 둘 다 설정에서 와야 한다 (#297)."""
+    from malkuth.catalog import Catalog
+    from malkuth.config import MalkuthConfig, OrchestratorConfig
+
+    monkeypatch.setattr(entrypoint, "agent_engine", lambda runtime, client: None)
+    config = MalkuthConfig.model_validate({"runtime": {"health_check": {"startup_grace_s": 120}}})
+    orchestrator = OrchestratorConfig(
+        deployment_store=str(tmp_path / "deployments.db"), deployment_ready_timeout_s=180
+    )
+
+    deployments = entrypoint._deployment_manager(  # noqa: SLF001 — 조립 함수를 직접 본다
+        config, Catalog.under(tmp_path), store_root=tmp_path, orchestrator=orchestrator
+    )
+
+    assert deployments.ready_timeout_s == 180
+    assert deployments.launcher.startup_grace_s == 120
+    # 기본값도 같은 관계를 지킨다 — 유예가 배포 대기보다 길면 유예가 의미를 잃는다
+    assert (
+        OrchestratorConfig().deployment_ready_timeout_s
+        > MalkuthConfig().runtime.health_check.startup_grace_s
+    )

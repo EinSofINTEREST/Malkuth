@@ -10,7 +10,13 @@ import asyncio
 import pytest
 
 from malkuth.core.agent import ComponentHealth, HealthState, HealthStatus
-from malkuth.core.errors import CircuitBreaker, ErrorCategory, ErrorCode, MalkuthError
+from malkuth.core.errors import (
+    CircuitBreaker,
+    CircuitState,
+    ErrorCategory,
+    ErrorCode,
+    MalkuthError,
+)
 from malkuth.observability.metrics import Metrics
 from malkuth.runtime.health import HealthMonitor, HealthProbe, track_running
 from malkuth.runtime.lifecycle import AgentLifecycle, AgentState
@@ -408,3 +414,49 @@ async def test_no_grace_keeps_the_previous_behaviour():
         state = await monitor.check_once()
 
     assert state is AgentState.UNHEALTHY
+
+
+async def test_startup_failures_do_not_open_the_control_api_circuit():
+    """유예 안에서 회로가 열리면, 유예가 끝나는 순간 확인도 못 하고 Unhealthy 다 (#297 리뷰)."""
+    clock = Clock()
+    breaker = CircuitBreaker(
+        max_failures=2,
+        target="control:researcher",
+        open_category=ErrorCategory.RUNTIME,
+        open_code=ErrorCode.RT_002,
+    )
+    probe = FakeProbe([ConnectionError("starting") for _ in range(4)] + [healthy()])
+    monitor = make_monitor(
+        probe,
+        lifecycle=starting_lifecycle(),
+        startup_grace_s=30.0,
+        clock=clock,
+        breaker=breaker,
+    )
+
+    for _ in range(4):
+        clock.now += 2.0
+        assert await monitor.check_once() is AgentState.STARTING
+
+    assert breaker.state is CircuitState.CLOSED, "기동 중 거절로 회로가 열렸다"
+    # 늦게 뜬 에이전트를 실제로 확인한다 — 회로가 열렸다면 두드리지도 않았을 것이다
+    clock.now += 2.0
+    assert await monitor.check_once() is AgentState.STARTING
+    assert probe.calls == 5
+    assert monitor.ready_once is True
+
+
+async def test_a_reattached_agent_gets_no_startup_grace():
+    """이미 Ready 였던 기록만 붙인다 — 유예를 다시 주면 고장이 임계만큼 늦게 드러난다."""
+    monitor = make_monitor(
+        FakeProbe([unhealthy()] * 3),
+        lifecycle=starting_lifecycle(),
+        startup_grace_s=1_000.0,
+        ready_once=True,
+    )
+
+    for _ in range(3):
+        state = await monitor.check_once()
+
+    assert state is AgentState.UNHEALTHY
+    assert monitor.starting_up() is False

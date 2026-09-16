@@ -232,7 +232,7 @@ class AgentLauncher:
         )
         return launched
 
-    def _watch(self, launched: LaunchedAgent) -> None:
+    def _watch(self, launched: LaunchedAgent, *, ready_once: bool = False) -> None:
         """Start this replica's health loop, when supervision is on.
 
         02 Lifecycle Rules 3 — Ready 인 에이전트는 주기적으로 확인한다.
@@ -254,6 +254,7 @@ class AgentLauncher:
             interval_s=self.health_interval_s,
             # 기동이 확인 주기보다 길어도 뜨는 중인 컨테이너를 재시작하지 않는다 (#297)
             startup_grace_s=self.startup_grace_s,
+            ready_once=ready_once,
             metrics=self.metrics,
             sleep=self.health_sleep,
             on_state=lambda state, healthy: self._promote(launched, state, healthy=healthy),
@@ -451,7 +452,9 @@ class AgentLauncher:
             restart_args=dict(restart_args or {}),
         )
         self.launched[agent, replica] = launched
-        self._watch(launched)
+        # 이미 Ready 였던 기록만 붙인다 — control plane 재시작이 떠 있던 에이전트에게 기동 유예를
+        # 다시 주면, 그 사이의 고장이 임계만큼 늦게 드러난다 (#297 리뷰)
+        self._watch(launched, ready_once=True)
         log.info(
             "agent adopted",
             agent=agent,

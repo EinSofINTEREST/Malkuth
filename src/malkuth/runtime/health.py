@@ -17,13 +17,14 @@ import structlog
 from malkuth.core.agent import HealthState
 from malkuth.core.errors import CircuitBreaker, ErrorCategory, ErrorCode
 from malkuth.observability.circuit import CircuitTelemetry
+from malkuth.runtime.lifecycle import AgentState
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
     from malkuth.core.agent import HealthStatus
     from malkuth.observability.metrics import Metrics
-    from malkuth.runtime.lifecycle import AgentLifecycle, AgentState
+    from malkuth.runtime.lifecycle import AgentLifecycle
 
 DEFAULT_INTERVAL_S = 10.0
 DEFAULT_TIMEOUT_S = 3.0
@@ -79,9 +80,12 @@ class HealthMonitor:
 
     consecutive_failures: int = field(default=0, init=False)
     last_status: HealthState | None = field(default=None, init=False)
+    ready_once: bool = False
+    """한 번이라도 Ready 가 됐는가 — 그 뒤의 실패는 기동이 아니라 고장이다.
+
+    재부착(`adopt`)은 이미 Ready 였던 기록만 붙이므로 참으로 시작한다 — 그렇지 않으면 control plane
+    재시작이 떠 있던 에이전트에게 기동 유예를 다시 주게 된다."""
     started_at: float = field(default=0.0, init=False)
-    ready_once: bool = field(default=False, init=False)
-    """한 번이라도 Ready 가 됐는가 — 그 뒤의 실패는 기동이 아니라 고장이다."""
 
     def __post_init__(self) -> None:
         self.started_at = self.clock()
@@ -107,13 +111,17 @@ class HealthMonitor:
         """
         assert self.breaker is not None  # noqa: S101 — __post_init__ 가 보장
 
-        if not self.breaker.can_attempt():
+        # 기동 중에는 거절이 정상이다 — 그 실패로 회로를 열면 유예가 끝나는 순간 확인도 못 한 채
+        # Unhealthy 가 된다. 회로는 **떠 있는** 에이전트를 두드리지 않기 위한 것이다 (#297 리뷰)
+        starting_up = self.starting_up()
+        if not starting_up and not self.breaker.can_attempt():
             return self._record(healthy=False, reason="circuit open")
 
         try:
             status = await asyncio.wait_for(self.probe.health(), timeout=self.timeout_s)
         except (TimeoutError, Exception) as err:  # noqa: B014 — TimeoutError 를 명시해 의도를 남긴다
-            self.breaker.record_failure()
+            if not starting_up:
+                self.breaker.record_failure()
             return self._record(healthy=False, reason=_reason(err))
 
         self.breaker.record_success()
@@ -149,8 +157,10 @@ class HealthMonitor:
         return state
 
     def starting_up(self) -> bool:
-        """아직 기동 유예 안인가 — 한 번도 healthy 였던 적이 없고 유예가 남았다."""
-        return not self.ready_once and self.clock() - self.started_at < self.startup_grace_s
+        """아직 기동 유예 안인가 — 기동 중이고, 한 번도 healthy 였던 적이 없고, 유예가 남았다."""
+        if self.ready_once or self.lifecycle.state is not AgentState.STARTING:
+            return False
+        return self.clock() - self.started_at < self.startup_grace_s
 
     async def run(self, *, iterations: int | None = None) -> None:
         """Poll until stopped.

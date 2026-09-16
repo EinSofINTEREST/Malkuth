@@ -453,7 +453,28 @@ def _mount_authoring(api: APIRouter, author: Author) -> None:
     async def delete_materials(name: str) -> None:
         author.delete_materials(name)
 
-    @api.delete("/v1/agents/{name}")
+    @api.delete(
+        "/v1/agents/{name}",
+        # 성공이 두 갈래다 — 생성된 클라이언트가 한쪽만 알면 다른 쪽을 실패로 읽는다 (#301 리뷰)
+        responses={
+            status.HTTP_204_NO_CONTENT: {"description": "선언과 빈 디렉토리를 지웠다"},
+            status.HTTP_200_OK: {
+                "description": "선언은 지웠고, 사람이 둔 파일이 남았다",
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "retained": {"type": "array", "items": {"type": "string"}}
+                            },
+                            "required": ["retained"],
+                        },
+                        "example": {"retained": ["Dockerfile", "src/agent.py"]},
+                    }
+                },
+            },
+        },
+    )
     async def delete_agent(name: str) -> Response:
         """선언을 지운다 — 빈 디렉토리는 함께, 사람이 둔 파일이 남으면 그 목록을 답한다 (#258)."""
         retained = author.delete_agent(name)

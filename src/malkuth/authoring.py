@@ -362,23 +362,29 @@ class Author:
         return self._clear_agent_directory(path.parent, name)
 
     def _clear_agent_directory(self, directory: Path, agent: str) -> list[str]:
-        """선언을 지운 뒤 남은 것 — 빈 디렉토리는 지우고, 사람이 둔 파일은 남겨 알린다 (#258).
+        """선언을 지운 뒤 남은 것 — 빈 디렉토리는 지우고, 사람이 둔 것은 남겨 알린다 (#258).
 
         빌드 재료는 재료 스토어에 산다 (#264) — 프레임워크가 이 디렉토리에 쓰는 것은 매니페스트
-        하나뿐이다. 그래서 비었으면 지우는 것이 "삭제됐다" 는 응답과 맞고, 남은 파일은 프레임워크가
-        만들지 않은 것이므로 지우지 않는다. 조용히 두지도 않는다: 같은 이름으로 다시 만들면 옛
-        파일이 되살아난다.
+        하나뿐이다. 그래서 비었으면 지우는 것이 "삭제됐다" 는 응답과 맞고, 남은 것은 프레임워크가
+        만들지 않았으므로 지우지 않는다. 조용히 두지도 않는다: 같은 이름으로 다시 만들면 되살아난다.
+
+        지우는 것은 **진짜 빈 디렉토리**뿐이다 — 심볼릭 링크는 따라가지도, 지우지도 않고 남은 것으로
+        보고한다 (디렉토리를 가리키는 링크에 ``rmdir`` 을 걸면 매니페스트를 지운 뒤에 터진다).
         """
-        retained = sorted(
-            str(found.relative_to(directory)) for found in directory.rglob("*") if found.is_file()
-        )
+        retained: list[str] = []
+        for parent, directories, files in os.walk(directory, topdown=False):
+            here = Path(parent)
+            retained += [str((here / name).relative_to(directory)) for name in files]
+            for name in directories:
+                child = here / name
+                if child.is_symlink():
+                    retained.append(str(child.relative_to(directory)))
+                elif not any(child.iterdir()):
+                    child.rmdir()  # 아래에서부터 — 비게 된 하위 디렉토리도 남기지 않는다
         if retained:
             log.warning("agent directory kept — it holds files malkuth did not write",
-                        agent=agent, retained=retained)  # fmt: skip
-            return retained
-        # 빈 디렉토리만 지운다 — 하위 빈 디렉토리까지 걷어내고 나서
-        for child in sorted(directory.rglob("*"), key=lambda p: len(p.parts), reverse=True):
-            child.rmdir()
+                        agent=agent, retained=sorted(retained))  # fmt: skip
+            return sorted(retained)
         directory.rmdir()
         return []
 

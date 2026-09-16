@@ -201,9 +201,10 @@ points at:
 
 ### `DELETE /v1/graphs/{name}`, `DELETE /v1/agents/{name}`
 
-`204` on success. Refused while something references the declaration (`400`, `VAL_002`), and
-the `details` differ by reason: an agent still used by saved graphs lists them in
-`referenced_by`, while anything currently deployed reports `kind` and `name` instead.
+`204` on success — except when an agent's directory still holds files someone put there, which
+answers `200` with their names (below). Refused while something references the declaration
+(`400`, `VAL_002`), and the `details` differ by reason: an agent still used by saved graphs lists
+them in `referenced_by`, while anything currently deployed reports `kind` and `name` instead.
 
 **An agent's directory goes with its manifest, unless someone else put something there.** The
 only file the framework writes under `agents/<name>/` is the manifest, so once that is gone the

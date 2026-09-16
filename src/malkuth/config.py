@@ -69,6 +69,12 @@ class HealthCheckConfig(BaseModel):
     interval_s: float = Field(default=10.0, gt=0)
     timeout_s: float = Field(default=3.0, gt=0)
     unhealthy_threshold: int = Field(default=3, gt=0)
+    startup_grace_s: float = Field(default=45.0, ge=0)
+    """기동 유예 — 처음 Ready 가 되기 전까지 이 시간 안의 실패는 재시작을 일으키지 않는다 (#297).
+
+    기동이 `interval_s × unhealthy_threshold` 보다 긴 에이전트(MCP 서버 여럿, 원격 initialize)는
+    유예가 없으면 뜨는 중에 재시작돼 배포가 끝내 실패한다. `0` 은 유예 없음(이전 동작)이다.
+    `orchestrator.deployment_ready_timeout_s` 보다 길게 두면 배포가 먼저 끝나므로 의미가 없다."""
 
     @model_validator(mode="after")
     def _timeout_within_interval(self) -> HealthCheckConfig:
@@ -181,6 +187,11 @@ class OrchestratorConfig(BaseModel):
     **연결마다 다른 private DB** 를 연다. 그러면 CLI 와 control plane 이 서로 다른
     저장소를 보게 되어, 이 설정이 있는데도 run 이 보이지 않는 상태가 조용히 재현된다 —
     미설정보다 나쁘다. 설정했다고 믿기 때문이다."""
+    deployment_ready_timeout_s: float = Field(default=60.0, gt=0)
+    """배포가 에이전트의 Ready 를 기다리는 상한 — 넘기면 `RT_002` 로 롤백한다.
+
+    기동이 느린 에이전트를 받으려면 이 값과 `runtime.health_check.startup_grace_s` 를 함께 올린다 —
+    유예만 올리면 배포가 먼저 끝나고, 대기만 올리면 뜨는 중에 재시작된다 (#297)."""
     control_host: str = "127.0.0.1"
     """Control Plane bind 주소. 기본은 loopback — 이 표면은 인증이 없으므로
     외부에 열려면 그 앞을 막는 것이 배포하는 쪽의 책임이다."""

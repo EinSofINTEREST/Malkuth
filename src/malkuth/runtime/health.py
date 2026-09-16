@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
@@ -16,17 +17,25 @@ import structlog
 from malkuth.core.agent import HealthState
 from malkuth.core.errors import CircuitBreaker, ErrorCategory, ErrorCode
 from malkuth.observability.circuit import CircuitTelemetry
+from malkuth.runtime.lifecycle import AgentState
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
     from malkuth.core.agent import HealthStatus
     from malkuth.observability.metrics import Metrics
-    from malkuth.runtime.lifecycle import AgentLifecycle, AgentState
+    from malkuth.runtime.lifecycle import AgentLifecycle
 
 DEFAULT_INTERVAL_S = 10.0
 DEFAULT_TIMEOUT_S = 3.0
 DEFAULT_UNHEALTHY_THRESHOLD = 3
+DEFAULT_STARTUP_GRACE_S = 45.0
+"""기동 유예 — 이 시간 안의 실패는 재시작을 일으키지 않는다 (#297).
+
+기동은 확인 주기보다 길 수 있다: MCP 서버는 서버마다 최대 15초, 원격 서버는 프록시를 거쳐
+initialize 한다. 기본값은 배포의 ready 대기(60초)보다 짧게 둔다 — 유예가 그보다 길면 배포가 먼저
+`RT_002` 로 끝나 유예가 의미를 잃는다.
+"""
 
 log = structlog.get_logger(__name__)
 
@@ -60,6 +69,9 @@ class HealthMonitor:
     metrics: Metrics | None = None
     breaker: CircuitBreaker | None = None
     sleep: Callable[[float], object] | None = None
+    startup_grace_s: float = DEFAULT_STARTUP_GRACE_S
+    """Ready 가 되기 전의 유예 — 이 안의 실패는 세지만 Unhealthy 로 전이하지 않는다."""
+    clock: Callable[[], float] = time.monotonic
     on_state: Callable[[AgentState, bool], None] | None = None
     """매 확인 뒤 ``(결과 상태, 이번 확인의 성공 여부)`` 를 받는 콜백 — 기동 성공
     판정처럼 **runtime 이** 내려야 하는 결정을 monitor 밖에 남긴다 (02 Lifecycle
@@ -68,8 +80,15 @@ class HealthMonitor:
 
     consecutive_failures: int = field(default=0, init=False)
     last_status: HealthState | None = field(default=None, init=False)
+    ready_once: bool = False
+    """한 번이라도 Ready 가 됐는가 — 그 뒤의 실패는 기동이 아니라 고장이다.
+
+    재부착(`adopt`)은 이미 Ready 였던 기록만 붙이므로 참으로 시작한다 — 그렇지 않으면 control plane
+    재시작이 떠 있던 에이전트에게 기동 유예를 다시 주게 된다."""
+    started_at: float = field(default=0.0, init=False)
 
     def __post_init__(self) -> None:
+        self.started_at = self.clock()
         if self.breaker is None:
             target = f"control:{self.agent}"
             observer = CircuitTelemetry(self.metrics, target=target) if self.metrics else None
@@ -92,13 +111,17 @@ class HealthMonitor:
         """
         assert self.breaker is not None  # noqa: S101 — __post_init__ 가 보장
 
-        if not self.breaker.can_attempt():
+        # 기동 중에는 거절이 정상이다 — 그 실패로 회로를 열면 유예가 끝나는 순간 확인도 못 한 채
+        # Unhealthy 가 된다. 회로는 **떠 있는** 에이전트를 두드리지 않기 위한 것이다 (#297 리뷰)
+        starting_up = self.starting_up()
+        if not starting_up and not self.breaker.can_attempt():
             return self._record(healthy=False, reason="circuit open")
 
         try:
             status = await asyncio.wait_for(self.probe.health(), timeout=self.timeout_s)
         except (TimeoutError, Exception) as err:  # noqa: B014 — TimeoutError 를 명시해 의도를 남긴다
-            self.breaker.record_failure()
+            if not starting_up:
+                self.breaker.record_failure()
             return self._record(healthy=False, reason=_reason(err))
 
         self.breaker.record_success()
@@ -108,8 +131,10 @@ class HealthMonitor:
 
     def _record(self, *, healthy: bool, reason: str | None = None) -> AgentState:
         """결과를 lifecycle 과 메트릭에 반영한다."""
+        starting_up = self.starting_up()
         if healthy:
             self.consecutive_failures = 0
+            self.ready_once = True
         else:
             self.consecutive_failures += 1
             log.warning(
@@ -118,14 +143,24 @@ class HealthMonitor:
                 attempt=self.consecutive_failures,
                 max_attempts=self.unhealthy_threshold,
                 reason=reason,
+                # 기동 유예 안의 실패는 재시작을 일으키지 않는다 — 로그로 구분한다 (#297)
+                starting_up=starting_up,
             )
 
-        state = self.lifecycle.record_health(healthy=healthy, threshold=self.unhealthy_threshold)
+        state = self.lifecycle.record_health(
+            healthy=healthy, threshold=self.unhealthy_threshold, starting_up=starting_up
+        )
         if self.metrics is not None:
             self.metrics.gauge("malkuth_agent_health").labels(agent=self.agent).set(
                 1 if healthy else 0
             )
         return state
+
+    def starting_up(self) -> bool:
+        """아직 기동 유예 안인가 — 기동 중이고, 한 번도 healthy 였던 적이 없고, 유예가 남았다."""
+        if self.ready_once or self.lifecycle.state is not AgentState.STARTING:
+            return False
+        return self.clock() - self.started_at < self.startup_grace_s
 
     async def run(self, *, iterations: int | None = None) -> None:
         """Poll until stopped.
@@ -171,6 +206,7 @@ def track_running(metrics: Metrics, agent: str, *, running: bool) -> None:
 
 __all__ = [
     "DEFAULT_INTERVAL_S",
+    "DEFAULT_STARTUP_GRACE_S",
     "DEFAULT_TIMEOUT_S",
     "DEFAULT_UNHEALTHY_THRESHOLD",
     "HealthMonitor",

@@ -10,6 +10,7 @@ runtime:
     interval_s: 10          # agentd /health 폴링 주기
     timeout_s: 3
     unhealthy_threshold: 3
+    startup_grace_s: 45      # 처음 Ready 가 되기 전까지는 실패해도 재시작하지 않는다 (#297)
 
 orchestrator:
   checkpointer: memory

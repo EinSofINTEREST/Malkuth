@@ -196,6 +196,7 @@ def _deployment_manager(
         engine=agent_engine(config.runtime, SdkDockerClient()),
         ports=A2APortAllocator(port_range=config.protocols.a2a.port_range),
         health_interval_s=config.runtime.health_check.interval_s,
+        startup_grace_s=config.runtime.health_check.startup_grace_s,
     )
     tokens_path = os.environ.get(MEMORY_TOKENS_ENV)
     memory_tokens: dict[str, str] = {}
@@ -210,6 +211,7 @@ def _deployment_manager(
         agent_env=dict(config.runtime.agent_env),
         memory_url=os.environ.get(MEMORY_URL_ENV),
         memory_tokens=memory_tokens,
+        ready_timeout_s=orchestrator.deployment_ready_timeout_s,
     )
 
 

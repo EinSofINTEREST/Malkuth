@@ -91,3 +91,22 @@ async def test_every_documented_endpoint_answers(api, method, path):
     assert response.status_code != 405, f"{method} {path} 를 그 메서드로 받지 않는다"
     if response.status_code == 404:
         assert response.json()["error"]["code"] == "NF_001", "문서의 경로가 앱에 없다"
+
+
+@pytest.mark.parametrize("language", ["en", "ko"])
+async def test_both_pages_document_every_field_of_the_operator_view(api, language):
+    """응답 필드가 문서에 없으면 운영자는 화면이 무엇을 보여 주는지 모른다 — 두 언어 모두 (#283)."""
+    answered = await api.get(
+        "/v1/access/agents/worker", headers={"Authorization": f"Bearer {CONTROL}"}
+    )
+    page = (REPO_ROOT / "docs" / language / "api.md").read_text(encoding="utf-8")
+    section = page.split("/v1/access/agents/{name}")[1].split("/v1/access/revocations")[0]
+
+    # 설명(`field`)이든 예시 응답("field")이든, 문서에 그 필드가 보이면 된다
+    missing = [
+        field
+        for field in answered.json()
+        if f"`{field}`" not in section and f'"{field}"' not in section
+    ]
+
+    assert missing == [], f"docs/{language}/api.md 가 설명하지 않는 응답 필드: {missing}"

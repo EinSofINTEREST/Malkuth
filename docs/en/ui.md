@@ -158,7 +158,7 @@ changed in the group declaration. For an emergency, see the
 
 ## The full loop
 
-Everything the main goal asks for is these five tabs in order:
+Everything the main goal asks for is these tabs in order:
 
 1. **카탈로그** — see which agents and modules exist.
 2. **에이전트 편집기** — add or adjust an agent; save. For a custom agent, save its build
@@ -167,6 +167,8 @@ Everything the main goal asks for is these five tabs in order:
    until clean; save.
 4. **배포** — deploy the graph and watch the agents turn healthy.
 5. **Run** — submit input, watch the result.
+6. **권한** — while it runs, narrow what an agent may reach: revoke a permission and the agent's
+   next request is refused, with no restart.
 
 Destroying is the same path in reverse: tear the deployment down, then delete the graph or
 agent (deletion is refused while anything still references it).

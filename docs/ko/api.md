@@ -676,7 +676,7 @@ Memory Service 요청에 `{"space": "global:global:org"}` — Memory Service 는
   "rules": [
     {"rule_id": "rule-7c1e0a9b2d3f4e5a", "agent": "researcher", "kind": "memory",
      "target": "local:researcher:longterm", "mode": "rw", "effect": "deny",
-     "decided_by": "operator", "requested_by": null, "reason": "incident 311",
+     "decided_by": "operator", "requested_by": "", "reason": "incident 311",
      "created_at": 1789381200.0, "expires_at": null, "lifted_at": null}
   ],
   "declared": [
@@ -698,7 +698,8 @@ Memory Service 요청에 `{"space": "global:global:org"}` — Memory Service 는
 ```
 
 - `rules` — 기록 전부, 살아 있는 것·만료된 것·종료된 것. 기록은 지워지지 않으므로 누가 무엇을 왜
-  결정했는지의 이력이다.
+  결정했는지의 이력이다. `requested_by` 는 운영자 회수에서는 비어 있고, 부여에는 요청한 에이전트가
+  실린다.
 - `declared` — 강제 지점이 갖춰진 종류마다, 선언이 오늘 이 에이전트에게 주는 것. 판정이 읽는 그
   선언에서 만들므로 목록과 2단계 허용이 어긋나지 않는다. `server/*` 는 `allowed_tools` 없는 원격 MCP
   서버의 모든 도구를 뜻하는 표시이고 회수 대상이 아니다 — `server/tool` 이나 그 서버의 호스트를

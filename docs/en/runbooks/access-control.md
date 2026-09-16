@@ -67,7 +67,8 @@ While an enforcement point cannot reach the registry:
 |---|---|
 | not yet cached | **denied** (`MEM_001`, `A2A_004`, `ACC_002` / `503` at the proxy) |
 | cached allow from a declaration | keeps working |
-| cached allow from a grant or a temporary revocation | keeps working until its `valid_until` |
+| cached allow from a grant | keeps working until its `valid_until`, then denied while the outage lasts |
+| cached deny from a temporary revocation | stays denied until its `valid_until`, then denied anyway while the outage lasts |
 | a revocation made during the outage | **not applied** until the registry is reachable |
 
 This is deliberate: agents keep doing what they were already allowed to do, and nothing new is

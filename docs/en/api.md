@@ -693,8 +693,49 @@ follows the feed to drop cached A2A decisions, and the feed carries only version
 
 ### `GET /v1/access/agents/{name}` — operator
 
-The agent's records — active, expired and lifted — with the current `version`. Records are
-never deleted, so this is the history of who decided what and why.
+Everything the operator needs to narrow one agent's permissions, in one answer — this is what the
+[permissions tab](ui.md) shows:
+
+```json
+{
+  "agent": "researcher",
+  "version": 42,
+  "rules": [
+    {"rule_id": "rule-7c1e0a9b2d3f4e5a", "agent": "researcher", "kind": "memory",
+     "target": "local:researcher:longterm", "mode": "rw", "effect": "deny",
+     "decided_by": "operator", "requested_by": "", "reason": "incident 311",
+     "created_at": 1789381200.0, "expires_at": null, "lifted_at": null}
+  ],
+  "declared": [
+    {"kind": "memory", "target": "local:researcher:longterm", "mode": "rw"},
+    {"kind": "memory", "target": "global:global:org", "mode": "ro"},
+    {"kind": "a2a", "target": "planner", "mode": null},
+    {"kind": "egress", "target": "api.anthropic.com", "mode": null},
+    {"kind": "mcp_tool", "target": "corp/*", "mode": null}
+  ],
+  "ceilings": [
+    {"group": "research", "max_ttl_s": 3600, "memory": [], "egress": ["api.search.example.com"],
+     "mcp_tool": [], "a2a": []}
+  ],
+  "denials": [
+    {"kind": "memory", "target": "local:researcher:longterm", "mode": "rw",
+     "decided_by": "operator", "at": 1789381260.0}
+  ]
+}
+```
+
+- `rules` — every record, active, expired and lifted. Records are never deleted, so this is the
+  history of who decided what and why. `requested_by` is empty for an operator's revocation; a grant
+  carries the agent that asked.
+- `declared` — what the declarations give the agent today, for each kind whose enforcement point is
+  in place. It is built from the same declarations the decisions read, so what is listed is exactly
+  what step 2 allows. `server/*` stands for every tool of a remote MCP server without
+  `allowed_tools`; it is not a target you can revoke — revoke `server/tool` or the server's host.
+- `ceilings` — the expansion ceilings of the agent's group and `global`, by the group that declares
+  them.
+- `denials` — the last 50 refusals the registry decided for this agent, newest first. They live in
+  the control plane's memory and start empty after a restart. A refusal an enforcement point
+  answered from its cache is not here.
 
 ### `POST /v1/access/revocations` — operator
 

@@ -55,6 +55,10 @@ Malkuth 알림이 울렸을 때의 대응 절차. 규범 규칙:
    지점까지 도달하지 못한다.
 3. 10분 내 5회를 넘기면 runtime 이 에이전트를 **Failed** 로 전환하고 재시도를
    멈춘다. 원인을 고친 뒤 재배포한다.
+4. **기동 중에** 재시작되는 에이전트(한 번도 healthy 인 적 없이 `interval_s × unhealthy_threshold`
+   에서 재시작)는 에이전트 문제가 아니라 기동 유예가 짧은 것이다.
+   `runtime.health_check.startup_grace_s` 와 `orchestrator.deployment_ready_timeout_s` 를 함께
+   올린다 — 유예만 올리면 배포가 먼저 `RT_002` 로 끝난다.
 
 ### ModelRateLimited
 

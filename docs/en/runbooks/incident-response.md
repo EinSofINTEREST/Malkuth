@@ -55,6 +55,10 @@ More than five restarts in ten minutes.
    gets far enough to report health.
 3. After five failures in ten minutes the runtime marks the agent **Failed** and stops
    retrying. Fix the cause, then redeploy.
+4. An agent that is restarted **while it is still starting** — never healthy, restarted at
+   `interval_s × unhealthy_threshold` — needs a longer startup grace, not a fix to the agent. Raise
+   `runtime.health_check.startup_grace_s` and `orchestrator.deployment_ready_timeout_s` together;
+   raising only the grace lets the deployment give up first (`RT_002`).
 
 ### ModelRateLimited
 

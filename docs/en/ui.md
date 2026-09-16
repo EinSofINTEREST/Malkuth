@@ -32,7 +32,7 @@ result:
 The token is kept in `sessionStorage`, so it survives a reload and disappears when the tab
 closes. It is never written to disk.
 
-## The five tabs
+## The six tabs
 
 ### 카탈로그 — what you can build with
 
@@ -132,6 +132,30 @@ is `halted` or `failed`. What resuming means depends on the mode — a service r
 from its last iteration, a mission run from its last checkpoint. See the
 [API reference](api.md#post-v1runsrun_idresume) for the exact contract.
 
+### 권한 — who may do what
+
+Open only when the control plane runs the access registry (`orchestrator.access_store`); otherwise
+the tab says the registry is off. Pick an agent to see four things:
+
+| Section | What it shows |
+|---|---|
+| 선언 권한 | what the manifest, the agent's group, `global`, and the graphs it is deployed in give it — memory spaces with their mode, A2A callees, egress destinations, remote MCP tools |
+| 부여·회수 기록 | every revocation and grant, with who decided (`operator` or a permission agent), who asked, why, until when, and whether it is `active`, `expired` or `lifted` |
+| 확장 상한 | the most a permission agent may grant this agent, from its group and `global` |
+| 최근 거부 | the latest refusals the registry decided for this agent |
+
+**Revoking.** Write a reason (it is recorded) and press the button on a declared permission.
+A writable memory space offers two: **쓰기 회수** stops writing and keeps reading, **전체 회수**
+stops both. Every other permission has one **회수**. The revocation applies to the agent's **next
+request** — the container is not restarted or redeployed.
+
+**Undoing.** An active record has a button: **되돌리기** lifts a revocation, **끝내기** ends a grant
+early. The record stays, marked `lifted`.
+
+Widening is not here. Grants come from a permission agent within the ceiling, and the ceiling is
+changed in the group declaration. For an emergency, see the
+[access control runbook](runbooks/access-control.md).
+
 ## The full loop
 
 Everything the main goal asks for is these five tabs in order:
@@ -169,6 +193,8 @@ agent (deletion is refused while anything still references it).
 | **빌드** answers "agent has no build materials" | save materials first; declarative agents do not build |
 | Material save refused with a version message | that version's materials are immutable — bump the agent's version |
 | No build status and **빌드** fails with `404` | `orchestrator.material_store` or `orchestrator.build_store` is not configured |
+| 권한 says the registry is off | `orchestrator.access_store` is not configured |
+| A revocation shows `active` but the agent still acts | the enforcement point cannot reach the registry and keeps its cached allow — see the [runbook](runbooks/access-control.md#when-the-registry-is-unreachable) |
 
 For the exact status codes and payloads behind each screen, see the
 [Control Plane API](api.md).

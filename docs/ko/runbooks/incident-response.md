@@ -85,7 +85,8 @@ Service run 이 활성인데 30분간 진행이 없다.
    **거절**하는 경우(강제 지점 토큰이 틀림)는 장애가 아니다: 강제 지점은 캐시를 버리고 모두 거부한다 —
    토큰을 고친다.
 2. control plane 프로세스와, 알림의 `component` 와 그 사이의 네트워크를 확인한다.
-3. 회수가 급하면 해당 에이전트의 배포를 해체한다 — 레지스트리와 무관하게 동작한다.
+3. 회수가 급하면 해당 에이전트의 컨테이너를 멈춘다 — 레지스트리와 무관하게 동작한다.
+   [access-control.md](access-control.md#레지스트리에-닿지-않을-때) 참조.
 
 ### AccessGrantRefusalsSpike
 
@@ -106,3 +107,4 @@ P0/P1 은 호출한다. P2/P3 는 `run_id` 와 에러 코드 분포를 첨부해
 ## 함께 보기
 
 - [recovery.md](recovery.md) — run 복구와 메모리 재인덱싱
+- [access-control.md](access-control.md) — 긴급 회수와 레지스트리 장애

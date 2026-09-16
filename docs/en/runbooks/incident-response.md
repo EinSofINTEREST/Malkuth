@@ -87,8 +87,8 @@ registry in the control plane.
    enforcement point drops its cache and denies everything — fix the token.
 2. Check the control plane process and the network between it and the `component` in the
    alert.
-3. If a revocation is urgent, stop the affected agent's deployment — that does not depend on
-   the registry.
+3. If a revocation is urgent, stop the affected agent's containers — that does not depend on
+   the registry. See [access-control.md](access-control.md#when-the-registry-is-unreachable).
 
 ### AccessGrantRefusalsSpike
 
@@ -109,3 +109,4 @@ distribution attached — those two make the failure reproducible.
 ## See Also
 
 - [recovery.md](recovery.md) — restoring runs and reindexing memory
+- [access-control.md](access-control.md) — emergency revocation and registry outages

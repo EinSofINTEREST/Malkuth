@@ -21,6 +21,9 @@ framework built on LangGraph.
 | [testing.md](testing.md) | Test strategy, determinism rules, quality gates |
 | [ci/conventions.md](ci/conventions.md) | Repository governance and CI design rules |
 | [ci/status-checks.md](ci/status-checks.md) | Single source of truth for required status check names |
+| [runbooks/incident-response.md](runbooks/incident-response.md) | Alerts, first response, escalation |
+| [runbooks/recovery.md](runbooks/recovery.md) | Restoring runs, reindexing memory, backups |
+| [runbooks/access-control.md](runbooks/access-control.md) | Emergency revocation and registry outages |
 
 ## Commands
 
@@ -36,7 +39,5 @@ configuration overrides are documented in the
 
 ## Planned Additions
 
-- `runbooks/` — operational recovery procedures (added alongside the runtime
-  implementation, per [05-error-handling.md](../../.claude/rules/05-error-handling.md))
 - Agent Control API reference — the in-container surface `agentd` serves. The Control
   Plane side is documented in [api.md](api.md); this is the layer below it

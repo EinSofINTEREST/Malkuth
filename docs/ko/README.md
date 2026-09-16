@@ -21,6 +21,9 @@ LangGraph 기반 모듈형 멀티 에이전트 오케스트레이션 프레임�
 | [testing.md](testing.md) | 테스트 전략, 결정성 규칙, 품질 게이트 |
 | [ci/conventions.md](ci/conventions.md) | 저장소 거버넌스 및 CI 설계 규칙 |
 | [ci/status-checks.md](ci/status-checks.md) | Required status check 이름의 단일 소스 |
+| [runbooks/incident-response.md](runbooks/incident-response.md) | 알림, 1차 대응, 에스컬레이션 |
+| [runbooks/recovery.md](runbooks/recovery.md) | run 복구, 메모리 재인덱싱, 백업 |
+| [runbooks/access-control.md](runbooks/access-control.md) | 긴급 회수와 레지스트리 장애 |
 
 ## 요구사항
 
@@ -229,7 +232,5 @@ MALKUTH_ORCHESTRATOR__NODE_TIMEOUT_S=600 uv run malkuth config
 
 ## 추가 예정
 
-- `runbooks/` — 운영 복구 절차 (런타임 구현과 함께 추가,
-  [05-error-handling.md](../../.claude/rules/05-error-handling.md) 참조)
 - Agent Control API 레퍼런스 — `agentd` 가 컨테이너 안에서 서빙하는 표면. Control Plane
   쪽은 [api.md](api.md) 에 있고, 이것은 그 아래 계층입니다

@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import structlog
 import yaml
 from pydantic import BaseModel
 
@@ -29,6 +30,8 @@ from malkuth.deploy import Finding, ValidationReport, validate_deployment
 from malkuth.materials import Materials, MaterialStore, check_files
 from malkuth.modules.promptset import PromptsetManifest
 from malkuth.orchestrator.topology import GraphTopology
+
+log = structlog.get_logger(__name__)
 
 InUse = Callable[[str, str], bool]
 """``(kind, name)`` 이 지금 배포 중인가 — 배포 lifecycle(#243) 이 채운다. 없으면 항상 False."""
@@ -335,7 +338,7 @@ class Author:
         _round_trips(manifest, AgentManifest)
         return self._write(self._agent_path(name), manifest)
 
-    def delete_agent(self, name: str) -> None:
+    def delete_agent(self, name: str) -> list[str]:
         path = self._agent_path(name)
         if not path.is_file():
             raise not_found("agent", name)
@@ -356,6 +359,34 @@ class Author:
             )
         self._refuse_if_in_use("agent", name)
         path.unlink()
+        return self._clear_agent_directory(path.parent, name)
+
+    def _clear_agent_directory(self, directory: Path, agent: str) -> list[str]:
+        """선언을 지운 뒤 남은 것 — 빈 디렉토리는 지우고, 사람이 둔 것은 남겨 알린다 (#258).
+
+        빌드 재료는 재료 스토어에 산다 (#264) — 프레임워크가 이 디렉토리에 쓰는 것은 매니페스트
+        하나뿐이다. 그래서 비었으면 지우는 것이 "삭제됐다" 는 응답과 맞고, 남은 것은 프레임워크가
+        만들지 않았으므로 지우지 않는다. 조용히 두지도 않는다: 같은 이름으로 다시 만들면 되살아난다.
+
+        지우는 것은 **진짜 빈 디렉토리**뿐이다 — 심볼릭 링크는 따라가지도, 지우지도 않고 남은 것으로
+        보고한다 (디렉토리를 가리키는 링크에 ``rmdir`` 을 걸면 매니페스트를 지운 뒤에 터진다).
+        """
+        retained: list[str] = []
+        for parent, directories, files in os.walk(directory, topdown=False):
+            here = Path(parent)
+            retained += [str((here / name).relative_to(directory)) for name in files]
+            for name in directories:
+                child = here / name
+                if child.is_symlink():
+                    retained.append(str(child.relative_to(directory)))
+                elif not any(child.iterdir()):
+                    child.rmdir()  # 아래에서부터 — 비게 된 하위 디렉토리도 남기지 않는다
+        if retained:
+            log.warning("agent directory kept — it holds files malkuth did not write",
+                        agent=agent, retained=sorted(retained))  # fmt: skip
+            return sorted(retained)
+        directory.rmdir()
+        return []
 
     # --- 내부 ---------------------------------------------------------------
 

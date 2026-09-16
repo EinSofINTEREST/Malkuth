@@ -330,7 +330,13 @@ agentForm.addEventListener("submit", async (event) => {
 $("#agent-delete").addEventListener("click", async () => {
   const name = agentForm.name.value.trim();
   if (!name || !confirm(`${name} 을 삭제할까요?`)) return;
-  try { await api.deleteAgent(name); status(`삭제됨: ${name}`); await loadCatalog(); } catch (err) { report(err); }
+  try {
+    // 손으로 둔 파일이 남으면 서버가 그 목록을 답한다 — 조용히 두면 같은 이름에서 되살아난다 (#258)
+    const answer = await api.deleteAgent(name);
+    const kept = answer && answer.retained ? ` — 남은 파일: ${answer.retained.join(", ")}` : "";
+    status(`삭제됨: ${name}${kept}`);
+    await loadCatalog();
+  } catch (err) { report(err); }
 });
 
 // --- 빌드 재료와 이미지 (#267) ---------------------------------------------------

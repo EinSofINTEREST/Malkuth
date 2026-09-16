@@ -620,3 +620,60 @@ def test_replacing_a_declaration_keeps_its_permissions(author, workspace):
 
     assert path.stat().st_mode & 0o777 == 0o640
     assert Catalog.under(workspace).graph("pipeline").metadata.version == "1.1.0"
+
+
+# --- 삭제가 남기는 것 (#258) ---------------------------------------------------------
+
+
+def test_deleting_an_agent_removes_its_empty_directory(author, workspace):
+    """`204` 는 "삭제됐다" 로 읽힌다 — 프레임워크가 쓴 것은 매니페스트뿐이라 빈 자리를 안 남긴다."""
+    directory = workspace / "agents" / "alpha"
+    assert directory.is_dir()
+
+    retained = author.delete_agent("alpha")
+
+    assert retained == []
+    assert not directory.exists(), "빈 디렉토리가 남았다"
+
+
+def test_files_malkuth_did_not_write_are_kept_and_named(author, workspace):
+    """사람이 둔 코드는 지우지 않는다 — 대신 무엇이 남았는지 알린다 (#258)."""
+    directory = workspace / "agents" / "alpha"
+    (directory / "src").mkdir()
+    (directory / "src" / "agent.py").write_text("MARK = 1\n", encoding="utf-8")
+    (directory / "Dockerfile").write_text("FROM malkuth/agent-base:0.1.0\n", encoding="utf-8")
+
+    retained = author.delete_agent("alpha")
+
+    assert retained == ["Dockerfile", "src/agent.py"]
+    assert (directory / "src" / "agent.py").read_text(encoding="utf-8") == "MARK = 1\n"
+    assert not (directory / "manifest.yaml").exists(), "선언은 지워야 한다"
+
+
+def test_empty_subdirectories_go_even_when_a_file_is_kept(author, workspace):
+    """빈 디렉토리는 지운다 — 남은 파일 옆이라고 예외를 두면 빈 자리가 쌓인다 (#301 리뷰)."""
+    directory = workspace / "agents" / "alpha"
+    (directory / "notes.md").write_text("손으로 둔 파일\n", encoding="utf-8")
+    (directory / "cache" / "inner").mkdir(parents=True)
+
+    retained = author.delete_agent("alpha")
+
+    assert retained == ["notes.md"]
+    assert not (directory / "cache").exists(), "빈 하위 디렉토리가 남았다"
+    assert (directory / "notes.md").exists()
+
+
+def test_symlinks_are_reported_not_followed_or_removed(author, workspace, tmp_path):
+    """디렉토리를 가리키는 링크에 rmdir 을 걸면 매니페스트를 지운 뒤에 터진다 (#301 리뷰)."""
+    directory = workspace / "agents" / "alpha"
+    elsewhere = tmp_path / "elsewhere"
+    (elsewhere / "keep").mkdir(parents=True)
+    (elsewhere / "keep" / "file.txt").write_text("남의 트리\n", encoding="utf-8")
+    (directory / "linked").symlink_to(elsewhere / "keep", target_is_directory=True)
+    (directory / "dangling").symlink_to(tmp_path / "gone")
+
+    retained = author.delete_agent("alpha")
+
+    assert retained == ["dangling", "linked"]
+    assert (directory / "linked").is_symlink() and (directory / "dangling").is_symlink()
+    assert (elsewhere / "keep" / "file.txt").exists(), "링크를 따라가 남의 트리를 건드렸다"

@@ -103,7 +103,7 @@ def test_a_slow_starting_agent_becomes_ready_without_being_restarted(patient):
 
     assert status == 201, record
     assert record["status"] == "ready", record
-    # **처음 세운 컨테이너 그대로** Ready 가 됐다 — 재시작했다면 확인 창(3초×3) 뒤에 다시 섰을 것이다
+    # **처음 세운 컨테이너 그대로** Ready 다 — 재시작했다면 확인 창(3초×3) 뒤에 다시 섰다
     age = (started_at(WRITER) - began).total_seconds()
     assert age < 10.0, f"기동 중에 컨테이너가 갈렸다 (배포 시작 {age:.1f}초 뒤에 선 컨테이너)"
     logs = docker("logs", "--tail", "60", WRITER, check=False)

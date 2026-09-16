@@ -620,3 +620,31 @@ def test_replacing_a_declaration_keeps_its_permissions(author, workspace):
 
     assert path.stat().st_mode & 0o777 == 0o640
     assert Catalog.under(workspace).graph("pipeline").metadata.version == "1.1.0"
+
+
+# --- 삭제가 남기는 것 (#258) ---------------------------------------------------------
+
+
+def test_deleting_an_agent_removes_its_empty_directory(author, workspace):
+    """`204` 는 "삭제됐다" 로 읽힌다 — 프레임워크가 쓴 것은 매니페스트뿐이라 빈 자리를 안 남긴다."""
+    directory = workspace / "agents" / "alpha"
+    assert directory.is_dir()
+
+    retained = author.delete_agent("alpha")
+
+    assert retained == []
+    assert not directory.exists(), "빈 디렉토리가 남았다"
+
+
+def test_files_malkuth_did_not_write_are_kept_and_named(author, workspace):
+    """사람이 둔 코드는 지우지 않는다 — 대신 무엇이 남았는지 알린다 (#258)."""
+    directory = workspace / "agents" / "alpha"
+    (directory / "src").mkdir()
+    (directory / "src" / "agent.py").write_text("MARK = 1\n", encoding="utf-8")
+    (directory / "Dockerfile").write_text("FROM malkuth/agent-base:0.1.0\n", encoding="utf-8")
+
+    retained = author.delete_agent("alpha")
+
+    assert retained == ["Dockerfile", "src/agent.py"]
+    assert (directory / "src" / "agent.py").read_text(encoding="utf-8") == "MARK = 1\n"
+    assert not (directory / "manifest.yaml").exists(), "선언은 지워야 한다"

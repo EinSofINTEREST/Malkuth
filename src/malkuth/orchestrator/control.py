@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Annotated, Any
 
 from fastapi import APIRouter, Body, Depends, FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -453,9 +453,13 @@ def _mount_authoring(api: APIRouter, author: Author) -> None:
     async def delete_materials(name: str) -> None:
         author.delete_materials(name)
 
-    @api.delete("/v1/agents/{name}", status_code=status.HTTP_204_NO_CONTENT)
-    async def delete_agent(name: str) -> None:
-        author.delete_agent(name)
+    @api.delete("/v1/agents/{name}")
+    async def delete_agent(name: str) -> Response:
+        """선언을 지운다 — 빈 디렉토리는 함께, 사람이 둔 파일이 남으면 그 목록을 답한다 (#258)."""
+        retained = author.delete_agent(name)
+        if not retained:
+            return Response(status_code=status.HTTP_204_NO_CONTENT)
+        return JSONResponse(status_code=status.HTTP_200_OK, content={"retained": retained})
 
 
 def _deployment_view(record: DeploymentRecord) -> dict[str, Any]:

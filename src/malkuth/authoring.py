@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import structlog
 import yaml
 from pydantic import BaseModel
 
@@ -29,6 +30,8 @@ from malkuth.deploy import Finding, ValidationReport, validate_deployment
 from malkuth.materials import Materials, MaterialStore, check_files
 from malkuth.modules.promptset import PromptsetManifest
 from malkuth.orchestrator.topology import GraphTopology
+
+log = structlog.get_logger(__name__)
 
 InUse = Callable[[str, str], bool]
 """``(kind, name)`` 이 지금 배포 중인가 — 배포 lifecycle(#243) 이 채운다. 없으면 항상 False."""
@@ -335,7 +338,7 @@ class Author:
         _round_trips(manifest, AgentManifest)
         return self._write(self._agent_path(name), manifest)
 
-    def delete_agent(self, name: str) -> None:
+    def delete_agent(self, name: str) -> list[str]:
         path = self._agent_path(name)
         if not path.is_file():
             raise not_found("agent", name)
@@ -356,6 +359,28 @@ class Author:
             )
         self._refuse_if_in_use("agent", name)
         path.unlink()
+        return self._clear_agent_directory(path.parent, name)
+
+    def _clear_agent_directory(self, directory: Path, agent: str) -> list[str]:
+        """선언을 지운 뒤 남은 것 — 빈 디렉토리는 지우고, 사람이 둔 파일은 남겨 알린다 (#258).
+
+        빌드 재료는 재료 스토어에 산다 (#264) — 프레임워크가 이 디렉토리에 쓰는 것은 매니페스트
+        하나뿐이다. 그래서 비었으면 지우는 것이 "삭제됐다" 는 응답과 맞고, 남은 파일은 프레임워크가
+        만들지 않은 것이므로 지우지 않는다. 조용히 두지도 않는다: 같은 이름으로 다시 만들면 옛
+        파일이 되살아난다.
+        """
+        retained = sorted(
+            str(found.relative_to(directory)) for found in directory.rglob("*") if found.is_file()
+        )
+        if retained:
+            log.warning("agent directory kept — it holds files malkuth did not write",
+                        agent=agent, retained=retained)  # fmt: skip
+            return retained
+        # 빈 디렉토리만 지운다 — 하위 빈 디렉토리까지 걷어내고 나서
+        for child in sorted(directory.rglob("*"), key=lambda p: len(p.parts), reverse=True):
+            child.rmdir()
+        directory.rmdir()
+        return []
 
     # --- 내부 ---------------------------------------------------------------
 

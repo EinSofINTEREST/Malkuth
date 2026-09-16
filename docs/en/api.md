@@ -205,11 +205,22 @@ points at:
 the `details` differ by reason: an agent still used by saved graphs lists them in
 `referenced_by`, while anything currently deployed reports `kind` and `name` instead.
 
-**Only the declaration is removed.** The manifest file goes; the agent's directory under
-`agents/` stays, and so do its build materials in the material store. Materials stay bound
-to their version: if you declare the same name and version again, you get those materials
-back, and different materials under that version are still refused (`MOD_002`). Bump the
-version to start over.
+**An agent's directory goes with its manifest, unless someone else put something there.** The
+only file the framework writes under `agents/<name>/` is the manifest, so once that is gone the
+directory is removed too and `204` means what it says. If the directory still holds files —
+something you put there by hand — they are kept, and the answer is `200` naming them instead:
+
+```json
+{"retained": ["Dockerfile", "src/agent.py"]}
+```
+
+Nothing under `agents/` is ever deleted except the manifest and now-empty directories. Delete
+retained files yourself; leaving them means that declaring the same name again brings them back.
+
+**Build materials are not touched.** They live in the material store, bound to their version: if
+you declare the same name and version again, you get those materials back, and different
+materials under that version are still refused (`MOD_002`). Bump the version to start over, or
+clear them with `DELETE /v1/agents/{name}/materials` before deleting the agent.
 
 ## Build materials and images
 

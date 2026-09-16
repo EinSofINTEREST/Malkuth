@@ -225,3 +225,22 @@ async def test_declarations_rejects_an_inconsistent_set_without_writing(api, wor
 
     assert response.status_code == 400
     assert (await api.get("/v1/graphs/pipeline")).json()["metadata"]["version"] == "1.0.0"
+
+
+async def test_deleting_an_agent_answers_204_and_takes_the_empty_directory(api, workspace):
+    """빈 디렉토리는 함께 사라진다 — 운영자가 읽는 `204` 와 디스크가 같은 말을 한다 (#258)."""
+    response = await api.delete("/v1/agents/alpha")
+
+    assert response.status_code == 204 and response.content == b""
+    assert not (workspace / "agents" / "alpha").exists()
+
+
+async def test_files_left_by_a_person_are_reported_not_deleted(api, workspace):
+    directory = workspace / "agents" / "alpha"
+    (directory / "notes.md").write_text("손으로 둔 파일\n", encoding="utf-8")
+
+    response = await api.delete("/v1/agents/alpha")
+
+    assert response.status_code == 200
+    assert response.json() == {"retained": ["notes.md"]}
+    assert (directory / "notes.md").exists()

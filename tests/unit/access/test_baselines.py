@@ -238,3 +238,66 @@ def test_url_target_names_a_remote_server_like_the_egress_declaration(url, targe
     from malkuth.access.baselines import url_target
 
     assert url_target(url) == target
+
+
+# --- 선언 목록 (#283) — 화면이 보이는 기본 권한은 판정과 같아야 한다 ---------------------------
+
+
+def test_the_declared_memory_list_is_exactly_what_the_declarations_allow(baseline):
+    listed = baseline.declared_for("worker")
+
+    assert listed == [
+        ("local:worker:longterm", Mode.RW),
+        ("group:research:knowledge", Mode.RW),
+        ("group:research:archive", Mode.RO),
+        ("global:global:org", Mode.RO),
+    ]
+    for target, mode in listed:
+        assert baseline.allows("worker", target, mode), target
+        if mode is Mode.RO:
+            assert not baseline.allows("worker", target, Mode.RW), f"{target} 는 쓰기도 된다"
+    assert ("global:global:org", Mode.RW) in baseline.declared_for("librarian")
+    assert baseline.declared_for("ghost") == []
+
+
+def test_the_declared_remote_tools_list_the_server_or_its_allowed_tools(tmp_path):
+    from malkuth.access.baselines import McpToolBaseline
+
+    declared = McpToolBaseline(mcp_workspace(tmp_path))
+
+    assert declared.declared_for("researcher") == [("corp/*", None), ("lab/read", None)]
+    assert declared.allows("researcher", "lab/read", None)
+    assert declared.declared_for("quiet") == [] and declared.declared_for("ghost") == []
+
+
+def test_the_declared_egress_list_is_what_egress_decisions_allow(tmp_path):
+    from malkuth.access.baselines import EgressBaseline
+
+    declared = EgressBaseline(egress_workspace(tmp_path))
+    listed = declared.declared_for("researcher")
+
+    assert ("feeds.example.com:8443", None) in listed
+    assert all(declared.allows("researcher", target, None) for target, _ in listed)
+    assert declared.declared_for("ghost") == []
+
+
+def test_the_declared_callees_are_the_deployed_connections_and_the_stewards():
+    from malkuth.access.baselines import A2ABaseline
+    from malkuth.access.store import InMemoryAccessStore
+    from tests.unit.access.test_tickets import REPO_ROOT
+
+    catalog = Catalog.under(REPO_ROOT)
+    store = InMemoryAccessStore()
+    declared = A2ABaseline(catalog, store, stewards=frozenset({"permission-agent"}))
+    assert declared.declared_for("researcher") == [("permission-agent", None)]
+
+    from malkuth.access.registry import AccessRegistry
+
+    AccessRegistry(store=store, catalog=catalog).issue_identity(
+        "researcher", "dep-1", graph="research-pipeline"
+    )
+    listed = declared.declared_for("researcher")
+
+    assert listed == [("permission-agent", None), ("planner", None)]
+    assert all(declared.allows("researcher", callee, None) for callee, _ in listed)
+    assert declared.declared_for("permission-agent") == [], "권한 에이전트가 자신을 부른다"

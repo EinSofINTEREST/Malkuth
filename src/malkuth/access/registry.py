@@ -19,6 +19,7 @@ import hashlib
 import secrets
 import time
 import uuid
+from collections import deque
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
@@ -70,6 +71,20 @@ class Baseline(Protocol):
 
 
 DECLARATIONS_POLL_S = 2.0
+RECENT_DENIALS = 50
+"""에이전트마다 기억하는 최근 거부 수 — 화면이 원인을 보는 데 충분하고 메모리가 늘지 않는다."""
+
+
+@dataclass(frozen=True)
+class Denial:
+    """One refused decision, as the operator sees it."""
+
+    kind: ResourceKind
+    target: str
+    mode: Mode | None
+    decided_by: str
+    at: float
+
 
 TICKET_TTL_S = 300.0
 """A2A 호출 표의 수명 — 호출자는 만료 전까지 같은 피호출자에게 재사용한다."""
@@ -150,6 +165,8 @@ class AccessRegistry:
         default=None, init=False, repr=False
     )
     _declarations_seen_at: float = field(default=float("-inf"), init=False, repr=False)
+    _denials: dict[str, deque[Denial]] = field(default_factory=dict, init=False, repr=False)
+    """에이전트별 최근 거부 — 운영자 화면용. 프로세스 메모리에만 두고 재시작하면 비운다."""
 
     # --- 신원 ---------------------------------------------------------------
 
@@ -229,6 +246,9 @@ class AccessRegistry:
 
         def answer(outcome: Outcome, decided_by: str) -> Decision:
             self._count_decision(kind, outcome)
+            if outcome is Outcome.DENY:
+                recent = self._denials.setdefault(agent, deque(maxlen=RECENT_DENIALS))
+                recent.appendleft(Denial(kind, target, mode, decided_by, now))
             return Decision(agent, kind, target, mode, outcome, decided_by, version, valid_until)
 
         denial = next((r for r in active if r.effect is Effect.DENY), None)
@@ -474,6 +494,37 @@ class AccessRegistry:
 
     def rules(self, agent: str) -> list[Rule]:
         return list(self.store.rules(agent))
+
+    def declared(self, agent: str) -> dict[ResourceKind, list[tuple[str, Mode | None]]]:
+        """What declarations give this agent, per kind — the baseline the operator narrows.
+
+        강제 지점이 연결된 종류만 — 선언 판정이 없는 종류는 선언이 아무것도 주지 않는다.
+        """
+        self._sync_declarations()
+        return {
+            kind: baseline.declared_for(agent)
+            for kind, baseline in self.baselines.items()
+            if hasattr(baseline, "declared_for")
+        }
+
+    def ceilings(self, agent: str) -> dict[str, AccessCeiling]:
+        """확장 상한 — 소속 그룹과 global 에서, 선언한 곳의 이름으로."""
+        group = self.catalog.agent(agent).metadata.group
+        found: dict[str, AccessCeiling] = {}
+        for name in [RESERVED_GLOBAL_GROUP] + ([group] if group else []):
+            try:
+                ceiling = self.catalog.group(name).spec.access.ceiling
+            except MalkuthError as err:
+                if err.code == ErrorCode.NF_001:
+                    continue
+                raise
+            if ceiling is not None:
+                found[name] = ceiling
+        return found
+
+    def recent_denials(self, agent: str) -> list[Denial]:
+        """이 프로세스가 내린 최근 거부 — 새것부터. 강제 지점의 캐시 적중은 여기 오지 않는다."""
+        return list(self._denials.get(agent, ()))
 
     def version(self) -> int:
         self._sync_declarations()

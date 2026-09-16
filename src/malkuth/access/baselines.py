@@ -79,6 +79,31 @@ class MemoryBaseline:
             for s in declared.spec.memory.spaces
         )
 
+    def declared_for(self, agent: str) -> list[tuple[str, Mode | None]]:
+        """이 에이전트에게 선언이 주는 space 와 mode — 운영자 화면이 보여 주는 기본 권한."""
+        manifest = _manifest(self.catalog, agent)
+        if manifest is None:
+            return []
+        rw, ro = Mode.RW, Mode.RO
+        found: list[tuple[str, Mode | None]] = [
+            (f"local:{agent}:{s.alias}", rw if s.mode is MemoryMode.RW else ro)
+            for s in manifest.spec.memory.spaces
+        ]
+        group_name = manifest.metadata.group
+        group = self._group(group_name) if group_name else None
+        if group is not None:
+            found += [
+                (f"group:{group_name}:{s.alias}", rw if s.mode is MemoryMode.RW else ro)
+                for s in group.spec.memory.spaces
+            ]
+        declared = self._group(RESERVED_GLOBAL_GROUP)
+        if declared is not None:
+            found += [
+                (f"global:{RESERVED_GLOBAL_GROUP}:{s.alias}", rw if agent in s.writers else ro)
+                for s in declared.spec.memory.spaces
+            ]
+        return found
+
     def _group(self, name: str) -> GroupManifest | None:
         try:
             return self.catalog.group(name)
@@ -122,6 +147,24 @@ class A2ABaseline:
             graphs = set(self.store.live_graphs(agent))
         return any(self._connected(graph, agent, target) for graph in sorted(graphs))
 
+    def declared_for(self, agent: str) -> list[tuple[str, Mode | None]]:
+        """지금 배포된 그래프의 연결과 권한 에이전트 — 이 에이전트가 부를 수 있는 피호출자."""
+        callees = {s for s in self.stewards if s != agent}
+        for graph in self.store.live_graphs(agent):
+            try:
+                topology = self.catalog.graph(graph)
+            except MalkuthError as err:
+                if err.code == ErrorCode.NF_001:
+                    continue
+                raise
+            agent_of = {n.id: _agent_name(n.agent) for n in topology.spec.nodes if n.agent}
+            callees |= {
+                agent_of[c.callee]
+                for c in topology.spec.connections
+                if agent_of.get(c.caller) == agent and c.callee in agent_of
+            }
+        return [(callee, None) for callee in sorted(callees)]
+
     def _connected(self, graph: str, caller: str, callee: str) -> bool:
         try:
             topology = self.catalog.graph(graph)
@@ -137,10 +180,22 @@ class A2ABaseline:
         )
 
 
+def _manifest(catalog: Catalog, agent: str) -> AgentManifest | None:
+    try:
+        return catalog.agent(agent)
+    except MalkuthError as err:
+        if err.code == ErrorCode.NF_001:
+            return None
+        raise
+
+
 def _agent_name(ref: str) -> str:
     """``agents/{name}@{version}`` → name."""
     return ref.split("/", 1)[-1].split("@", 1)[0]
 
+
+ALL_TOOLS = "*"
+"""화면에 보이는 "서버의 모든 도구" — 판정 대상 이름이 아니다 (도구 판정은 이름 하나씩)."""
 
 HTTPS_PORT = 443
 HTTP_PORT = 80
@@ -186,6 +241,10 @@ class EgressBaseline:
                 return False
             raise
         return target in self.declared(manifest)
+
+    def declared_for(self, agent: str) -> list[tuple[str, Mode | None]]:
+        manifest = _manifest(self.catalog, agent)
+        return [] if manifest is None else [(t, None) for t in sorted(self.declared(manifest))]
 
     @staticmethod
     def declared(manifest: AgentManifest) -> frozenset[str]:
@@ -243,6 +302,19 @@ class McpToolBaseline:
             if declared.name == server and declared.url is not None:
                 return not declared.allowed_tools or tool in declared.allowed_tools
         return False
+
+    def declared_for(self, agent: str) -> list[tuple[str, Mode | None]]:
+        """원격 서버의 선언 도구 — ``allowed_tools`` 가 없으면 서버 전체(``server/*``)."""
+        manifest = _manifest(self.catalog, agent)
+        if manifest is None:
+            return []
+        found: list[tuple[str, Mode | None]] = []
+        for server in manifest.spec.mcp.servers:
+            if server.url is None:
+                continue
+            tools = server.allowed_tools or (ALL_TOOLS,)
+            found += [(f"{server.name}/{tool}", None) for tool in tools]
+        return found
 
 
 __all__ = [

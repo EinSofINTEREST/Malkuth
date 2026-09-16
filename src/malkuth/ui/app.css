@@ -31,3 +31,5 @@ button.danger { color: #b00020; }
 td textarea { width: 100%; box-sizing: border-box; min-height: 5rem; font-family: ui-monospace, monospace; }
 .status-building { color: #b26a00; font-weight: 600; }
 .status-built { color: #0a7d32; font-weight: 600; }
+.rule-active { color: #0a7d32; font-weight: 600; }
+.rule-lifted, .rule-expired { color: #7b8794; }

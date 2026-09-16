@@ -246,6 +246,26 @@ def _mount_operator(api: APIRouter, registry: AccessRegistry) -> None:
             "agent": name,
             "version": registry.version(),
             "rules": [rule_view(rule) for rule in registry.rules(name)],
+            # 운영자 화면이 한 번에 보는 것 — 기본 권한, 확장 상한, 최근 거부 (#283)
+            "declared": [
+                {"kind": kind.value, "target": target, "mode": mode.value if mode else None}
+                for kind, entries in registry.declared(name).items()
+                for target, mode in entries
+            ],
+            "ceilings": [
+                {"group": group, **ceiling.model_dump(mode="json")}
+                for group, ceiling in registry.ceilings(name).items()
+            ],
+            "denials": [
+                {
+                    "kind": denial.kind.value,
+                    "target": denial.target,
+                    "mode": denial.mode.value if denial.mode else None,
+                    "decided_by": denial.decided_by,
+                    "at": denial.at,
+                }
+                for denial in registry.recent_denials(name)
+            ],
         }
 
     @api.post("/v1/access/revocations", status_code=status.HTTP_201_CREATED)

@@ -73,6 +73,51 @@ local   ─ a single agent           (agents/<name>/manifest.yaml)
   member of the reserved `global` group.
 - Name collisions resolve nearest-first: **local > group > global**.
 
+## Access Control — Decided Outside the Container
+
+An agent container may hold every permission inside itself, so a check made there is a
+convenience, not a boundary. Permissions that change while agents run are decided **outside the
+controlled container, on every request**:
+
+```
+                 ┌──────────── Control Plane ────────────┐
+                 │  access registry — identities,         │
+                 │  declarations, grants, ceilings, feed  │
+                 └───▲──────────────▲──────────────▲──────┘
+          decisions  │              │              │  + change feed
+         ┌───────────┴──┐  ┌────────┴──────┐  ┌────┴────────────────┐
+         │ Memory       │  │ Egress proxy  │  │ callee's A2A server │   enforcement points
+         │ Service      │  │ model API,    │  │                     │
+         │              │  │ CONNECT, MCP  │  │                     │
+         └───────▲──────┘  └────────▲──────┘  └────▲────────────────┘
+                 │                  │              │
+         ┌───────┴──────────────────┴──────────────┴───┐
+         │ agent containers — internal network only     │
+         └──────────────────────────────────────────────┘
+```
+
+| Controlled | Enforcement point | Decided as |
+|---|---|---|
+| memory access | Memory Service | `memory` on a space id, `ro` / `rw` |
+| outside calls | egress proxy | `egress` on `host[:port]` |
+| remote MCP tools | egress proxy (terminates the server) | `mcp_tool` on `server/tool` |
+| a caller's A2A calls | the callee's A2A server | `a2a` on the callee |
+
+- **Declarations are the baseline.** Manifests, groups and deployed graphs give the default
+  permissions. Operators narrow them at any time (revoke, `rw`→`ro`); a dedicated permission agent
+  widens them, only within the expansion ceiling the registry enforces.
+- **Next request, no restart.** Enforcement points cache decisions briefly and drop them when the
+  registry's version moves.
+- **When the registry is unreachable**, anything not already cached is denied, and cached allows
+  keep working until they expire — so a revocation made during an outage may not apply until the
+  registry is back.
+- **The proxy is the only way out.** With it on, agents run on an internal Docker network; the
+  proxy holds the model key and remote MCP credentials, so agents never have them.
+
+Not reached at run time: effects that stay inside the container, data an agent already read, and
+secrets injected as environment variables (those need a redeploy). See the
+[API reference](api.md#access-registry) and the [runbook](runbooks/access-control.md).
+
 ## Context Memory
 
 Agents accumulate searchable context in declared memory spaces

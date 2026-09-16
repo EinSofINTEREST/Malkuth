@@ -1,6 +1,7 @@
 // 페이지 글루 — DOM 만 다룬다. REST 는 client.js 가, 선언 문서의 모양도 client.js 가 안다.
 import { agentsOfGraph, ApiError, bumpPatch, createClient, emptyAgent, emptyGraph, formatPairs,
-  materialPathProblem, moduleRef, parsePairs, pruneEmpty, suggestInputMap, unbuiltAgents } from "./client.js";
+  materialPathProblem, moduleRef, parsePairs, pruneEmpty, revocationsFor, ruleState, suggestInputMap,
+  unbuiltAgents } from "./client.js";
 
 const $ = (selector) => document.querySelector(selector);
 const el = (tag, props = {}, children = []) => {
@@ -72,6 +73,7 @@ async function loadCatalog() {
   const problems = [...agents.problems, ...graphs.problems, ...groups.problems, ...skillsets.problems, ...promptsets.problems, ...memorysets.problems];
   $("#catalog-problems").replaceChildren(...problems.map((p) => el("li", { textContent: `${p.path}: ${p.code} ${p.message}` })));
 
+  fillSelect("#access-agent", agents.items.map((a) => [a.name, a.name]));
   fillSelect("#deploy-graph", graphs.items.map((g) => [g.name, `${g.name}@${g.version}`]));
   checkDeployable();
   fillSelect("select[name=group]", [["", "(없음)"], ...groups.items.map((g) => [g.name, g.name])]);
@@ -577,6 +579,83 @@ function watch(runId) {
   };
   setTimeout(tick, 1000);
 }
+
+// --- 권한 (#283) -----------------------------------------------------------------
+
+const when = (seconds) => (seconds === null || seconds === undefined ? "" : new Date(seconds * 1000).toLocaleString());
+const accessOff = (err) => err instanceof ApiError && err.status === 404 && !err.code;
+
+async function loadAccess() {
+  const name = $("#access-agent").value;
+  if (!name) return;
+  let view;
+  try {
+    view = await api.accessAgent(name);
+  } catch (err) {
+    if (accessOff(err)) { $("#access-off").hidden = false; return; }
+    return report(err);
+  }
+  $("#access-off").hidden = true;
+  $("#access-declared tbody").replaceChildren(...view.declared.map((permission) => el("tr", {}, [
+    el("td", { textContent: permission.kind }),
+    el("td", { textContent: permission.target }),
+    el("td", { textContent: permission.mode || "" }),
+    el("td", {}, revocationsFor(permission).map(({ label, revocation }) => el("button", {
+      textContent: label, className: "danger", onclick: () => revoke(name, revocation),
+    }))),
+  ])));
+  const now = Date.now() / 1000;
+  $("#access-rules tbody").replaceChildren(...view.rules.map((rule) => {
+    const state = ruleState(rule, now);
+    return el("tr", { id: `rule-${rule.rule_id}` }, [
+      el("td", { textContent: rule.effect }),
+      el("td", { textContent: rule.kind }),
+      el("td", { textContent: rule.target }),
+      el("td", { textContent: rule.mode || "" }),
+      el("td", { textContent: rule.decided_by }),
+      el("td", { textContent: rule.requested_by || "" }),
+      el("td", { textContent: rule.reason }),
+      el("td", { textContent: when(rule.expires_at) }),
+      el("td", { textContent: state, className: `rule-${state}` }),
+      el("td", {}, state === "active" ? [el("button", {
+        textContent: rule.effect === "deny" ? "되돌리기" : "끝내기", onclick: () => lift(rule),
+      })] : []),
+    ]);
+  }));
+  $("#access-ceilings").textContent = view.ceilings.length
+    ? JSON.stringify(view.ceilings, null, 2)
+    : "상한이 없으면 확장도 없습니다";
+  $("#access-ceilings").className = view.ceilings.length ? "detail" : "detail muted";
+  $("#access-denials tbody").replaceChildren(...view.denials.map((denial) => el("tr", {}, [
+    el("td", { textContent: when(denial.at) }),
+    el("td", { textContent: denial.kind }),
+    el("td", { textContent: denial.target }),
+    el("td", { textContent: denial.mode || "" }),
+    el("td", { textContent: denial.decided_by }),
+  ])));
+}
+
+async function revoke(agent, revocation) {
+  const reason = $("#access-reason").value.trim();
+  if (!reason) return report(new Error("회수 사유를 적으세요 — 기록에 남습니다"));
+  try {
+    const rule = await api.revoke({ agent, reason, ...revocation });
+    status(`회수됨: ${rule.target}${rule.mode ? ` (${rule.mode})` : ""} — ${rule.rule_id}`);
+    await loadAccess();
+  } catch (err) { report(err); }
+}
+
+async function lift(rule) {
+  try {
+    await api.liftRule(rule.rule_id);
+    status(`되돌림: ${rule.target} — ${rule.rule_id}`);
+    await loadAccess();
+  } catch (err) { report(err); }
+}
+
+$("#access-form").addEventListener("submit", (event) => { event.preventDefault(); loadAccess(); });
+$("#access-agent").addEventListener("change", loadAccess);
+document.querySelector("#tabs button[data-tab=access]").addEventListener("click", loadAccess);
 
 // --- 시작 ---------------------------------------------------------------------
 

@@ -313,3 +313,26 @@ async def test_the_change_feed_takes_an_enforcer_token_or_a_live_agent_identity(
     assert (await api.get(url, headers=bearer(CONTROL))).status_code == 401
     registry.revoke_deployment("dep-1")
     assert (await api.get(url, headers=bearer(agent))).status_code == 401
+
+
+async def test_the_operator_view_shows_declarations_ceilings_and_recent_denials(registry, api):
+    """권한 화면이 한 번에 보는 것 — 기본 권한, 확장 상한, 최근 거부 (#283)."""
+    from malkuth.access.baselines import EgressBaseline
+    from malkuth.access.model import ResourceKind
+
+    registry.baselines = {ResourceKind.EGRESS: EgressBaseline(registry.catalog)}
+    registry.decide("worker", ResourceKind.EGRESS, "evil.example.com")
+    registry.decide("worker", ResourceKind.EGRESS, "api.anthropic.com")
+
+    view = (await api.get("/v1/access/agents/worker", headers=bearer(CONTROL))).json()
+
+    assert {"kind": "egress", "target": "api.anthropic.com", "mode": None} in view["declared"]
+    assert {c["group"] for c in view["ceilings"]} == {"global", "research"}
+    research = next(c for c in view["ceilings"] if c["group"] == "research")
+    assert research["max_ttl_s"] == 600 and research["egress"] == ["api.search.example.com"]
+    [denial] = view["denials"]
+    assert (denial["kind"], denial["target"], denial["decided_by"]) == (
+        "egress",
+        "evil.example.com",
+        "default",
+    )

@@ -1,5 +1,5 @@
 """Egress through the proxy, decided per destination (#293) and per remote MCP tool (#282), with no
-other way out (#280).
+other way out (#280). Agent-owned MCP sidecars are reached the same way (#304).
 
 떠 있는 에이전트 컨테이너 **안에서** 프록시를 거쳐 나간다 — 배포가 넣어 준 ``HTTPS_PROXY`` 그대로.
 
@@ -111,7 +111,8 @@ async def main():
     with open(os.environ["MALKUTH_MANIFEST"], encoding="utf-8") as handle:
         manifest = AgentManifest.model_validate(yaml.safe_load(handle))
     client = build_mcp_client(manifest)
-    [spec] = [s for s in manifest.spec.mcp.servers if s.name == "corp"]
+    server = sys.argv[1]
+    [spec] = [s for s in manifest.spec.mcp.servers if s.name == server]
     await client.start(spec)
     print("@@READY", flush=True)
     loop = asyncio.get_running_loop()
@@ -119,7 +120,7 @@ async def main():
         while line := await loop.run_in_executor(None, sys.stdin.readline):
             tool, arguments = line.rstrip("\\n").split(" ", 1)
             try:
-                result = await client.call_tool("mcp__corp__" + tool, json.loads(arguments))
+                result = await client.call_tool(f"mcp__{server}__{tool}", json.loads(arguments))
                 print("@@OK:" + json.dumps(result.content), flush=True)
             except MalkuthError as err:
                 detail = str(err.details.get("detail", ""))[:200]
@@ -129,6 +130,35 @@ async def main():
 
 asyncio.run(main())
 """
+SIDECAR_IMAGE = "malkuth/e2e-mcp-sidecar:0.1.0"
+SIDECAR = "malkuth-researcher--mcp-tools"
+SIDECAR_NET = "malkuth-researcher--mcp"
+
+# 사이드카 이미지의 서버 — 자격 없이 듣는다. 닿는 길은 사이드카 네트워크의 프록시뿐이어야 한다
+SIDECAR_MCP = """
+import uvicorn
+from mcp.server import MCPServer
+from mcp.server.transport_security import TransportSecuritySettings
+
+server = MCPServer(name="tools", version="0.1.0")
+
+def echo(text: str) -> str:
+    \"\"\"Echo the text back.\"\"\"
+    return text
+
+def add(a: int, b: int) -> int:
+    \"\"\"Add two numbers.\"\"\"
+    return a + b
+
+server.add_tool(echo)
+server.add_tool(add)
+app = server.streamable_http_app(
+    host="0.0.0.0",
+    transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
+)
+uvicorn.run(app, host="0.0.0.0", port=8000, log_level="warning")
+"""
+
 AGENTS = "malkuth-e2e-agents"
 """에이전트 네트워크 — ``--internal``. 이그레스 프록시를 켠 control plane 은 이 격리를 요구한다."""
 
@@ -150,6 +180,25 @@ except OSError as err:
 """
 
 
+def build_sidecar_image(tmp_path: Path) -> None:
+    """사이드카는 이미지의 기본 명령으로 뜬다 — runtime 은 명령을 주지 않는다."""
+    context = tmp_path / "sidecar-image"
+    context.mkdir()
+    (context / "server.py").write_text(SIDECAR_MCP, encoding="utf-8")
+    (context / "Dockerfile").write_text(
+        "FROM malkuth/agent-base:0.1.0\n"
+        "COPY --chown=1000:1000 server.py /app/sidecar/server.py\n"
+        'ENTRYPOINT ["python", "/app/sidecar/server.py"]\n',
+        encoding="utf-8",
+    )
+    docker("build", "-t", SIDECAR_IMAGE, str(context), timeout=900)
+
+
+def remove_sidecars() -> None:
+    docker("rm", "-f", SIDECAR, check=False)
+    docker("network", "rm", SIDECAR_NET, check=False)
+
+
 def build_proxy_image() -> None:
     docker(
         "build", "-t", "malkuth/egress-proxy:0.1.0",
@@ -162,6 +211,7 @@ def agents_network() -> None:
     """외부 경로 없는 에이전트 네트워크를 새로 만든다 — 남은 것이 격리가 아닐 수 있다."""
     for name in (PROXY, MEMORY, FORWARDER, MCP_SERVER, *deployed_containers()):
         docker("rm", "-f", name, check=False)
+    remove_sidecars()
     docker("network", "rm", AGENTS, check=False)
     docker("network", "create", "--internal", AGENTS)
 
@@ -248,7 +298,16 @@ def workspace(tmp_path: Path) -> Path:
                 "transport": "streamable-http",
                 "url": f"http://{MCP_TARGET}/mcp",
                 "auth": {"type": "bearer", "token_env": MCP_TOKEN_ENV},
-            }
+            },
+            # 에이전트 전용 사이드카 (#304) — 주소는 적지 않는다
+            {
+                "name": "tools",
+                "transport": "streamable-http",
+                "sidecar": {
+                    "image": SIDECAR_IMAGE,
+                    "resources": {"cpu": "0.5", "memory": "256Mi"},
+                },
+            },
         ]
     }
     manifest_path.write_text(yaml.safe_dump(manifest, sort_keys=False), encoding="utf-8")
@@ -263,6 +322,7 @@ def workspace(tmp_path: Path) -> Path:
 @pytest.fixture
 def plane(stack, tmp_path) -> Iterator[dict[str, Any]]:
     build_proxy_image()
+    build_sidecar_image(tmp_path)
     config_dir = write_config(
         tmp_path,
         orchestrator={
@@ -277,6 +337,8 @@ def plane(stack, tmp_path) -> Iterator[dict[str, Any]]:
     config["runtime"]["egress_proxy"] = {
         "connect_url": "http://malkuth-egress:8080",
         "providers_url": "http://malkuth-egress:8081",
+        # 사이드카 네트워크에 붙일 프록시 컨테이너 (#304)
+        "container": PROXY,
     }
     (config_dir / "e2e.yaml").write_text(yaml.safe_dump(config), encoding="utf-8")
     tokens_path = tmp_path / "memory.json"
@@ -305,6 +367,7 @@ def plane(stack, tmp_path) -> Iterator[dict[str, Any]]:
         stop(state["process"])
         for name in (PROXY, MEMORY, FORWARDER, MCP_SERVER, *deployed_containers()):
             docker("rm", "-f", name, check=False)
+        remove_sidecars()
         docker("network", "rm", AGENTS, check=False)
 
 
@@ -503,9 +566,9 @@ class McpSession:
     답이 와 있는데도 기다린다.
     """
 
-    def __init__(self, container: str) -> None:
+    def __init__(self, container: str, server: str = "corp") -> None:
         self.process = subprocess.Popen(  # noqa: S603
-            ["docker", "exec", "-i", container, "python", "-c", MCP_SESSION],  # noqa: S607
+            ["docker", "exec", "-i", container, "python", "-c", MCP_SESSION, server],  # noqa: S607
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -596,3 +659,80 @@ def test_remote_mcp_tools_are_decided_one_by_one_through_the_proxy(plane):
     )
     session.close()
     assert started_at(RESEARCHER) == started, "권한 변경이 컨테이너를 재시작했다"
+
+
+# 에이전트 컨테이너 안에서 사이드카에 **직접** 닿아 본다 — 프록시를 건너뛰는 길이 없어야 한다
+DIRECT_SIDECAR = f"""
+import socket
+try:
+    socket.create_connection(("{SIDECAR}", 8000), timeout=5).close()
+    print("REACHED")
+except OSError as err:
+    print("BLOCKED:" + type(err).__name__)
+"""
+
+
+def networks_of(container: str) -> set[str]:
+    return set(json.loads(docker("inspect", "-f", "{{json .NetworkSettings.Networks}}", container)))
+
+
+def test_an_agents_sidecar_is_reached_only_through_the_proxy_decided_per_tool(plane):
+    """#304 — 사이드카를 배포·광고·실행, 도구 하나를 회수해도 나머지는 계속, 해체하면 사라진다."""
+    status, record = api("POST", "/v1/deployments", {"graph": "research-pipeline"})
+    assert status == 201, record
+    started = started_at(RESEARCHER)
+
+    # --- 사이드카는 자기 네트워크에만, 그 네트워크에 붙는 것은 프록시뿐
+    assert docker("inspect", "-f", "{{.State.Running}}", SIDECAR) == "true"
+    assert networks_of(SIDECAR) == {SIDECAR_NET}
+    assert docker("network", "inspect", "-f", "{{.Internal}}", SIDECAR_NET) == "true"
+    assert SIDECAR_NET in networks_of(PROXY)
+    assert networks_of(RESEARCHER) == {AGENTS}, "에이전트가 사이드카 네트워크에 붙었다"
+    hardening = docker(
+        "inspect", "-f",
+        "{{.Config.User}} {{.HostConfig.ReadonlyRootfs}} {{json .HostConfig.CapDrop}} "
+        "{{json .HostConfig.SecurityOpt}} {{json .HostConfig.PortBindings}}",
+        SIDECAR,
+    )  # fmt: skip
+    assert hardening.split() == [
+        "1000:1000", "true", '["ALL"]', '["no-new-privileges:true"]', "{}",
+    ], hardening  # fmt: skip
+    assert run_in(RESEARCHER, DIRECT_SIDECAR).startswith("BLOCKED"), "프록시를 건너뛰는 길이 있다"
+
+    # --- agentd 가 기동 때 세션을 열어 도구를 광고한다
+    advertised = json.loads(run_in(RESEARCHER, CARD))
+    assert {"mcp__tools__echo", "mcp__tools__add"} <= set(advertised), advertised
+
+    session = McpSession(RESEARCHER, "tools")
+    assert succeeded(session.call("echo", {"text": "side"}), "side")
+    assert succeeded(session.call("add", {"a": 4, "b": 5}), "9")
+
+    # --- 도구 하나 회수: 다음 호출부터 거부, 같은 사이드카의 다른 도구는 계속
+    status, revoked = api(
+        "POST",
+        "/v1/access/revocations",
+        {"agent": "researcher", "kind": "mcp_tool", "target": "tools/echo", "reason": "e2e"},
+    )
+    assert status == 201, revoked
+    until(
+        lambda: session.call("echo", {"text": "side"}).startswith("ERR:MCP_003:ACC_001"),
+        what="revoked sidecar tool refused in the open session",
+        timeout_s=30,
+    )
+    added = session.call("add", {"a": 4, "b": 5})
+    assert succeeded(added, "9"), f"회수가 같은 사이드카의 다른 도구까지 막았다: {added}"
+    api("DELETE", f"/v1/access/rules/{revoked['rule_id']}")
+    until(
+        lambda: succeeded(session.call("echo", {"text": "side"}), "side"),
+        what="lifted",
+        timeout_s=30,
+    )
+    session.close()
+    assert started_at(RESEARCHER) == started, "권한 변경이 컨테이너를 재시작했다"
+
+    # --- 해체하면 사이드카와 그 네트워크도 사라진다
+    status, stopped = api("DELETE", f"/v1/deployments/{record['deployment_id']}")
+    assert status == 200, stopped
+    assert docker("ps", "-aq", "--filter", f"name=^{SIDECAR}$") == ""
+    assert docker("network", "ls", "-q", "--filter", f"name=^{SIDECAR_NET}$") == ""
+    assert SIDECAR_NET not in networks_of(PROXY)

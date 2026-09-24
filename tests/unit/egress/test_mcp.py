@@ -312,3 +312,21 @@ def test_a_seal_binds_agent_and_server():
     assert seal.open("researcher", "lab", sealed) is None
     assert SessionSeal(key=b"x" * 32).open("researcher", "corp", sealed) is None
     assert seal.open("researcher", "corp", "abc") is None
+
+
+async def test_a_listed_plaintext_server_that_resolves_publicly_is_refused(tmp_path):
+    """사설로 적어 둔 이름이 공인 주소로 풀리면 평문으로 보내지 않는다 (#305 리뷰)."""
+    server = Server()
+    target = termination(
+        tmp_path,
+        Identities(),
+        server,
+        corp={"url": "http://mcp.corp.example/mcp"},
+        private_destinations=("mcp.corp.example:80",),
+        allow_plaintext=True,
+    )
+    async with client_for(target) as client:
+        response = await post(client)
+
+    assert response.status_code == 502
+    assert server.seen == [], "공인 주소로 평문을 보냈다"

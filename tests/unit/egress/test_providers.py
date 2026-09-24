@@ -152,3 +152,48 @@ async def test_counting_tokens_and_listing_models_are_model_api_calls():
         listed = await client.get("/anthropic/v1/models", headers={"x-api-key": "cred-researcher"})
 
     assert (counted.status_code, listed.status_code) == (200, 200)
+
+
+def plaintext_app(provider: Provider, addresses: list[str]):
+    registry = Registry()
+    registry.allowed.add("api.anthropic.com")
+
+    async def resolver(host, port):
+        return addresses
+
+    app = create_provider_app(
+        registry,
+        {
+            "anthropic": Upstream(
+                base_url="http://fake-provider:8000",
+                logical_host="api.anthropic.com",
+                api_key=KEY,
+                endpoints=ANTHROPIC_ENDPOINTS,
+            )
+        },
+        http=httpx.AsyncClient(transport=httpx.MockTransport(provider.handle)),
+        resolver=resolver,
+    )
+    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://egress")
+
+
+async def test_a_plaintext_upstream_is_pinned_to_its_private_address():
+    """평문은 사설로 풀린 주소로만, 그 주소에 붙는다 — 판정과 연결 사이에 이름이 바뀌지 못하게."""
+    provider = Provider()
+    async with plaintext_app(provider, ["172.20.0.9"]) as client:
+        response = await call(client)
+
+    assert response.status_code == 200
+    [sent] = provider.seen
+    assert (sent.url.host, sent.url.port) == ("172.20.0.9", 8000)
+    assert sent.headers["host"] == "fake-provider:8000"
+
+
+async def test_a_plaintext_upstream_that_resolves_publicly_never_gets_the_key():
+    """사설 목록에 있는 이름이라도 공인 주소로 풀리면 키를 평문으로 보내지 않는다 (#305 리뷰)."""
+    provider = Provider()
+    async with plaintext_app(provider, ["93.184.216.34"]) as client:
+        response = await call(client)
+
+    assert response.status_code == 502
+    assert provider.seen == []

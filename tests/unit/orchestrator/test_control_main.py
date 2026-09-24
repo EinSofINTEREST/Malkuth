@@ -595,7 +595,7 @@ def test_the_startup_grace_and_ready_timeout_reach_the_runtime(tmp_path, monkeyp
     ],
 )
 def test_isolated_agents_reaching_the_control_plane_is_warned(proxy, host, warned):
-    """격리돼도 브리지 게이트웨이는 호스트다 — 모든 인터페이스에 열린 control plane 을 알린다 (#303)."""
+    """격리돼도 브리지 게이트웨이는 호스트다 — 밖에 열린 control plane 을 알린다 (#303)."""
     from malkuth.config import RuntimeConfig
 
     runtime = RuntimeConfig(

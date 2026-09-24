@@ -295,6 +295,25 @@ def test_unconditional_fan_out_is_rejected(source):
     assert exc_info.value.details["node_id"] == source
 
 
+def test_a_second_fallback_beside_conditions_is_rejected():
+    """라우터는 첫 번째 기본 경로만 쓴다 — 두 번째는 조용히 버려진다."""
+    topology = make_mission(
+        edges=[
+            {"from": "START", "to": "planner"},
+            {"from": "planner", "to": "researcher", "condition": condition_ref()},
+            {"from": "planner", "to": "END"},
+            {"from": "planner", "to": "researcher"},
+            {"from": "researcher", "to": "END"},
+        ]
+    )
+
+    with pytest.raises(MalkuthError) as exc_info:
+        validate_topology(topology)
+
+    assert_graph_001(exc_info)
+    assert exc_info.value.details["node_id"] == "planner"
+
+
 def test_a_conditional_branch_with_a_fallback_is_not_a_fan_out():
     """조건 edge 가 있는 노드는 라우터가 한 곳만 고른다 — 조건 없는 edge 는 기본 경로다."""
     topology = make_mission(

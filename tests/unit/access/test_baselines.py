@@ -197,6 +197,12 @@ def mcp_workspace(tmp_path: Path) -> Catalog:
                 "allowed_tools": ["read"],
             },
             {"name": "fs", "transport": "stdio", "command": ["mcp-server-fs"]},
+            {
+                "name": "browser",
+                "transport": "streamable-http",
+                "sidecar": {"image": "mcp/playwright:1.2.0"},
+                "allowed_tools": ["navigate"],
+            },
         ]
     }
     write(tmp_path / "agents" / "researcher" / "manifest.yaml", researcher)
@@ -211,6 +217,8 @@ def mcp_workspace(tmp_path: Path) -> Catalog:
         ("researcher", "lab/read", True, "allowed_tools 에 있는 도구"),
         ("researcher", "lab/write", False, "allowed_tools 밖의 도구"),
         ("researcher", "fs/read_file", False, "stdio 서버는 프록시가 보지 않는다"),
+        ("researcher", "browser/navigate", True, "사이드카도 프록시가 종단한다 (#304)"),
+        ("researcher", "browser/evaluate", False, "사이드카의 allowed_tools 밖"),
         ("researcher", "ghost/search", False, "선언하지 않은 서버"),
         ("researcher", "corp", False, "도구 이름이 없는 대상"),
         ("researcher", "/search", False, "서버 이름이 없는 대상"),
@@ -265,7 +273,11 @@ def test_the_declared_remote_tools_list_the_server_or_its_allowed_tools(tmp_path
 
     declared = McpToolBaseline(mcp_workspace(tmp_path))
 
-    assert declared.declared_for("researcher") == [("corp/*", None), ("lab/read", None)]
+    assert declared.declared_for("researcher") == [
+        ("corp/*", None),
+        ("lab/read", None),
+        ("browser/navigate", None),
+    ]
     assert declared.allows("researcher", "lab/read", None)
     assert declared.declared_for("quiet") == [] and declared.declared_for("ghost") == []
 

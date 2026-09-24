@@ -21,7 +21,7 @@ from malkuth.core.manifest import RESERVED_GLOBAL_GROUP, MemoryMode
 if TYPE_CHECKING:
     from malkuth.access.store import AccessStore, Identity
     from malkuth.catalog import Catalog
-    from malkuth.core.manifest import AgentManifest, GroupManifest
+    from malkuth.core.manifest import AgentManifest, GroupManifest, McpServerSpec
 
 SPACE_ID = re.compile(r"^(?P<scope>local|group|global):(?P<owner>[^:\s*]+):(?P<alias>[^:\s*]+)$")
 """Memory Service 의 영구 space id — ``MemorySpace.space_id`` 와 같은 모양이다.
@@ -278,10 +278,11 @@ def url_target(url: str) -> str | None:
 
 @dataclass(frozen=True)
 class McpToolBaseline:
-    """Declared remote MCP tools — ``server/tool`` (#282).
+    """Declared MCP tools the proxy terminates — ``server/tool`` (#282, #304).
 
-    원격(``url`` 이 있는) 서버만 대상이다 — stdio 서버의 도구는 컨테이너 안에서 돌아 프록시가 보지
-    못한다. ``allowed_tools`` 를 선언했으면 그 목록만, 아니면 그 서버의 모든 도구가 기본 권한이다.
+    프록시가 종단하는 서버(external, sidecar)만 대상이다 — stdio 서버의 도구는 컨테이너 안에서 돌아
+    프록시가 보지 못한다. ``allowed_tools`` 를 선언했으면 그 목록만, 아니면 그 서버의 모든 도구가
+    기본 권한이다.
     """
 
     catalog: Catalog
@@ -299,22 +300,27 @@ class McpToolBaseline:
                 return False
             raise
         for declared in manifest.spec.mcp.servers:
-            if declared.name == server and declared.url is not None:
+            if declared.name == server and _terminated(declared):
                 return not declared.allowed_tools or tool in declared.allowed_tools
         return False
 
     def declared_for(self, agent: str) -> list[tuple[str, Mode | None]]:
-        """원격 서버의 선언 도구 — ``allowed_tools`` 가 없으면 서버 전체(``server/*``)."""
+        """프록시가 종단하는 서버의 선언 도구 — ``allowed_tools`` 가 없으면 ``server/*``."""
         manifest = _manifest(self.catalog, agent)
         if manifest is None:
             return []
         found: list[tuple[str, Mode | None]] = []
         for server in manifest.spec.mcp.servers:
-            if server.url is None:
+            if not _terminated(server):
                 continue
             tools = server.allowed_tools or (ALL_TOOLS,)
             found += [(f"{server.name}/{tool}", None) for tool in tools]
         return found
+
+
+def _terminated(server: McpServerSpec) -> bool:
+    """프록시가 종단하는 서버인가 — external 이거나 사이드카. stdio 는 컨테이너 안이다."""
+    return server.url is not None or server.sidecar is not None
 
 
 __all__ = [

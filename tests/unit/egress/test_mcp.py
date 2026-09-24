@@ -1,4 +1,4 @@
-"""Remote MCP termination — per-tool decisions, proxy-held credentials (#282)."""
+"""Remote MCP termination — per-tool decisions, proxy-held credentials (#282), sidecars (#304)."""
 
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ from tests.unit.egress.test_connect import Registry
 
 TOKEN = "corp-mcp-token"  # noqa: S105 — 테스트 값
 PUBLIC = "93.184.216.34"
+SIDECAR_HOST = "malkuth-researcher--mcp-browser"
 
 
 class Identities(Registry):
@@ -65,6 +66,12 @@ def workspace(tmp_path: Path, **corp) -> Catalog:
             **corp,
         },
         {"name": "lab", "transport": "streamable-http", "url": "http://lab.internal:9000/mcp"},
+        {
+            "name": "browser",
+            "transport": "streamable-http",
+            "sidecar": {"image": "mcp/playwright:1.2.0", "port": 3000},
+        },
+        {"name": "fs", "transport": "stdio", "command": ["mcp-server-fs"]},
     ]
     doc = {
         "apiVersion": "malkuth/v1",
@@ -86,7 +93,14 @@ def workspace(tmp_path: Path, **corp) -> Catalog:
 def termination(tmp_path, registry, server, **options) -> McpTermination:
     corp = options.pop("corp", {})
     tokens = options.pop("tokens", frozenset({"CORP_TOKEN"}))
-    addresses = options.pop("addresses", {"mcp.corp.example": PUBLIC, "lab.internal": "10.0.0.9"})
+    addresses = options.pop(
+        "addresses",
+        {
+            "mcp.corp.example": PUBLIC,
+            "lab.internal": "10.0.0.9",
+            SIDECAR_HOST: "172.30.5.2",
+        },
+    )
 
     async def resolver(host, port):
         return [addresses[host]]
@@ -330,3 +344,63 @@ async def test_a_listed_plaintext_server_that_resolves_publicly_is_refused(tmp_p
 
     assert response.status_code == 502
     assert server.seen == [], "공인 주소로 평문을 보냈다"
+
+
+# --- 사이드카 (#304) ------------------------------------------------------------------
+
+
+async def test_a_sidecar_tool_goes_to_the_agents_own_sidecar_decided_per_tool(tmp_path):
+    """주소는 runtime 이 띄운 이름에서, 판정은 도구마다 — 바깥 목적지가 아니라 egress 판정 없음."""
+    registry, server = Identities(), Server()
+    registry.allowed.add("browser/navigate")
+    target = termination(tmp_path, registry, server)
+
+    async with client_for(target) as client:
+        response = await post(client, server="browser", body=tool_call("navigate"))
+
+    assert response.status_code == 200
+    [sent] = server.seen
+    assert str(sent.url) == "http://172.30.5.2:3000/mcp"
+    assert sent.headers["host"] == f"{SIDECAR_HOST}:3000"
+    assert "authorization" not in sent.headers, "사이드카에 자격을 실었다"
+    assert registry.asked == [("cred-researcher", "browser/navigate")]
+
+
+async def test_a_revoked_sidecar_tool_is_refused_and_the_others_still_work(tmp_path):
+    registry, server = Identities(), Server()
+    registry.allowed.add("browser/navigate")
+    target = termination(tmp_path, registry, server)
+
+    async with client_for(target) as client:
+        denied = await post(client, server="browser", body=tool_call("evaluate"))
+        allowed = await post(client, server="browser", body=tool_call("navigate"))
+
+    assert "ACC_001" in denied.json()["error"]["message"]
+    assert allowed.status_code == 200
+    assert len(server.seen) == 1, "회수된 도구 호출이 사이드카에 닿았다"
+
+
+async def test_a_sidecar_that_resolves_publicly_is_never_sent_to(tmp_path):
+    """사이드카는 사이드카 네트워크의 사설 주소에만 있다 — 공인 주소로 풀리면 보내지 않는다."""
+    registry, server = Identities(), Server()
+    registry.allowed.add("browser/navigate")
+    target = termination(tmp_path, registry, server, addresses={SIDECAR_HOST: PUBLIC})
+
+    async with client_for(target) as client:
+        response = await post(client, server="browser", body=tool_call("navigate"))
+
+    assert response.status_code == 502
+    assert server.seen == []
+
+
+async def test_a_stdio_server_is_not_reachable_through_the_proxy(tmp_path):
+    """stdio 서버는 컨테이너 안이다 — 같은 이름의 원격 서버를 만들어 내지 않는다."""
+    registry, server = Identities(), Server()
+    registry.allowed.add("fs/read_file")
+    target = termination(tmp_path, registry, server)
+
+    async with client_for(target) as client:
+        response = await post(client, server="fs", body=tool_call("read_file"))
+
+    assert response.status_code == 404
+    assert server.seen == []

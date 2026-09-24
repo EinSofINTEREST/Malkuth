@@ -10,13 +10,14 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import os
-from collections.abc import Awaitable, Mapping
+from collections.abc import Awaitable, Collection, Mapping
 from typing import Any
 from urllib.parse import urlsplit
 
 import structlog
 import uvicorn
 
+from malkuth.access.baselines import url_target
 from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
 from malkuth.observability.metrics import DEFAULT_METRICS_PORT, Metrics, start_metrics_server
 
@@ -29,9 +30,10 @@ PRIVATE_DESTINATIONS_ENV = "MALKUTH_EGRESS_PRIVATE_DESTINATIONS"
 """사설 주소로 풀려도 되는 목적지 — 쉼표로. 운영자가 명시한 것만 (예: 사내 provider 대역)."""
 ANTHROPIC_UPSTREAM_ENV = "MALKUTH_EGRESS_ANTHROPIC_UPSTREAM"
 PLAINTEXT_UPSTREAM_ENV = "MALKUTH_EGRESS_ALLOW_PLAINTEXT_UPSTREAM"
-"""``true`` 일 때만 http provider upstream 을 받는다.
+"""``true`` 이고 목적지를 사설로 명시했을 때만 평문 ``http`` 를 받는다.
 
-프록시가 키를 실어 보내는 곳이므로 평문은 테스트용 대역에만 쓴다."""
+프록시가 키를 실어 보내는 곳이므로 평문은 사설망의 테스트 대역에만 쓴다. 스위치 하나로 모든
+목적지를 열면, 운영 설정에 실수로 들어갔을 때 공인 호스트로 자격이 평문으로 나간다 (#302)."""
 ANTHROPIC_KEY_ENV = "ANTHROPIC_API_KEY"  # noqa: S105 — 키 이름이지 값이 아니다
 PROXY_HELD_SECRETS = frozenset({ANTHROPIC_KEY_ENV})
 """프록시가 provider 호출에만 쓰는 비밀 — 원격 MCP 자격 목록에 올릴 수 없다."""
@@ -77,7 +79,7 @@ def settings(environ: Mapping[str, str]) -> dict[str, Any]:
         "private_destinations": private,
         "connect_port": port_setting(environ, CONNECT_PORT_ENV, DEFAULT_CONNECT_PORT),
         "provider_port": port_setting(environ, PROVIDER_PORT_ENV, DEFAULT_PROVIDER_PORT),
-        "anthropic_upstream": _upstream(environ),
+        "anthropic_upstream": _upstream(environ, private),
         "anthropic_key": environ.get(ANTHROPIC_KEY_ENV, ""),
         "allow_plaintext": environ.get(PLAINTEXT_UPSTREAM_ENV, "").lower() == "true",
         "repo_root": environ.get(REPO_ROOT_ENV, ""),
@@ -115,7 +117,7 @@ def port_setting(environ: Mapping[str, str], key: str, default: int) -> int:
     return port
 
 
-def _upstream(environ: Mapping[str, str]) -> str:
+def _upstream(environ: Mapping[str, str], private: frozenset[str]) -> str:
     """provider upstream — 프록시가 여기에 API 키를 실어 보내므로 평문 전송을 기본으로 막는다."""
     raw = environ.get(ANTHROPIC_UPSTREAM_ENV, DEFAULT_ANTHROPIC_UPSTREAM)
     parts = urlsplit(raw)
@@ -138,12 +140,24 @@ def _upstream(environ: Mapping[str, str]) -> str:
             "fragment",
             [ANTHROPIC_UPSTREAM_ENV],
         )
-    if parts.scheme == "http" and environ.get(PLAINTEXT_UPSTREAM_ENV, "").lower() != "true":
+    allowed = plaintext_allowed(
+        environ.get(PLAINTEXT_UPSTREAM_ENV, "").lower() == "true", url_target(raw), private
+    )
+    if parts.scheme == "http" and not allowed:
         raise _config(
-            "provider upstream must use https — the proxy sends the provider key to it",
-            [ANTHROPIC_UPSTREAM_ENV, PLAINTEXT_UPSTREAM_ENV],
+            "provider upstream must use https — the proxy sends the provider key to it; plain "
+            "http is accepted only for a destination listed as private",
+            [ANTHROPIC_UPSTREAM_ENV, PLAINTEXT_UPSTREAM_ENV, PRIVATE_DESTINATIONS_ENV],
         )
     return raw
+
+
+def plaintext_allowed(switch: bool, target: str | None, private: Collection[str]) -> bool:
+    """평문 ``http`` 로 보내도 되는가 — 스위치를 켰고, 목적지를 사설로 명시했을 때만 (#302).
+
+    공인 호스트로의 평문은 설정을 어떻게 조합해도 열리지 않는다.
+    """
+    return switch and target is not None and target in private
 
 
 def _config(message: str, keys: list[str]) -> MalkuthError:

@@ -229,8 +229,10 @@ class McpTermination:
     ) -> Response:
         agent, server = owner
         parts = urlsplit(upstream.url)
-        if parts.scheme == "http" and not self.allow_plaintext:
-            # 도구 인자와 결과도 민감하다 — 자격 없는 서버라도 평문은 명시 허용(테스트 대역)일 때만
+        plaintext = self.allow_plaintext and upstream.target in self.private_destinations
+        if parts.scheme == "http" and not plaintext:
+            # 도구 인자와 결과도 민감하다 — 평문은 스위치를 켜고 사설로 명시한 목적지만.
+            # 스위치 하나로 모든 서버를 열면 운영 설정의 실수가 공인 호스트로의 평문이 된다 (#302)
             log.error("mcp over plaintext refused", agent=agent,
                       resource=ResourceKind.EGRESS.value, target=upstream.target)  # fmt: skip
             return _http_error(502, "remote mcp server must use https")

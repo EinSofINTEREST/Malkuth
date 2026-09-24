@@ -165,8 +165,9 @@ curl -X POST -H "Authorization: Bearer $TOKEN" -H 'content-type: application/jso
 ```
 
 `condition` 없는 edge 가 둘인 노드도 finding 이다 (`mode_rules`, `GRAPH_001`, `node_id` 와
-`targets` 포함): 두 대상이 병렬로 돌다 출력이 부딪혀 run 이 죽는다. 병렬 분기는 아직 지원하지
-않는다.
+`targets` 포함). 옆에 조건 edge 가 없으면 두 대상이 병렬로 돌고, 반복 카운터 `_iterations` 를
+포함한 공유 state 에 두 분기를 합치는 규칙이 없어 run 이 실패한다. 조건 edge 옆이라면 기본
+경로로는 첫 번째만 쓰인다. 병렬 분기는 아직 지원하지 않는다.
 
 finding 은 에러 상태가 아니라 `200` 이다 — "아직 유효한가?" 에 대한 정상적인 답이기
 때문이다. 초안 형식 자체가 아니면 `400` (`VAL_002`).

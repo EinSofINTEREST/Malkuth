@@ -85,9 +85,10 @@ The graph is the wiring module: attaching or detaching an agent is a YAML change
 - `connections` — the A2A peer-call allowlist (direction matters, peers stay equal)
 - Deploy-time validation rejects dangling refs, unreachable nodes, and mode violations
 - A node leaves by **one path at a time**: it may have at most one edge without a `condition`.
-  Two unconditional edges would run both targets in parallel, and the state has no rule for
-  merging two branches, so the run would fail midway. Give the edges conditions instead; an
-  unconditional edge beside conditional ones is the fallback route
+  Two unconditional edges would run both targets in parallel, and shared state (including the
+  iteration counter `_iterations`) has no rule for merging two branches, so the run would fail
+  midway. Give the edges conditions instead; one unconditional edge beside conditional ones is
+  the fallback route
 
 ## Groups
 

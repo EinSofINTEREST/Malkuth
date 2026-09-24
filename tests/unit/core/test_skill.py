@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
 import pytest
 from pydantic import BaseModel
@@ -43,8 +43,8 @@ def test_schema_snapshot():
         "parameters": {
             "type": "object",
             "properties": {
-                "query": {"type": "string"},
-                "max_results": {"type": "integer", "default": 10},
+                "query": {"type": "string", "description": "검색 질의"},
+                "max_results": {"type": "integer", "description": "최대 결과 개수", "default": 10},
             },
             "required": ["query"],
         },
@@ -198,7 +198,8 @@ async def _advanced(
 def test_str_enum_becomes_enum_schema():
     props = build_spec(_advanced).parameters["properties"]
 
-    assert props["priority"] == {"type": "string", "enum": ["low", "high"]}
+    assert props["priority"]["type"] == "string"
+    assert props["priority"]["enum"] == ["low", "high"]
 
 
 def test_pydantic_model_becomes_json_schema():
@@ -278,7 +279,7 @@ def test_any_valued_dict_stays_unconstrained():
     """값이 Any 면 제약을 만들지 않는다 — 없는 계약을 지어내지 않기 위해."""
     props = build_spec(_untyped_mapping).parameters["properties"]
 
-    assert props["raw"] == {"type": "object", "additionalProperties": {}}
+    assert props["raw"] == {"type": "object", "additionalProperties": True}
 
 
 # --- silent degradation 을 드러내기 ---------------------------------------------
@@ -399,3 +400,73 @@ def test_untyped_warning_also_uses_the_exposed_name(monkeypatch):
 
     warned = [r for r in recorded if "have no type" in r["event"]]
     assert warned[0]["tool"] == "renamed"
+
+
+# --- pydantic 위임 (#320) ---------------------------------------------------------
+
+
+class Address(BaseModel):
+    city: str
+
+
+class Person(BaseModel):
+    name: str
+    home: Address
+
+
+async def _rich(
+    ctx: SkillContext,
+    mode: Literal["fast", "thorough"],
+    person: Person,
+    people: list[Person],
+    level: Priority = Priority.LOW,
+) -> None:
+    """풍부한 타입.
+
+    Args:
+        mode: 탐색 방식
+        person: 대상 한 명
+        people (list[Person]): 대상 여러 명 —
+            이어지는 줄도 설명이다
+        level: 중요도
+
+    Returns:
+        없음
+    """
+
+
+def test_literal_becomes_an_enum():
+    """Literal 이 {} 가 되면 모델은 허용 값을 모른 채 아무 문자열이나 보낸다."""
+    props = build_spec(_rich).parameters["properties"]
+
+    assert props["mode"]["enum"] == ["fast", "thorough"]
+    assert props["mode"]["type"] == "string"
+
+
+def test_nested_model_references_resolve_at_the_top_level():
+    """중첩 모델의 $defs 가 파라미터 안에 갇히면 #/$defs/... 참조가 풀리지 않는다."""
+    parameters = build_spec(_rich).parameters
+    props = parameters["properties"]
+
+    assert props["person"]["properties"]["home"] == {"$ref": "#/$defs/Address"}
+    assert props["people"]["items"] == {"$ref": "#/$defs/Person"}
+    assert set(parameters["$defs"]) == {"Address", "Person"}
+    for schema in props.values():
+        assert "$defs" not in schema
+
+
+def test_parameter_descriptions_come_from_the_args_section():
+    props = build_spec(_rich).parameters["properties"]
+
+    assert props["mode"]["description"] == "탐색 방식"
+    assert props["people"]["description"] == "대상 여러 명 — 이어지는 줄도 설명이다"
+    assert props["level"]["description"] == "중요도"
+    assert props["level"]["default"] == "low"
+
+
+def test_no_defs_key_without_nested_models():
+    assert "$defs" not in build_spec(_typed).parameters
+
+
+def test_the_description_stops_before_any_section():
+    assert build_spec(_rich).description == "풍부한 타입."

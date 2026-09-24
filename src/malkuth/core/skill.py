@@ -7,22 +7,12 @@
 from __future__ import annotations
 
 import inspect
-import types
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import (
-    TYPE_CHECKING,
-    Any,
-    Protocol,
-    Union,
-    get_args,
-    get_origin,
-    get_type_hints,
-    runtime_checkable,
-)
+from typing import TYPE_CHECKING, Any, Protocol, get_type_hints, runtime_checkable
 
 import structlog
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, PydanticUserError, TypeAdapter
 
 if TYPE_CHECKING:
     from malkuth.core.agent import SecretsProvider
@@ -94,62 +84,35 @@ class SkillSpec(BaseModel):
         }
 
 
-_PRIMITIVE_SCHEMAS: dict[type, dict[str, Any]] = {
-    str: {"type": "string"},
-    int: {"type": "integer"},
-    float: {"type": "number"},
-    bool: {"type": "boolean"},
-}
+DEFS_KEY = "$defs"
 
 
 def _schema_for_annotation(annotation: Any) -> dict[str, Any]:
-    """타입 힌트를 JSON schema 조각으로 변환한다."""
+    """타입 힌트를 JSON schema 조각으로 변환한다 — pydantic 에 위임한다.
+
+    손으로 짠 변환은 ``Literal`` 을 ``{}`` 로, 중첩 모델의 ``$defs`` 를 잘린 참조로 냈다
+    (#320). pydantic 이 모델 계약과 **같은 규칙**으로 만든 스키마를 쓴다. 참조 대상
+    (``$defs``)은 여기 남기고 :func:`build_spec` 이 최상위로 끌어올린다.
+    """
     if annotation is Any or annotation is inspect.Parameter.empty:
         return {}
+    try:
+        return TypeAdapter(annotation).json_schema()
+    except (PydanticUserError, NameError, TypeError):
+        # 해석 불가한 힌트(문자열 forward ref 등) — 타입 없는 파라미터로 남기고
+        # build_spec 의 "no type" 경고가 드러낸다
+        return {}
 
-    if annotation in _PRIMITIVE_SCHEMAS:
-        return dict(_PRIMITIVE_SCHEMAS[annotation])
 
-    origin = get_origin(annotation)
+def _hoist_defs(schema: dict[str, Any], defs: dict[str, Any]) -> dict[str, Any]:
+    """파라미터 스키마의 ``$defs`` 를 모은다 — 참조(``#/$defs/X``)는 최상위에서 풀린다."""
+    if DEFS_KEY not in schema:
+        return schema
+    defs.update(schema[DEFS_KEY])
+    return {key: value for key, value in schema.items() if key != DEFS_KEY}
 
-    if origin in (Union, types.UnionType):
-        # None 을 버리면 str | None 이 string 전용 스키마가 되어, 모델이 null 을
-        # 보낼 수 없는데 default 는 None 인 모순된 계약이 만들어진다
-        schemas = [
-            {"type": "null"} if arg is type(None) else _schema_for_annotation(arg)
-            for arg in get_args(annotation)
-        ]
-        if not schemas:
-            return {}
-        if len(schemas) == 1:
-            return schemas[0]
-        return {"anyOf": schemas}
 
-    if origin in (list, Sequence, tuple):
-        args = list(get_args(annotation))
-        items = _schema_for_annotation(args[0]) if args else {}
-        return {"type": "array", "items": items}
-
-    if origin is dict:
-        dict_args = get_args(annotation)
-        if len(dict_args) == 2:
-            return {
-                "type": "object",
-                "additionalProperties": _schema_for_annotation(dict_args[1]),
-            }
-        return {"type": "object"}
-
-    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
-        return annotation.model_json_schema()
-
-    if isinstance(annotation, type) and issubclass(annotation, str):
-        # StrEnum 등 str 서브클래스
-        values = getattr(annotation, "__members__", None)
-        if values:
-            return {"type": "string", "enum": [str(v.value) for v in values.values()]}
-        return {"type": "string"}
-
-    return {}
+_SECTION_HEADERS = {"Args", "Returns", "Raises", "Yields", "Examples", "Example", "Note", "Notes"}
 
 
 def _description_from_docstring(fn: Callable[..., Any]) -> str:
@@ -162,10 +125,44 @@ def _description_from_docstring(fn: Callable[..., Any]) -> str:
         stripped = line.strip()
         if not stripped:
             break
-        if stripped.rstrip(":") in {"Args", "Returns", "Raises"}:
+        if stripped.rstrip(":") in _SECTION_HEADERS:
             break
         lines.append(stripped)
     return " ".join(lines)
+
+
+def _argument_descriptions(fn: Callable[..., Any]) -> dict[str, str]:
+    """Google-style ``Args:`` 절의 파라미터 설명 — 모델이 각 인자의 뜻을 알게 한다.
+
+    ``name: 설명`` 한 줄에, 더 깊이 들여쓴 줄은 앞 설명의 이어짐이다.
+    ``name (type): 설명`` 형태도 받는다.
+    """
+    doc = inspect.getdoc(fn)
+    if not doc:
+        return {}
+    descriptions: dict[str, str] = {}
+    in_args = False
+    entry_indent: int | None = None
+    current: str | None = None
+    for line in doc.splitlines():
+        stripped = line.strip()
+        if not in_args:
+            in_args = stripped == "Args:"
+            continue
+        if not stripped:
+            continue
+        indent = len(line) - len(line.lstrip())
+        if indent == 0:
+            break  # 다음 절 (Returns: 등)
+        if entry_indent is None:
+            entry_indent = indent
+        if indent == entry_indent and ":" in stripped:
+            name, _, text = stripped.partition(":")
+            current = name.split("(", 1)[0].strip()
+            descriptions[current] = text.strip()
+        elif current is not None:
+            descriptions[current] = f"{descriptions[current]} {stripped}".strip()
+    return descriptions
 
 
 def build_spec(fn: Callable[..., Any], *, name: str | None = None) -> SkillSpec:
@@ -223,18 +220,22 @@ def build_spec(fn: Callable[..., Any], *, name: str | None = None) -> SkillSpec:
     properties: dict[str, Any] = {}
     required: list[str] = []
     untyped: list[str] = []
+    defs: dict[str, Any] = {}
+    described = _argument_descriptions(fn)
 
     for param in params[1:]:
         if param.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
             continue
         annotation = hints.get(param.name, param.annotation)
-        schema = _schema_for_annotation(annotation)
+        schema = _hoist_defs(_schema_for_annotation(annotation), defs)
+        if not schema:
+            untyped.append(param.name)
+        if param.name in described:
+            schema = {**schema, "description": described[param.name]}
         if param.default is inspect.Parameter.empty:
             required.append(param.name)
         else:
             schema = {**schema, "default": param.default}
-        if not schema.get("type") and "anyOf" not in schema:
-            untyped.append(param.name)
         properties[param.name] = schema
 
     if untyped:
@@ -251,6 +252,8 @@ def build_spec(fn: Callable[..., Any], *, name: str | None = None) -> SkillSpec:
         "properties": properties,
         "required": required,
     }
+    if defs:
+        parameters[DEFS_KEY] = defs
 
     return SkillSpec(
         name=name or fn.__name__,

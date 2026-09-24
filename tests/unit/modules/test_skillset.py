@@ -34,8 +34,8 @@ def test_tool_schema_snapshot(loader):
         "parameters": {
             "type": "object",
             "properties": {
-                "query": {"type": "string"},
-                "max_results": {"type": "integer", "default": 10},
+                "query": {"type": "string", "description": "검색 질의"},
+                "max_results": {"type": "integer", "description": "최대 결과 개수", "default": 10},
             },
             "required": ["query"],
         },

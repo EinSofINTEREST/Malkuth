@@ -29,11 +29,15 @@ from malkuth.modules.registry import ModuleRegistry
 from malkuth.runtime.memory import issue_token
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from fastapi import FastAPI
 
     from malkuth.access.client import AccessClient
     from malkuth.config import MalkuthConfig
     from malkuth.core.manifest import AgentManifest, GroupManifest
+    from malkuth.memory.entry import MemoryEntry
+    from malkuth.memory.store import MemoryStore
     from malkuth.observability.metrics import Metrics
 
 log = structlog.get_logger(__name__)
@@ -144,6 +148,8 @@ def build_deployment(
     indexer = build_index_registry(embedding, metrics=metrics)
 
     service = MemoryService(store=create_store(config.memory), metrics=metrics)
+    # 인덱스는 프로세스 메모리다 — 되읽지 않으면 재시작 전의 기억이 검색되지 않는다 (#312)
+    indexer.warm(_stored_entries(service.store), chunk)
     recall = Recall(indexes=indexer.indexes, metrics=metrics, latest_resolver=service.store)
     tokens = TokenRegistry()
 
@@ -182,6 +188,12 @@ def build_deployment(
         tokens=issued,
         indexer=indexer,
     )
+
+
+def _stored_entries(store: MemoryStore) -> Iterator[MemoryEntry]:
+    """저장된 전체 항목 — space 별로 오래된 것부터 (저장 순서대로 색인한다)."""
+    for space in store.spaces():
+        yield from reversed(store.list_space(space, limit=None))
 
 
 __all__ = ["GLOBAL_GROUP", "MemoryDeployment", "build_deployment"]

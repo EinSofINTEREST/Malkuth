@@ -116,7 +116,7 @@ class PostgresMemoryStore:
         return MemoryEntry.from_row(row) if row else None
 
     def list_space(
-        self, space: str, *, kinds: Sequence[MemoryKind] | None = None, limit: int = 100
+        self, space: str, *, kinds: Sequence[MemoryKind] | None = None, limit: int | None = 100
     ) -> tuple[MemoryEntry, ...]:
         """Read a space's entries, newest first.
 
@@ -131,13 +131,22 @@ class PostgresMemoryStore:
             query += " AND kind = ANY(%s)"
             params.append([str(k) for k in kinds])
         # ctid 는 SQLite rowid 에 대응하는 물리 순서 — 같은 타임스탬프의 tie-break
-        query += " ORDER BY created_at DESC, ctid DESC LIMIT %s"
-        params.append(limit)
+        query += " ORDER BY created_at DESC, ctid DESC"
+        if limit is not None:
+            query += " LIMIT %s"
+            params.append(limit)
 
         with self._conn.cursor() as cursor:
             cursor.execute(query, params)
             rows = cursor.fetchall()
         return tuple(MemoryEntry.from_row(r) for r in rows)
+
+    def spaces(self) -> tuple[str, ...]:
+        """항목이 있는 space 들."""
+        with self._conn.cursor() as cursor:
+            cursor.execute("SELECT DISTINCT space FROM memory_entries ORDER BY space")
+            rows = cursor.fetchall()
+        return tuple(str(r["space"]) for r in rows)
 
     def latest_of_chain(self, entry_id: str) -> MemoryEntry | None:
         """Follow the correction chain forward.

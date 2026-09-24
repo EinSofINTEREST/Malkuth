@@ -267,6 +267,9 @@ class IndexQueue:
     max_failures: int = DEFAULT_MAX_INDEX_FAILURES
     pending: list[tuple[MemoryEntry, ChunkSpec]] = field(default_factory=list)
     failures: dict[str, int] = field(default_factory=dict)
+    since: datetime | None = None
+    """지연을 이 시각부터 잰다 — warm-up 시작. 재시작 전에는 검색되던 항목이라, 저장 시각부터
+    재면 며칠짜리 지연이 찍혀 실제로 밀린 새 항목과 구분되지 않는다."""
 
     def submit(self, entry: MemoryEntry, spec: ChunkSpec) -> None:
         """색인 요청을 큐에 넣는다 — 저장 경로를 막지 않는다."""
@@ -292,7 +295,8 @@ class IndexQueue:
         reference = now or datetime.now(UTC)
         oldest: dict[str, float] = {}
         for entry, _spec in self.pending:
-            age = (reference - entry.created_at).total_seconds()
+            queued = entry.created_at if self.since is None else max(entry.created_at, self.since)
+            age = (reference - queued).total_seconds()
             oldest[entry.space] = max(oldest.get(entry.space, 0.0), age)
         return oldest
 
@@ -377,6 +381,34 @@ class IndexRegistry:
     indexes: dict[str, SpaceIndex] = field(default_factory=dict)
     queue: IndexQueue = field(default_factory=IndexQueue)
     metrics: Metrics | None = None
+    warming: bool = False
+    """기동 warm-up 이 큐에 남아 있는지 — 큐가 처음 빌 때 완료를 한 번 알린다."""
+
+    def warm(self, entries: Iterable[MemoryEntry], spec: ChunkSpec) -> int:
+        """Queue stored entries so a restarted service can search them again.
+
+        저장소의 항목을 색인 큐에 넣습니다. 인덱스는 프로세스 메모리에만 있어, 재시작하면
+        저장된 기억이 검색되지 않습니다 (#312). 별도 경로를 두지 않고 **평소의 색인 큐**를
+        탑니다 — 진행은 ``malkuth_memory_index_lag_seconds`` 로, 실패는 ``MEM_003`` 으로
+        드러나는 것이 평소와 같습니다.
+
+        Args:
+            entries: Every stored entry, oldest first.
+            spec: Chunking policy.
+
+        Returns:
+            The number of entries queued.
+        """
+        queued = 0
+        spaces: set[str] = set()
+        self.queue.since = datetime.now(UTC)
+        for entry in entries:
+            self.submit(entry, spec)
+            spaces.add(entry.space)
+            queued += 1
+        self.warming = queued > 0
+        log.info("memory index warm-up queued", entries=queued, spaces=len(spaces))
+        return queued
 
     def index_for(self, space: str) -> SpaceIndex:
         """space 의 인덱스 — 없으면 만든다."""
@@ -399,6 +431,13 @@ class IndexRegistry:
         finally:
             # 실패해 큐에 남아도 관측한다 — 그때가 지연이 가장 중요한 시점이다
             self._observe()
+            if self.warming and self.queue.lag == 0:
+                self.warming = False
+                log.info(
+                    "memory index warm-up completed",
+                    entries=sum(len(index.entry_ids) for index in self.indexes.values()),
+                    spaces=len(self.indexes),
+                )
 
     def _observe(self, *, now: datetime | None = None) -> None:
         """space 크기와 인덱싱 지연을 게이지에 반영한다 — 메트릭 미주입 시 무동작."""

@@ -599,3 +599,37 @@ def test_auto_recall_is_counted_as_an_operation():
         )
         == 1.0
     )
+
+
+# --- 재시작 warm-up (#312) ---------------------------------------------------------
+
+
+def test_warm_up_lag_counts_from_the_restart_not_from_when_it_was_stored():
+    """재시작 전에는 검색되던 기억이다 — 저장 시각부터 재면 며칠짜리 지연이 찍힌다."""
+    from datetime import UTC, datetime, timedelta
+
+    metrics = make_metrics()
+    registry = IndexRegistry(metrics=metrics)
+    stored_long_ago = entry("오래된 사실", created_at=datetime.now(UTC) - timedelta(days=3))
+
+    registry.warm([stored_long_ago], spec())
+
+    assert registry.warming
+    assert 0.0 <= gauge_value(metrics, "malkuth_memory_index_lag_seconds", space=SPACE) < 60.0
+
+
+def test_warm_up_completes_when_the_queue_first_empties():
+    registry = IndexRegistry()
+    registry.warm([entry("첫째"), entry("둘째")], spec())
+
+    registry.drain()
+
+    assert not registry.warming
+    assert len(registry.indexes[SPACE].entry_ids) == 2
+
+
+def test_nothing_to_warm_is_not_a_warm_up():
+    registry = IndexRegistry()
+
+    assert registry.warm([], spec()) == 0
+    assert not registry.warming

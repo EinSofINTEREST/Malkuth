@@ -14,7 +14,14 @@ from typing import TYPE_CHECKING, Any
 
 import anthropic
 
-from malkuth.agentd.executor import ModelResponse, ToolCall
+from malkuth.agentd.executor import (
+    AssistantTurn,
+    Message,
+    ModelResponse,
+    ToolCall,
+    ToolTurn,
+    UserTurn,
+)
 from malkuth.core.agent import ModelUsage
 from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
 
@@ -76,17 +83,23 @@ class AnthropicModel:
             # provider SDK 재시도와 중복되면 backoff 가 곱해진다 (05 Retry Layering)
             self.client = anthropic.AsyncAnthropic(max_retries=0)
 
-    async def run(self, prompt: str, tools: Sequence[Any]) -> ModelResponse:
+    async def run(
+        self, system: str, messages: Sequence[Message], tools: Sequence[Any]
+    ) -> ModelResponse:
         """Run one model turn.
 
         한 턴을 실행합니다. 재시도·라우팅 판단이 걸린 실패는 ``MODEL``
         카테고리로 변환합니다.
 
+        대화는 provider 의 구조 그대로 보낸다: 운영자 지시는 ``system``, 도구 호출은 assistant 의
+        ``tool_use`` 블록, 결과는 그 ``id`` 를 가리키는 ``tool_result`` 블록 (#308).
+
         **설정 오류는 그대로 전파합니다**: context 초과가 아닌 400 을
         ``LLM_002`` 로 덮으면 운영자가 프롬프트만 줄이다 시간을 버립니다.
 
         Args:
-            prompt: The rendered prompt for this turn.
+            system: Operator instructions (the promptset's ``system`` template).
+            messages: The conversation so far — 태스크 입력, 모델 응답, 도구 결과.
             tools: Tool specs the model may call.
 
         Returns:
@@ -103,8 +116,10 @@ class AnthropicModel:
         request: dict[str, Any] = {
             "model": self.config.name,
             "max_tokens": self.config.max_tokens or DEFAULT_MAX_TOKENS,
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": [to_message_param(message) for message in messages],
         }
+        if system:
+            request["system"] = system
         if self.config.effort is not None:
             # sampling 파라미터는 현재 API 가 받지 않는다 — effort 가 그 자리다
             request["output_config"] = {"effort": self.config.effort}
@@ -176,7 +191,42 @@ class AnthropicModel:
                 cause=type(err).__name__,
             ) from err
 
-        return ModelResponse(content=text, tool_calls=tool_calls, usage=usage)
+        # 원본 블록을 들고 간다 — thinking 블록은 다음 턴에 바뀌지 않은 채 돌아가야 한다
+        return ModelResponse(content=text, tool_calls=tool_calls, usage=usage, raw=blocks)
+
+
+def to_message_param(message: Message) -> dict[str, Any]:
+    """One framework conversation turn in the provider's message shape."""
+    if isinstance(message, UserTurn):
+        return {"role": "user", "content": [{"type": "text", "text": p} for p in message.parts]}
+    if isinstance(message, AssistantTurn):
+        return {"role": "assistant", "content": _assistant_content(message)}
+    if isinstance(message, ToolTurn):
+        return {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": outcome.call_id,
+                    "content": outcome.content,
+                    **({"is_error": True} if outcome.is_error else {}),
+                }
+                for outcome in message.outcomes
+            ],
+        }
+    raise TypeError(f"unknown conversation turn: {type(message).__name__}")
+
+
+def _assistant_content(turn: AssistantTurn) -> list[Any]:
+    """provider 가 준 블록이 있으면 그대로 — 없으면(다른 모델이 만든 턴) 텍스트와 호출로 짓는다."""
+    if turn.raw is not None:
+        return list(turn.raw)
+    content: list[Any] = [{"type": "text", "text": turn.content}] if turn.content else []
+    content += [
+        {"type": "tool_use", "id": call.id, "name": call.name, "input": dict(call.arguments)}
+        for call in turn.tool_calls
+    ]
+    return content
 
 
 def _to_tool_schema(tool: Any) -> dict[str, Any]:
@@ -193,4 +243,4 @@ def _to_tool_schema(tool: Any) -> dict[str, Any]:
     }
 
 
-__all__ = ["DEFAULT_MAX_TOKENS", "AnthropicModel"]
+__all__ = ["DEFAULT_MAX_TOKENS", "AnthropicModel", "to_message_param"]

@@ -10,6 +10,7 @@ import anthropic
 import httpx
 import pytest
 
+from malkuth.agentd.executor import AssistantTurn, ToolCall, ToolOutcome, ToolTurn, UserTurn
 from malkuth.agentd.providers.anthropic import DEFAULT_MAX_TOKENS, AnthropicModel
 from malkuth.core.errors import (
     RATE_LIMIT_RETRY,
@@ -21,6 +22,7 @@ from malkuth.core.manifest import ModelConfig
 from malkuth.core.skill import SkillSpec
 
 MODEL = "claude-sonnet-5"
+OPENING = [UserTurn(parts=("prompt",))]
 
 
 class Block:
@@ -91,7 +93,7 @@ async def test_manifest_decides_the_model():
     """모델명을 코드에 하드코딩하지 않는다 (02 Manifest Rules 3)."""
     provider = model(Message([Block(type="text", text="done")]))
 
-    await provider.run("prompt", [])
+    await provider.run("", OPENING, [])
 
     assert provider.client.messages.requests[0]["model"] == MODEL
 
@@ -100,7 +102,7 @@ async def test_max_tokens_falls_back_to_the_default():
     """SDK 가 필수로 요구하므로 manifest 가 비워두면 기본값을 쓴다."""
     provider = model(Message([Block(type="text", text="done")]))
 
-    await provider.run("prompt", [])
+    await provider.run("", OPENING, [])
 
     assert provider.client.messages.requests[0]["max_tokens"] == DEFAULT_MAX_TOKENS
 
@@ -108,7 +110,7 @@ async def test_max_tokens_falls_back_to_the_default():
 async def test_declared_limits_reach_the_request():
     provider = model(Message([Block(type="text", text="done")]), max_tokens=1024, effort="high")
 
-    await provider.run("prompt", [])
+    await provider.run("", OPENING, [])
 
     request = provider.client.messages.requests[0]
     assert request["max_tokens"] == 1024
@@ -119,7 +121,7 @@ async def test_effort_is_omitted_when_undeclared():
     """선언하지 않은 값을 임의로 채우면 manifest 가 계약이 아니게 된다."""
     provider = model(Message([Block(type="text", text="done")]))
 
-    await provider.run("prompt", [])
+    await provider.run("", OPENING, [])
 
     assert "output_config" not in provider.client.messages.requests[0]
 
@@ -132,7 +134,7 @@ async def test_sampling_parameters_are_never_sent():
     """
     provider = model(Message([Block(type="text", text="done")]), effort="high")
 
-    await provider.run("prompt", [])
+    await provider.run("", OPENING, [])
 
     request = provider.client.messages.requests[0]
     for rejected in ("temperature", "top_p", "top_k"):
@@ -148,7 +150,7 @@ async def test_tool_schemas_keep_the_mcp_namespace():
     )
     provider = model(Message([Block(type="text", text="done")]))
 
-    await provider.run("prompt", [spec])
+    await provider.run("", OPENING, [spec])
 
     tool = provider.client.messages.requests[0]["tools"][0]
     assert tool["name"] == "mcp__filesystem__read_file"
@@ -158,7 +160,7 @@ async def test_tool_schemas_keep_the_mcp_namespace():
 async def test_tools_are_omitted_when_none_are_bound():
     provider = model(Message([Block(type="text", text="done")]))
 
-    await provider.run("prompt", [])
+    await provider.run("", OPENING, [])
 
     assert "tools" not in provider.client.messages.requests[0]
 
@@ -169,7 +171,7 @@ async def test_tools_are_omitted_when_none_are_bound():
 async def test_text_response_is_final():
     provider = model(Message([Block(type="text", text="answer")]))
 
-    response = await provider.run("prompt", [])
+    response = await provider.run("", OPENING, [])
 
     assert response.content == "answer"
     assert response.is_final
@@ -185,7 +187,7 @@ async def test_tool_use_becomes_a_tool_call():
         )
     )
 
-    response = await provider.run("prompt", [])
+    response = await provider.run("", OPENING, [])
 
     assert not response.is_final
     assert response.tool_calls[0].name == "search"
@@ -197,7 +199,7 @@ async def test_usage_is_collected():
     """토큰 집계가 빠지면 비용 관측과 quota 감시가 함께 무너진다."""
     provider = model(Message([Block(type="text", text="x")], usage=Usage(120, 45)))
 
-    response = await provider.run("prompt", [])
+    response = await provider.run("", OPENING, [])
 
     assert response.usage.input_tokens == 120
     assert response.usage.output_tokens == 45
@@ -208,7 +210,7 @@ async def test_unreadable_response_is_llm_004():
     provider = model(Message([Block(type="tool_use")]))  # id/name 없음
 
     with pytest.raises(MalkuthError) as exc_info:
-        await provider.run("prompt", [])
+        await provider.run("", OPENING, [])
 
     assert exc_info.value.code == ErrorCode.LLM_004
     assert exc_info.value.category is ErrorCategory.MODEL
@@ -222,7 +224,7 @@ async def test_rate_limit_is_retryable_llm_001():
     provider = model(api_error(anthropic.RateLimitError))
 
     with pytest.raises(MalkuthError) as exc_info:
-        await provider.run("prompt", [])
+        await provider.run("", OPENING, [])
 
     assert exc_info.value.code == ErrorCode.LLM_001
     assert exc_info.value.retryable
@@ -237,7 +239,7 @@ async def test_rate_limit_carries_its_own_category():
     provider = model(api_error(anthropic.RateLimitError))
 
     with pytest.raises(MalkuthError) as exc_info:
-        await provider.run("prompt", [])
+        await provider.run("", OPENING, [])
 
     assert exc_info.value.category is ErrorCategory.RATE_LIMIT
     # 정책이 실제로 이 에러를 집는지 — 카테고리 단언만으로는 놓치는 계약
@@ -249,7 +251,7 @@ async def test_other_model_failures_keep_the_model_category():
     provider = model(api_error(anthropic.InternalServerError))
 
     with pytest.raises(MalkuthError) as exc_info:
-        await provider.run("prompt", [])
+        await provider.run("", OPENING, [])
 
     assert exc_info.value.category is ErrorCategory.MODEL
     assert not RATE_LIMIT_RETRY.should_retry(exc_info.value)
@@ -260,7 +262,7 @@ async def test_context_overflow_is_llm_002_and_not_retryable():
     provider = model(api_error(anthropic.BadRequestError, "prompt is too long: 300000 tokens"))
 
     with pytest.raises(MalkuthError) as exc_info:
-        await provider.run("prompt", [])
+        await provider.run("", OPENING, [])
 
     assert exc_info.value.code == ErrorCode.LLM_002
     assert not exc_info.value.retryable
@@ -271,14 +273,14 @@ async def test_other_bad_requests_are_not_disguised_as_context_overflow():
     provider = model(api_error(anthropic.BadRequestError, "unknown model: typo"))
 
     with pytest.raises(anthropic.BadRequestError):
-        await provider.run("prompt", [])
+        await provider.run("", OPENING, [])
 
 
 async def test_server_error_is_retryable_llm_003():
     provider = model(api_error(anthropic.InternalServerError))
 
     with pytest.raises(MalkuthError) as exc_info:
-        await provider.run("prompt", [])
+        await provider.run("", OPENING, [])
 
     assert exc_info.value.code == ErrorCode.LLM_003
     assert exc_info.value.retryable
@@ -289,7 +291,7 @@ async def test_connection_error_is_retryable_llm_003():
     provider = model(anthropic.APIConnectionError(request=request))
 
     with pytest.raises(MalkuthError) as exc_info:
-        await provider.run("prompt", [])
+        await provider.run("", OPENING, [])
 
     assert exc_info.value.code == ErrorCode.LLM_003
 
@@ -311,6 +313,92 @@ async def test_malformed_tool_arguments_are_llm_004():
     provider = model(Message([Block(type="tool_use", id="tu-1", name="search", input=["query"])]))
 
     with pytest.raises(MalkuthError) as exc_info:
-        await provider.run("prompt", [])
+        await provider.run("", OPENING, [])
 
     assert exc_info.value.code == ErrorCode.LLM_004
+
+
+# --- 대화 구조 (#308) ------------------------------------------------------------------
+
+
+async def test_system_goes_in_its_own_field_not_the_user_message():
+    """운영자 지시와 태스크 입력이 한 문자열이면 도구 결과가 지시와 같은 자리에 놓인다."""
+    provider = model(Message([Block(type="text", text="done")]))
+
+    await provider.run("You are a researcher.", OPENING, [])
+
+    request = provider.client.messages.requests[0]
+    assert request["system"] == "You are a researcher."
+    assert request["messages"] == [
+        {"role": "user", "content": [{"type": "text", "text": "prompt"}]}
+    ]
+
+
+async def test_no_system_field_when_the_promptset_has_none():
+    provider = model(Message([Block(type="text", text="done")]))
+
+    await provider.run("", OPENING, [])
+
+    assert "system" not in provider.client.messages.requests[0]
+
+
+async def test_tool_results_answer_the_tool_use_they_belong_to():
+    """각 결과가 자기 호출의 id 를 가리켜야 모델이 어느 호출의 답인지 안다."""
+    provider = model(Message([Block(type="text", text="done")]))
+    raw = [Block(type="thinking", thinking="", signature="sig"), Block(type="tool_use")]
+    conversation = [
+        UserTurn(parts=("recalled", "prompt")),
+        AssistantTurn(
+            content="",
+            tool_calls=(ToolCall(id="t1", name="search"), ToolCall(id="t2", name="fetch")),
+            raw=raw,
+        ),
+        ToolTurn(
+            outcomes=(
+                ToolOutcome(call_id="t1", content="found"),
+                ToolOutcome(call_id="t2", content="boom", is_error=True),
+            )
+        ),
+    ]
+
+    await provider.run("sys", conversation, [])
+
+    user, assistant, results = provider.client.messages.requests[0]["messages"]
+    assert [p["text"] for p in user["content"]] == ["recalled", "prompt"]
+    # provider 가 준 블록(thinking 포함)을 바꾸지 않고 되돌린다
+    assert assistant == {"role": "assistant", "content": raw}
+    assert results == {
+        "role": "user",
+        "content": [
+            {"type": "tool_result", "tool_use_id": "t1", "content": "found"},
+            {"type": "tool_result", "tool_use_id": "t2", "content": "boom", "is_error": True},
+        ],
+    }
+
+
+async def test_an_assistant_turn_without_provider_blocks_is_rebuilt():
+    provider = model(Message([Block(type="text", text="done")]))
+    turn = AssistantTurn(
+        content="let me look", tool_calls=(ToolCall(id="t1", name="search", arguments={"q": 1}),)
+    )
+
+    await provider.run("", [*OPENING, turn], [])
+
+    assistant = provider.client.messages.requests[0]["messages"][1]
+    assert assistant["content"] == [
+        {"type": "text", "text": "let me look"},
+        {"type": "tool_use", "id": "t1", "name": "search", "input": {"q": 1}},
+    ]
+
+
+async def test_the_response_keeps_the_provider_blocks_to_send_back():
+    blocks = [
+        Block(type="thinking", thinking="", signature="sig"),
+        Block(type="tool_use", id="t1", name="search", input={"q": "x"}),
+    ]
+    provider = model(Message(blocks))
+
+    response = await provider.run("", OPENING, [])
+
+    assert response.raw == blocks
+    assert response.tool_calls == (ToolCall(id="t1", name="search", arguments={"q": "x"}),)

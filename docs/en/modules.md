@@ -35,10 +35,23 @@ docstring — no hand-written JSON schema.
 
 ```python
 @skill
-async def search(ctx: SkillContext, query: str, max_results: int = 10) -> list[dict]:
-    """Run a web search and return the top results."""
+async def search(
+    ctx: SkillContext, query: str, depth: Literal["quick", "deep"] = "quick"
+) -> list[dict]:
+    """Run a web search and return the top results.
+
+    Args:
+        query: What to search for
+        depth: How far to follow result links
+    """
     ...
 ```
+
+- The docstring's first paragraph becomes the tool description; each `Args:` entry becomes
+  that parameter's `description`. Undocumented parameters reach the model with a type only.
+- Types go through pydantic, the same rules as every other contract: `Literal` and `StrEnum`
+  become `enum`, pydantic models and `list[Model]` become object schemas. Nested models are
+  collected under a top-level `$defs`, so `#/$defs/...` references resolve.
 
 Key rules: async-first, access secrets/logging via `SkillContext` only, timeouts declared
 in `skillset.yaml`, failures raised as exceptions (converted at the agentd boundary).

@@ -35,10 +35,23 @@ Skill 은 async Python 함수이며, tool 스키마는 시그니처와 docstring
 
 ```python
 @skill
-async def search(ctx: SkillContext, query: str, max_results: int = 10) -> list[dict]:
-    """웹 검색을 수행하고 상위 결과를 반환합니다."""
+async def search(
+    ctx: SkillContext, query: str, depth: Literal["quick", "deep"] = "quick"
+) -> list[dict]:
+    """웹 검색을 수행하고 상위 결과를 반환합니다.
+
+    Args:
+        query: 검색할 내용
+        depth: 결과 링크를 얼마나 따라갈지
+    """
     ...
 ```
+
+- docstring 첫 문단은 tool 설명이 되고, `Args:` 의 각 항목은 그 파라미터의 `description` 이
+  됩니다. 설명이 없는 파라미터는 타입만 모델에 닿습니다.
+- 타입은 다른 계약과 같은 규칙으로 pydantic 이 변환합니다: `Literal` 과 `StrEnum` 은
+  `enum`, pydantic 모델과 `list[Model]` 은 object 스키마가 됩니다. 중첩 모델은 최상위
+  `$defs` 에 모여 `#/$defs/...` 참조가 풀립니다.
 
 핵심 규칙: async-first, secrets/로깅은 `SkillContext` 로만 접근, timeout 은
 `skillset.yaml` 에 선언, 실패는 예외로 (agentd boundary 에서 변환).

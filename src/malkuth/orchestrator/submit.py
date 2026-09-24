@@ -18,7 +18,15 @@ import structlog
 
 from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
 from malkuth.orchestrator.builder import build_graph
-from malkuth.orchestrator.run import RunHandle, RunManager, RunStatus, ServiceRunner
+from malkuth.orchestrator.run import (
+    RESUMED_SUFFIX,
+    RunHandle,
+    RunManager,
+    RunStatus,
+    ServiceRunner,
+    iteration_thread,
+    run_generations,
+)
 from malkuth.orchestrator.state import resolve_state_schema, validate_state
 from malkuth.orchestrator.topology import GraphMode
 
@@ -364,11 +372,11 @@ class RunSubmitter:
 
         resumed = await self.start_service(
             topology,
-            # 이 프로세스가 시작하지 않은 run 은 핸들에 state 가 없다 (기록만
-            # 복원된다) — 그때는 checkpoint 가 정본이고, 그래프가 거기서
-            # 이어받는다. mission resume 과 같은 규칙이다
-            previous.state,
-            run_id=f"{run_id}:resumed",
+            # checkpoint 가 정본이다 — 이 프로세스가 시작하지 않은 run 은 핸들에 state 가 없고
+            # (기록만 복원된다), 빈 state 로 시작하면 누적이 사라지거나 필수 필드가 없어
+            # GRAPH_003 으로 거부된다 (#310)
+            await self._iteration_state(topology, previous),
+            run_id=f"{run_id}{RESUMED_SUFFIX}",
             max_iterations=max_iterations,
             is_idle=is_idle,
             sleep=sleep,
@@ -382,6 +390,37 @@ class RunSubmitter:
             iteration=previous.iteration,
         )
         return resumed
+
+    async def _iteration_state(
+        self, topology: GraphTopology, previous: RunHandle
+    ) -> dict[str, Any]:
+        """The state the next iteration starts from, read back from the checkpointer.
+
+        다음 iteration 이 받을 state 를 checkpoint 에서 읽습니다 — 살아 있는 루프가 넘겼을 값과
+        같아야 합니다. 가장 최근 iteration 이
+
+        - 끝까지 갔으면 그 **출력**
+        - 실패했으면 그 **입력** — 루프는 실패한 회차의 부분 결과를 버리고 같은 state 로 잇는다
+
+        Raises:
+            MalkuthError: STORAGE/``STOR_002`` if no iteration left a checkpoint.
+        """
+        graph = build_graph(topology, self.runtime, checkpointer=self.checkpointer)
+        for iteration in range(previous.iteration - 1, -1, -1):
+            for generation in run_generations(previous.run_id):
+                config = _thread_config(iteration_thread(generation, iteration))
+                snapshot = await graph.aget_state(config)
+                if not snapshot.values:
+                    continue  # 이 세대가 이 회차를 돌지 않았다
+                if not snapshot.next:
+                    return dict(snapshot.values)
+                return await _iteration_input(graph, config)
+        raise MalkuthError(
+            category=ErrorCategory.STORAGE,
+            code=ErrorCode.STOR_002,
+            message="service run has no iteration checkpoint to resume from",
+            details={"run_id": previous.run_id, "graph": topology.metadata.name},
+        )
 
     async def drain_service(self, run_id: str, *, timeout_s: float | None = None) -> RunHandle:
         """Ask a service run to stop after its current iteration.
@@ -467,6 +506,15 @@ class RunSubmitter:
             # 영원히 점유된 채 남는다. handle.status 는 RUNNING 그대로이므로
             # 실제 결과(outcome)로 반납해야 상태가 거짓말하지 않는다
             self.manager.release(handle.run_id, outcome)
+
+
+async def _iteration_input(graph: Any, config: RunnableConfig) -> dict[str, Any]:
+    """실패한 iteration 이 받았던 state — step 0 checkpoint 가 입력이 반영된 첫 지점이다."""
+    started: dict[str, Any] = {}
+    async for snapshot in graph.aget_state_history(config):
+        if snapshot.metadata and snapshot.metadata.get("step") == 0:
+            started = dict(snapshot.values)
+    return started
 
 
 __all__ = ["DEFAULT_NODE_TIMEOUT_S", "RunResult", "RunSubmitter", "seed_state"]

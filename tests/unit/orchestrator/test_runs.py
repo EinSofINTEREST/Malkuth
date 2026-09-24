@@ -8,11 +8,13 @@ from typing import Any
 
 import pytest
 
-from malkuth.core.errors import ErrorCode, MalkuthError
-from malkuth.orchestrator.run import RunStatus
+from malkuth.core.agent import TaskResult
+from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
+from malkuth.orchestrator.checkpoint import build_checkpointer
+from malkuth.orchestrator.run import RunManager, RunStatus
 from malkuth.orchestrator.runs import RoutedClients, RunService
 from malkuth.orchestrator.runstore import InMemoryRunStore, RunRecord
-from malkuth.orchestrator.submit import RunResult
+from malkuth.orchestrator.submit import RunResult, RunSubmitter
 from malkuth.orchestrator.topology import GraphMode
 from malkuth.runtime.deployments import DeploymentRecord, DeploymentStatus
 from tests.fixtures.topologies import make_mission, make_service
@@ -72,7 +74,7 @@ class FakeSubmitter:
             state={**initial_state, "report": "done"},
         )
 
-    async def resume(self, topology, run_id, initial_state=None) -> RunResult:
+    async def resume(self, topology, run_id) -> RunResult:
         self.calls.append(("resume", run_id))
         return RunResult(
             run_id=run_id,
@@ -206,6 +208,45 @@ async def test_resume_drives_the_recorded_graph(parts):
     # 드라이버는 다음 await 에서 돈다 — 호출 순서가 아니라 집합을 본다
     assert sorted(submitter.calls) == [("resume", "m-1"), ("resume_service", "s-1")]
     assert runs.result_of("m-1").state == {"resumed": True}
+
+
+class FailOnceRuntime:
+    """researcher 가 첫 호출에서만 실패한다."""
+
+    def __init__(self) -> None:
+        self.invoked: list[str] = []
+
+    async def invoke(self, node, task):
+        self.invoked.append(node.id)
+        if node.id == "researcher" and self.invoked.count("researcher") == 1:
+            raise MalkuthError(category=ErrorCategory.GRAPH, code="GRAPH_002", message="flaky")
+        return TaskResult.completed(task, output={})
+
+
+async def test_resume_through_the_control_plane_skips_completed_nodes(parts):
+    """UI 의 재개 버튼이 타는 경로 — 실제 submitter 로 앞선 노드가 다시 돌지 않는지 본다 (#309)."""
+    store, catalog, _, mission, _ = parts
+    runtime = FailOnceRuntime()
+    runs = RunService(
+        catalog=catalog,
+        deployments=FakeDeployments({"dep-1": deployed(mission.metadata.name)}),
+        submitter=RunSubmitter(
+            runtime=runtime,
+            manager=RunManager(store=store),
+            checkpointer=build_checkpointer("memory"),
+        ),
+        store=store,
+    )
+    await runs.submit("dep-1", {"query": "q"}, run_id="m-1")
+    await asyncio.gather(*runs.drivers.values())
+    assert store.get("m-1").status == "failed"
+
+    await runs.resume("m-1")
+    await asyncio.gather(*runs.drivers.values())
+
+    assert runtime.invoked == ["planner", "researcher", "researcher"]
+    assert store.get("m-1").status == "completed"
+    assert runs.result_of("m-1").ok
 
 
 async def test_resume_of_an_unknown_run_is_not_found(parts):

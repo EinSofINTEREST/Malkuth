@@ -21,11 +21,11 @@ import uvicorn
 import yaml
 
 from malkuth.agentd.a2a_server import build_peer_client
+from malkuth.agentd.health import agent_health
 from malkuth.agentd.mcp import build_mcp_client
 from malkuth.agentd.server import AgentRuntime, create_app
 from malkuth.agentd.telemetry import ExecutorTelemetry
 from malkuth.agentd.tools import AgentToolRegistry
-from malkuth.core.agent import HealthState, HealthStatus
 from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
 from malkuth.core.manifest import AgentManifest
 from malkuth.core.skill import SkillSpec
@@ -141,7 +141,8 @@ def build_app(
         # skill 목록이 빠지고 (03 AgentCard 1: 수동 작성 금지), peer 는 이
         # 에이전트가 뭘 할 수 있는지 알 수 없다
         card=build_card(manifest, tools).model_dump(mode="json"),
-        health=lambda: HealthStatus(status=HealthState.HEALTHY),
+        # 매 요청 실행기에서 읽는다 — 리로드가 바꾼 세션·optional 목록이 그대로 반영된다
+        health=lambda: agent_health(executor),
         max_concurrent_tasks=manifest.spec.runtime.max_concurrent_tasks,
         reload=reload,
     )
@@ -359,6 +360,7 @@ async def load_modules(
         tool_schemas=tuple(_executable_schemas(result, tools)),
         output_keys=lambda task: _template_output_keys(result, task),
         system=_system(result),
+        degraded=result.degraded,
     )
 
 

@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any, Final, Protocol
 
 import structlog
 
+from malkuth.agentd.health import ModelHealth
 from malkuth.agentd.telemetry import (
     DIRECT_GRAPH,
     STATUS_COMPLETED,
@@ -262,6 +263,8 @@ class ModuleBinding:
     output_keys: Callable[[TaskRequest], Sequence[str]] | None = None
     system: str = ""
     """운영자 지시 — promptset 의 ``system`` 템플릿. 태스크 입력과 섞지 않고 따로 보낸다 (#308)."""
+    degraded: tuple[str, ...] = ()
+    """기동(또는 리로드) 때 뜨지 못한 optional MCP 서버 — health 가 degraded 로 보고한다."""
 
 
 class Executor:
@@ -286,6 +289,8 @@ class Executor:
         self._model = model
         self._config = config or ExecutorConfig()
         self._services = services or ExecutorServices()
+        # health 는 provider 를 부르지 않고 최근 호출 결과로 판정한다 (#311)
+        self.model_health = ModelHealth()
         self._binding = ModuleBinding(
             tools=tools,
             render=render,
@@ -509,18 +514,20 @@ class Executor:
         provider 압박이 지표에서 사라진다.
         """
         tools = list(binding.tool_schemas)
-        if self._services.telemetry is None:
-            return await self._model.run(binding.system, list(messages), tools)
-
+        telemetry = self._services.telemetry
         try:
             response = await self._model.run(binding.system, list(messages), tools)
         except asyncio.CancelledError:
             raise
         except Exception as err:
-            self._services.telemetry.model_called(status=_model_status(err))
+            self.model_health.failed(err.code if isinstance(err, MalkuthError) else "INTERNAL_001")
+            if telemetry is not None:
+                telemetry.model_called(status=_model_status(err))
             raise
 
-        self._services.telemetry.model_called(status=STATUS_COMPLETED, usage=response.usage)
+        self.model_health.succeeded()
+        if telemetry is not None:
+            telemetry.model_called(status=STATUS_COMPLETED, usage=response.usage)
         return response
 
     async def _model_turn(

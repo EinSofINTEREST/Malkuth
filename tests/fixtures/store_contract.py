@@ -206,3 +206,24 @@ def test_none_kind_filter_returns_everything(store):
     store.append(make_entry(kind=MemoryKind.OBSERVATION))
 
     assert len(store.list_space("local:researcher:longterm", kinds=None)) == 2
+
+
+# --- warm-up 용 전체 조회 (#312) ----------------------------------------------------
+
+
+def test_spaces_lists_every_space_that_holds_entries(store):
+    """재시작 뒤 인덱스를 다시 채울 대상 — 빠진 space 의 기억은 검색되지 않는다."""
+    store.append(make_entry(space="local:researcher:longterm"))
+    store.append(make_entry(space="group:research:knowledge"))
+    store.append(make_entry(space="group:research:knowledge"))
+
+    assert store.spaces() == ("group:research:knowledge", "local:researcher:longterm")
+
+
+def test_list_space_without_a_limit_returns_everything(store):
+    """기본 상한(100)으로 읽으면 오래된 기억이 warm-up 에서 빠진다."""
+    for i in range(105):
+        store.append(make_entry(content=f"fact {i}"))
+
+    assert len(store.list_space("local:researcher:longterm")) == 100
+    assert len(store.list_space("local:researcher:longterm", limit=None)) == 105

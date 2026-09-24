@@ -11,11 +11,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
 from malkuth.config import load_config
 from malkuth.memory.bootstrap import build_deployment
+from malkuth.memory.entry import MemoryEntry, MemorySource
+from malkuth.modules.memoryset import MemoryKind
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
@@ -125,3 +128,62 @@ def test_bootstrap_refuses_unreadable_declarations(tmp_path, monkeypatch):
     assert any(
         p["path"].endswith("agents/bad/manifest.yaml") for p in excinfo.value.details["problems"]
     )
+
+
+# --- 재시작 뒤 인덱스 warm-up (#312) ---------------------------------------------------
+
+
+def _memory_on_disk(tmp_path: Path):
+    return load_config(
+        "dev",
+        config_dir=REPO_ROOT / "configs",
+        environ={"MALKUTH_MEMORY__PATH": str(tmp_path / "memory.db")},
+    )
+
+
+def _as_researcher(deployment) -> dict[str, str]:
+    return {"Authorization": f"Bearer {deployment.tokens['researcher']}"}
+
+
+async def test_a_restarted_service_finds_what_was_stored_before(tmp_path):
+    """인덱스는 프로세스 메모리다 — 저장소에서 되읽지 않으면 재시작 전 기억이 검색되지 않는다."""
+    config = _memory_on_disk(tmp_path)
+    fact = MemoryEntry(
+        space="longterm",
+        kind=MemoryKind.FACT,
+        content="sidecar 이미지는 태그를 고정한다",
+        source=MemorySource(agent="researcher"),
+    )
+    first = build_deployment(config, root=REPO_ROOT)
+    # SQLite 연결은 만든 스레드에 묶인다 — 앱을 같은 스레드에서 부른다 (uvicorn 과 같다)
+    async with _client(first) as client:
+        stored = await client.post(
+            "/v1/append",
+            headers=_as_researcher(first),
+            json={"space": "longterm", "entry": fact.model_dump(mode="json")},
+        )
+        assert stored.status_code == 200, stored.text
+
+    restarted = build_deployment(config, root=REPO_ROOT)
+    assert restarted.indexer.warming
+    restarted.indexer.drain()
+    async with _client(restarted) as client:
+        response = await client.post(
+            "/v1/search",
+            headers=_as_researcher(restarted),
+            json={"query": "sidecar 이미지 태그", "spaces": ["longterm"]},
+        )
+
+    assert [hit["entry"]["content"] for hit in response.json()] == [fact.content]
+    assert not restarted.indexer.warming
+
+
+def _client(deployment) -> httpx.AsyncClient:
+    return httpx.AsyncClient(transport=httpx.ASGITransport(app=deployment.app), base_url="http://m")
+
+
+def test_an_empty_store_has_nothing_to_warm(tmp_path):
+    deployment = build_deployment(_memory_on_disk(tmp_path), root=REPO_ROOT)
+
+    assert not deployment.indexer.warming
+    assert deployment.indexer.queue.lag == 0

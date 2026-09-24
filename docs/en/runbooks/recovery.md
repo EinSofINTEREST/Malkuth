@@ -51,6 +51,16 @@ never merged.
 3. Search keeps serving from the **old** index during a rebuild, switching atomically on
    completion — reindexing does not take memory offline.
 
+### After a Memory Service restart
+
+The search index lives in the service's memory; the entries live in the store. On start the
+service queues every stored entry for indexing (`memory index warm-up queued`, with the entry
+count) and the normal indexing loop rebuilds the index. Until `memory index warm-up completed`
+is logged, older memories may be missing from search results. Progress shows in
+`malkuth_memory_index_lag_seconds`, measured from the restart rather than from when each entry
+was stored. Every restart embeds every entry again — with a paid embedding provider, that cost
+grows with the store.
+
 ## Backup and Restore
 
 | Asset | Cadence | Notes |

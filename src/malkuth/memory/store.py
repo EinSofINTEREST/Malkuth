@@ -72,9 +72,13 @@ class MemoryStore(Protocol):
         ...
 
     def list_space(
-        self, space: str, *, kinds: Sequence[MemoryKind] | None = None, limit: int = 100
+        self, space: str, *, kinds: Sequence[MemoryKind] | None = None, limit: int | None = 100
     ) -> tuple[MemoryEntry, ...]:
-        """space 의 항목을 최신순으로 조회한다."""
+        """space 의 항목을 최신순으로 조회한다 — ``limit=None`` 이면 전부."""
+        ...
+
+    def spaces(self) -> tuple[str, ...]:
+        """항목이 하나라도 있는 space 들 — 재시작 뒤 인덱스를 다시 채울 대상이다."""
         ...
 
     def latest_of_chain(self, entry_id: str) -> MemoryEntry | None:
@@ -176,11 +180,12 @@ class SqliteMemoryStore:
         return MemoryEntry.from_row(dict(row)) if row else None
 
     def list_space(
-        self, space: str, *, kinds: Sequence[MemoryKind] | None = None, limit: int = 100
+        self, space: str, *, kinds: Sequence[MemoryKind] | None = None, limit: int | None = 100
     ) -> tuple[MemoryEntry, ...]:
         """Read a space's entries, newest first.
 
         space 의 항목을 최신순으로 읽습니다 — 검색이 space 경계를 넘지 않습니다.
+        ``limit=None`` 이면 전부 — 인덱스 warm-up 용입니다.
         """
         query = "SELECT * FROM memory_entries WHERE space = ?"
         params: list[Any] = [space]
@@ -192,11 +197,20 @@ class SqliteMemoryStore:
             placeholders = ", ".join("?" for _ in kinds)
             query += f" AND kind IN ({placeholders})"
             params.extend(str(k) for k in kinds)
-        query += " ORDER BY created_at DESC, rowid DESC LIMIT ?"
-        params.append(limit)
+        query += " ORDER BY created_at DESC, rowid DESC"
+        if limit is not None:
+            query += " LIMIT ?"
+            params.append(limit)
 
         rows = self._conn.execute(query, params).fetchall()
         return tuple(MemoryEntry.from_row(dict(r)) for r in rows)
+
+    def spaces(self) -> tuple[str, ...]:
+        """항목이 있는 space 들."""
+        rows = self._conn.execute(
+            "SELECT DISTINCT space FROM memory_entries ORDER BY space"
+        ).fetchall()
+        return tuple(str(r["space"]) for r in rows)
 
     def latest_of_chain(self, entry_id: str) -> MemoryEntry | None:
         """Follow the correction chain forward.

@@ -525,6 +525,38 @@ def test_an_import_ref_outside_the_graphs_package_is_refused_before_import(ref, 
     assert imported == []
 
 
+def test_a_declarative_condition_outside_the_grammar_is_refused_when_the_graph_is_read():
+    with pytest.raises(ValidationError, match="invalid condition"):
+        make_mission(
+            edges=[
+                {"from": "START", "to": "planner"},
+                {"from": "planner", "to": "researcher", "condition": "len(state.plan) > 0"},
+                {"from": "researcher", "to": "END"},
+            ]
+        )
+
+
+def test_a_condition_import_ref_is_still_honoured_but_flagged_deprecated(monkeypatch):
+    """한 버전은 그대로 동작한다 — 대신 운영자가 옮길 곳을 알게 한다."""
+    warnings = []
+    monkeypatch.setattr(
+        "malkuth.orchestrator.topology.log.warning", lambda event, **fields: warnings.append(fields)
+    )
+
+    validate_topology(
+        make_mission(
+            edges=[
+                {"from": "START", "to": "planner"},
+                {"from": "planner", "to": "researcher", "condition": condition_ref()},
+                {"from": "planner", "to": "END"},
+                {"from": "researcher", "to": "END"},
+            ]
+        )
+    )
+
+    assert [w["condition"] for w in warnings] == [condition_ref()]
+
+
 def test_import_ref_with_empty_module_is_wrapped_as_graph_001():
     """빈 모듈명은 ValueError 를 내지만, 계약상 GRAPH_001 로 보고돼야 한다."""
     with pytest.raises(MalkuthError) as exc_info:

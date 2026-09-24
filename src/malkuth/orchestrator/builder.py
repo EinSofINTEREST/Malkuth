@@ -37,7 +37,7 @@ from malkuth.orchestrator.topology import (
     START,
     GraphTopology,
     NodeSpec,
-    resolve_import_ref,
+    resolve_condition,
 )
 from malkuth.resilience import retrying
 
@@ -229,7 +229,7 @@ class GraphBuilder:
         """조건 함수들을 선언 순서대로 평가하는 라우터를 만든다."""
         edges = [e for e in self._topology.spec.edges if e.source == source]
         conditions = [
-            (edge, resolve_import_ref(edge.condition) if edge.condition else None) for edge in edges
+            (edge, resolve_condition(edge.condition) if edge.condition else None) for edge in edges
         ]
 
         def route(state: dict[str, Any]) -> str:

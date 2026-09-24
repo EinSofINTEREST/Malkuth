@@ -42,6 +42,7 @@ from malkuth.orchestrator.topology import (
     ServiceSpec,
     StateSpec,
     SubgraphLoader,
+    resolve_condition,
     resolve_import_ref,
     validate_topology,
 )
@@ -77,6 +78,7 @@ __all__ = [
     "guarded_restore",
     "guarded_save",
     "merge_output",
+    "resolve_condition",
     "resolve_import_ref",
     "resolve_state_schema",
     "state_fields",

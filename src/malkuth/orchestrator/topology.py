@@ -13,8 +13,10 @@ import importlib
 from enum import StrEnum
 from typing import TYPE_CHECKING, Annotated, Any, Literal, Protocol
 
+import structlog
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from malkuth.core.conditions import Predicate, is_import_ref, parse_condition
 from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
 from malkuth.core.manifest import AgentName, MemorySpec, SemVer
 
@@ -30,6 +32,8 @@ DEFAULT_IDLE_MIN_DELAY_S = 30.0
 DEFAULT_IDLE_MAX_DELAY_S = 600.0
 
 _IMPORT_REF_SEPARATOR = ":"
+
+log = structlog.get_logger(__name__)
 
 
 class GraphMode(StrEnum):
@@ -115,7 +119,8 @@ class NodeSpec(BaseModel):
 class EdgeSpec(BaseModel):
     """A directed edge, optionally conditional.
 
-    방향 간선. ``condition`` 이 있으면 조건부 라우팅이다.
+    방향 간선. ``condition`` 이 있으면 조건부 라우팅이다 — 선언식(``state.approved``) 이거나,
+    deprecated 인 조건 함수 import ref(``malkuth.graphs.conditions:draft_approved``) 다.
     """
 
     model_config = ConfigDict(frozen=True, populate_by_name=True)
@@ -124,6 +129,17 @@ class EdgeSpec(BaseModel):
     target: str = Field(alias="to")
     condition: str | None = None
     max_iterations: int | None = None
+
+    @field_validator("condition")
+    @classmethod
+    def _parsable_condition(cls, value: str | None) -> str | None:
+        """선언식은 읽는 시점에 문법을 본다 — import ref 의 해석은 배포 검증이 한다."""
+        if value is not None and not is_import_ref(value):
+            try:
+                parse_condition(value)
+            except MalkuthError as err:
+                raise ValueError(err.message) from err
+        return value
 
     @field_validator("max_iterations")
     @classmethod
@@ -531,11 +547,34 @@ def _check_connections(topology: GraphTopology) -> None:
                 )
 
 
+def resolve_condition(condition: str) -> Predicate:
+    """Turn an edge condition into a predicate over the graph state.
+
+    edge 조건을 state 판정 함수로 만듭니다 — 선언식이면 파싱하고, import ref 면 import 합니다.
+
+    Raises:
+        MalkuthError: GRAPH/``GRAPH_001`` if it can be neither parsed nor imported.
+    """
+    if is_import_ref(condition):
+        function: Predicate = resolve_import_ref(condition)
+        return function
+    return parse_condition(condition)
+
+
 def _check_conditions(topology: GraphTopology) -> None:
-    """conditional edge 의 조건 함수가 import 가능해야 한다."""
+    """conditional edge 의 조건이 판정 함수가 되어야 한다 — import ref 는 deprecated 로 알린다."""
     for edge in topology.spec.edges:
-        if edge.condition is not None:
-            resolve_import_ref(edge.condition)
+        if edge.condition is None:
+            continue
+        resolve_condition(edge.condition)
+        if is_import_ref(edge.condition):
+            log.warning(
+                "graph condition import ref is deprecated",
+                graph=topology.name,
+                edge=f"{edge.source}->{edge.target}",
+                condition=edge.condition,
+                replacement="a declarative condition such as state.<field>",
+            )
 
 
 def _check_input_maps(topology: GraphTopology, state_fields: frozenset[str]) -> None:

@@ -16,6 +16,8 @@ from urllib.parse import urlsplit
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 RESERVED_GLOBAL_GROUP = "global"
+DEFAULT_SIDECAR_PORT = 8000
+DEFAULT_SIDECAR_PATH = "/mcp"
 
 
 def _require_http_url(value: str, what: str) -> None:
@@ -230,12 +232,46 @@ class McpSidecar(BaseModel):
 
     image: str
     resources: ResourceSpec | None = None
+    port: int = Field(default=DEFAULT_SIDECAR_PORT, gt=0, lt=65536)
+    """사이드카가 streamable HTTP 로 듣는 컨테이너 포트 — 게시하지 않는다."""
+    path: str = DEFAULT_SIDECAR_PATH
+    """MCP 엔드포인트 경로."""
 
     @field_validator("image")
     @classmethod
     def _reject_latest_tag(cls, value: str) -> str:
         """사이드카 이미지는 semver 태그 고정 — ``latest`` 금지."""
         return _require_pinned_image(value, "sidecar")
+
+    @field_validator("path")
+    @classmethod
+    def _plain_path(cls, value: str) -> str:
+        """경로만 — 주소의 다른 부분을 이 값으로 바꾸지 못한다."""
+        if not value.startswith("/") or any(c in value for c in "?#@\\ ") or "//" in value:
+            raise ValueError("sidecar path must be an absolute path without query or fragment")
+        return value
+
+
+def sidecar_host(agent: str, server: str) -> str:
+    """The sidecar container's name — its address on the agent's sidecar network.
+
+    runtime 이 이 이름으로 띄우고, agentd 와 이그레스 프록시가 이 이름으로 부른다 — 주소를 선언에
+    적지 않는다 (03 MCP 패턴 2). 이름 규칙이 하이픈 연속을 막으므로 ``--`` 는 에이전트 이름과
+    서버 이름을 헷갈리지 않게 가르고, 레플리카 컨테이너(``malkuth-{agent}-{n}``)와도 겹치지 않는다.
+    """
+    return f"malkuth-{agent}--mcp-{server}"
+
+
+def sidecar_url(agent: str, server: McpServerSpec) -> str:
+    """Where this agent's sidecar server answers — derived, never declared.
+
+    Raises:
+        ValueError: If the server is not a sidecar.
+    """
+    if server.sidecar is None:
+        raise ValueError(f"mcp server is not a sidecar: {server.name}")
+    host = sidecar_host(agent, server.name)
+    return f"http://{host}:{server.sidecar.port}{server.sidecar.path}"
 
 
 class McpServerSpec(BaseModel):

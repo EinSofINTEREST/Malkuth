@@ -143,3 +143,59 @@ def test_networks_and_address_are_read_from_the_container(client, container):
     assert client.address_of(container, NETWORK).count(".") == 3
     with pytest.raises(LookupError):
         client.address_of(container, "malkuth-not-attached")
+
+
+SIDE = "malkuth-contract-side"
+
+
+def test_a_container_joins_and_leaves_a_second_network_idempotently(client, container):
+    """사이드카 네트워크 (#304) — 프록시를 붙였다 떼고, 네트워크를 지운다. 두 번 해도 조용하다."""
+    docker("network", "rm", SIDE, check=False)
+    try:
+        client.ensure_network(SIDE, internal=True)
+        client.connect(SIDE, container, aliases=("contract-alias",))
+        client.connect(SIDE, container, aliases=("contract-alias",))
+        assert set(client.networks_of(container)) == {NETWORK, SIDE}
+        aliases = docker(
+            "inspect", "-f", f'{{{{json (index .NetworkSettings.Networks "{SIDE}").Aliases}}}}',
+            container,
+        )  # fmt: skip
+        assert "contract-alias" in aliases
+
+        client.disconnect(SIDE, container)
+        client.disconnect(SIDE, container)
+        assert client.networks_of(container) == (NETWORK,)
+        client.remove_network(SIDE)
+        client.remove_network(SIDE)
+        assert not docker("network", "inspect", "-f", "{{.Id}}", SIDE, check=False)
+    finally:
+        docker("network", "rm", SIDE, check=False)
+
+
+def test_labeled_finds_stopped_containers_and_nothing_else(client, container):
+    assert container in client.labeled({"malkuth.contract": "1"})
+    assert client.labeled({"malkuth.contract": "1", "malkuth.nothing": "x"}) == ()
+    client.remove(container)
+    assert container not in client.labeled({"malkuth.contract": "1"})
+
+
+def test_sidecar_hardening_reaches_the_container(client, echo_image):  # noqa: F811
+    name = f"contract-hardened-{type(client).__name__.lower()}"
+    docker("rm", "-f", name, check=False)
+    kwargs = {
+        **spec_kwargs(echo_image, name),
+        "security_opt": ["no-new-privileges:true"],
+        "restart_policy": {"Name": "on-failure", "MaximumRetryCount": 5},
+    }
+    client.ensure_network(NETWORK)
+    container_id = client.create(**kwargs)
+    try:
+        raw = docker(
+            "inspect", "-f",
+            "{{json .HostConfig.SecurityOpt}} {{.HostConfig.RestartPolicy.Name}} "
+            "{{.HostConfig.RestartPolicy.MaximumRetryCount}}",
+            container_id,
+        )  # fmt: skip
+        assert raw.split() == ['["no-new-privileges:true"]', "on-failure", "5"]
+    finally:
+        client.remove(container_id)

@@ -83,13 +83,18 @@ class FakeStdioClient:
 class FakeHttpClient:
     """원격 접속을 스크립트하는 HTTP 클라이언트 대역."""
 
-    def __init__(self, tools: list[str] | None = None) -> None:
+    def __init__(self, tools: list[str] | None = None, *, refusals: int = 0) -> None:
         self._tools = tuple(tools or ["search"])
+        self._refusals = refusals
         self.connections: list[tuple[str, dict[str, str]]] = []
         self.disconnected = 0
 
     async def connect(self, *, url: str, headers: dict[str, str]) -> Connection:
         self.connections.append((url, dict(headers)))
+        if self._refusals > 0:
+            # 아직 듣지 않는 서버 — 막 뜬 사이드카
+            self._refusals -= 1
+            raise ConnectionRefusedError(url)
         return Connection(tools=self._tools, protocol_version=SUPPORTED_VERSION)
 
     async def call(self, connection: Connection, tool: str, arguments: Any) -> ToolResult:

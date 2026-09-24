@@ -12,6 +12,7 @@ from malkuth.core.errors import MalkuthError
 from malkuth.core.manifest import McpServerSpec
 from malkuth.protocols.mcp.client import McpClient, split_namespaced
 from malkuth.protocols.mcp.transport import (
+    SIDECAR_CONNECT_ATTEMPTS,
     HttpTransport,
     StdioTransport,
     TransportSelector,
@@ -26,11 +27,14 @@ def spec(**overrides) -> McpServerSpec:
     return McpServerSpec.model_validate(base)
 
 
+async def no_sleep(_delay: float) -> None:
+    return None
+
+
 def make_client(
     stdio: FakeStdioClient | None = None,
     http: FakeHttpClient | None = None,
     *,
-    sidecar_urls: dict[str, str] | None = None,
     environ: dict[str, str] | None = None,
 ) -> McpClient:
     selector = TransportSelector(
@@ -40,8 +44,8 @@ def make_client(
         http=HttpTransport(
             agent="researcher",
             client=http or FakeHttpClient(),
-            sidecar_urls=sidecar_urls or {},
             environ=environ or {},
+            sleep=no_sleep,
         ),
     )
     return McpClient(agent="researcher", transports=selector)
@@ -113,39 +117,50 @@ async def test_shutdown_terminates_child_processes():
 # --- sidecar / external ------------------------------------------------------
 
 
-async def test_sidecar_url_is_injected_by_the_runtime():
-    """사이드카 URL 은 manifest 에 수동 기입하지 않는다."""
+BROWSER = {
+    "name": "browser",
+    "transport": "streamable-http",
+    "sidecar": {"image": "mcp/playwright:1.2.0"},
+}
+
+
+async def test_a_sidecar_is_reached_by_the_name_the_runtime_gives_it():
+    """사이드카 주소는 manifest 에 적지 않는다 — runtime 이 띄운 이름으로 닿는다 (#304)."""
     http = FakeHttpClient(["screenshot"])
-    client = make_client(http=http, sidecar_urls={"browser": "http://sidecar:9000"})
-    declared = McpServerSpec.model_validate(
-        {
-            "name": "browser",
-            "transport": "streamable-http",
-            "sidecar": {"image": "mcp/playwright:1.2.0"},
-        }
-    )
 
-    await client.start(declared)
+    await make_client(http=http).start(McpServerSpec.model_validate(BROWSER))
 
-    url, headers = http.connections[0]
-    assert url == "http://sidecar:9000"
-    assert headers == {}
+    assert http.connections == [("http://malkuth-researcher--mcp-browser:8000/mcp", {})]
 
 
-async def test_missing_sidecar_url_fails_startup():
-    client = make_client(sidecar_urls={})
-    declared = McpServerSpec.model_validate(
-        {
-            "name": "browser",
-            "transport": "streamable-http",
-            "sidecar": {"image": "mcp/playwright:1.2.0"},
-        }
-    )
+async def test_a_sidecar_that_is_still_starting_is_waited_for():
+    """사이드카는 에이전트 직전에 선다 — 듣기 시작할 때까지 기다린다."""
+    http = FakeHttpClient(["screenshot"], refusals=3)
+
+    await make_client(http=http).start(McpServerSpec.model_validate(BROWSER))
+
+    assert len(http.connections) == 4
+
+
+async def test_a_sidecar_that_never_answers_fails_startup():
+    http = FakeHttpClient(refusals=1000)
 
     with pytest.raises(MalkuthError) as exc_info:
-        await client.start(declared)
+        await make_client(http=http).start(McpServerSpec.model_validate(BROWSER))
 
     assert exc_info.value.code == "MCP_001"
+    assert len(http.connections) == SIDECAR_CONNECT_ATTEMPTS
+
+
+async def test_an_external_server_is_not_waited_for():
+    """external 서버의 불통은 설정 문제다 — 기동 예산을 기다림으로 쓰지 않는다."""
+    http = FakeHttpClient(refusals=1)
+    external = {"name": "corp", "transport": "streamable-http", "url": "https://mcp.example/mcp"}
+
+    with pytest.raises(MalkuthError):
+        await make_client(http=http).start(McpServerSpec.model_validate(external))
+
+    assert len(http.connections) == 1
 
 
 async def test_external_server_sends_the_auth_header():
@@ -201,7 +216,6 @@ def proxied(http: FakeHttpClient, identity: str | None = "cred-researcher") -> M
             http=HttpTransport(
                 agent="researcher",
                 client=http,
-                sidecar_urls={"browser": "http://browser-sidecar:3000/mcp"},
                 environ={"CORP_TOKEN": "s3cret"},
                 proxy_url="http://malkuth-egress:8081/mcp/",
                 identity=identity,
@@ -228,17 +242,15 @@ async def test_behind_the_proxy_without_an_identity_startup_fails():
     assert exc_info.value.code == "MCP_001"
 
 
-async def test_a_sidecar_is_not_routed_through_the_proxy():
+async def test_behind_the_proxy_a_sidecar_also_goes_through_it_with_the_identity():
+    """사이드카 도구도 프록시가 하나씩 판정한다 (#304) — 에이전트는 사이드카에 직접 닿지 않는다."""
     http = FakeHttpClient(["navigate"])
-    sidecar = {
-        "name": "browser",
-        "transport": "streamable-http",
-        "sidecar": {"image": "mcp/x:1.0.0"},
-    }
 
-    await proxied(http).start(McpServerSpec.model_validate(sidecar))
+    await proxied(http).start(McpServerSpec.model_validate(BROWSER))
 
-    assert http.connections == [("http://browser-sidecar:3000/mcp", {})]
+    assert http.connections == [
+        ("http://malkuth-egress:8081/mcp/browser", {"authorization": "Bearer cred-researcher"})
+    ]
 
 
 # --- tool 라우팅 --------------------------------------------------------------

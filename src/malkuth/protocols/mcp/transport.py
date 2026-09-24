@@ -7,14 +7,18 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
-from collections.abc import Mapping
-from dataclasses import dataclass, field
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 import structlog
+from tenacity import AsyncRetrying, RetryCallState, retry_if_exception, stop_after_attempt
 
-from malkuth.core.manifest import McpTransport
+from malkuth.core.errors import MalkuthError
+from malkuth.core.manifest import McpTransport, sidecar_url
+from malkuth.observability.logging import LogField
 from malkuth.protocols.mcp.errors import startup_failed
 from malkuth.protocols.mcp.session import Connection, ToolResult
 
@@ -25,6 +29,11 @@ log = structlog.get_logger(__name__)
 
 MCP_PROXY_URL_ENV = "MALKUTH_MCP_PROXY_URL"
 """runtime 이 이그레스 프록시를 켰을 때 넣는 원격 MCP 종단 주소."""
+
+SIDECAR_CONNECT_ATTEMPTS = 20
+SIDECAR_CONNECT_WAIT_S = 0.5
+"""사이드카는 에이전트 직전에 선다 — 듣기 시작할 때까지 기동 예산(15s) 안에서 기다린다.
+external 서버는 기다리지 않는다: 그쪽의 불통은 곧 설정 문제다."""
 
 
 def resolve_env(spec: McpServerSpec, environ: Mapping[str, str] | None = None) -> dict[str, str]:
@@ -127,38 +136,36 @@ class StdioTransport:
 class HttpTransport:
     """Connects to an HTTP-family MCP server.
 
-    HTTP 계열 MCP 서버에 접속합니다 — sidecar(전용 컨테이너, URL 은 runtime 주입)
+    HTTP 계열 MCP 서버에 접속합니다 — sidecar(전용 컨테이너, 주소는 runtime 이 띄운 이름)
     와 external(명시 URL + auth) 두 패턴을 함께 다룹니다.
     """
 
     agent: str
     client: HttpClient
-    sidecar_urls: dict[str, str] = field(default_factory=dict)
-    """runtime 이 사이드카 기동 후 주입한 URL — manifest 에 수동 기입 금지."""
-
     environ: Mapping[str, str] | None = None
     proxy_url: str | None = None
-    """이그레스 프록시의 원격 MCP 종단 (``…/mcp``) — 있으면 external 서버는 프록시로 간다 (#282)."""
+    """이그레스 프록시의 MCP 종단 (``…/mcp``) — 있으면 원격 서버(external·sidecar)는 전부 프록시로
+    간다 (#282, #304). 프록시가 도구마다 판정한다."""
     identity: str | None = None
     """프록시에 내미는 에이전트 신원 — 서버 자격은 프록시가 붙인다."""
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
+    """사이드카 대기 — 06 은 테스트가 실제로 자는 것을 금지한다."""
 
     def url_for(self, spec: McpServerSpec) -> str:
-        """서버의 접속 URL — sidecar 는 주입값, external 은 선언값 또는 프록시 종단."""
-        if spec.sidecar is not None:
-            url = self.sidecar_urls.get(spec.name)
-            if url is None:
-                raise startup_failed(self.agent, spec.name, reason="sidecar url not injected")
-            return url
-        if spec.url is None:
+        """서버의 접속 URL — 프록시가 있으면 그 종단, 없으면 사이드카 이름 또는 선언된 URL."""
+        if spec.sidecar is None and spec.url is None:
             raise startup_failed(self.agent, spec.name, reason="missing url")
         if self.proxy_url is not None:
             # 주소는 프록시가 **선언에서** 다시 찾는다 — 에이전트가 보내는 것은 서버 이름뿐이다
             return f"{self.proxy_url.rstrip('/')}/{spec.name}"
-        return spec.url
+        if spec.sidecar is not None:
+            # runtime 이 이 이름으로 띄운다 — 선언에 주소를 적지 않는다 (03 MCP 패턴 2)
+            return sidecar_url(self.agent, spec)
+        return str(spec.url)
 
     def headers_for(self, spec: McpServerSpec) -> dict[str, str]:
         """인증 헤더 — 토큰 값은 env 에서 읽고 절대 로그로 남기지 않는다."""
-        if self.proxy_url is not None and spec.sidecar is None:
+        if self.proxy_url is not None:
             if not self.identity:
                 raise startup_failed(
                     self.agent, spec.name, reason="agent identity unavailable for the egress proxy"
@@ -178,10 +185,40 @@ class HttpTransport:
         return {"authorization": f"Bearer {token}"}
 
     async def connect(self, spec: McpServerSpec) -> Connection:
-        """원격 서버에 접속해 initialize 한다."""
+        """원격 서버에 접속해 initialize 한다 — 사이드카는 듣기 시작할 때까지 기다린다."""
         if spec.transport is McpTransport.STDIO:
             raise startup_failed(self.agent, spec.name, reason="transport mismatch")
-        return await self.client.connect(url=self.url_for(spec), headers=self.headers_for(spec))
+        url, headers = self.url_for(spec), self.headers_for(spec)
+        if spec.sidecar is None:
+            return await self.client.connect(url=url, headers=headers)
+
+        def _warn(state: RetryCallState) -> None:
+            outcome = state.outcome
+            log.warning(
+                "mcp sidecar not answering yet, retrying",
+                agent=self.agent,
+                mcp_server=spec.name,
+                **{
+                    LogField.ATTEMPT: state.attempt_number,
+                    LogField.MAX_ATTEMPTS: SIDECAR_CONNECT_ATTEMPTS,
+                    LogField.DELAY_MS: round(SIDECAR_CONNECT_WAIT_S * 1000),
+                },
+                error=type(outcome.exception()).__name__ if outcome else None,
+            )
+
+        attempts = AsyncRetrying(
+            stop=stop_after_attempt(SIDECAR_CONNECT_ATTEMPTS),
+            wait=lambda _state: SIDECAR_CONNECT_WAIT_S,
+            # 설정 문제(MalkuthError)는 기다려도 풀리지 않는다
+            retry=retry_if_exception(lambda err: not isinstance(err, MalkuthError)),
+            before_sleep=_warn,
+            sleep=self.sleep,
+            reraise=True,
+        )
+        async for attempt in attempts:
+            with attempt:
+                return await self.client.connect(url=url, headers=headers)
+        raise AssertionError("unreachable: tenacity always resolves an attempt")
 
     async def call(
         self, connection: Connection, tool: str, arguments: Mapping[str, Any]

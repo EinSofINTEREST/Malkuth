@@ -90,6 +90,9 @@ class ContainerSpec:
     tmpfs: tuple[str, ...]
     volumes: tuple[Mapping[str, Any], ...] = ()
     labels: Mapping[str, str] = field(default_factory=dict)
+    extra_networks: tuple[str, ...] = ()
+    """기동 전에 더 붙는 네트워크 — 이그레스 프록시 없는 배포의 자기 사이드카 네트워크 (#304).
+    SDK 의 생성 인자는 네트워크를 하나만 받으므로 엔진이 따로 붙인다."""
 
     def to_docker_kwargs(self) -> dict[str, Any]:
         """Render arguments for the Docker SDK.
@@ -134,6 +137,7 @@ def build_container_spec(
     base_image: str = DEFAULT_BASE_IMAGE,
     mounts: Sequence[Mapping[str, Any]] = (),
     image: str | None = None,
+    extra_networks: Sequence[str] = (),
 ) -> ContainerSpec:
     """Derive a container spec from an agent manifest.
 
@@ -154,6 +158,8 @@ def build_container_spec(
         image: The image the framework baked for this agent (#266). 재료가 있는
             커스텀 에이전트는 빌드 단계가 정한 태그로만 돈다 — 매니페스트 선언보다
             우선한다. 둘이 다르면 배포 검증이 먼저 거절한다.
+        extra_networks: Networks joined before start — 이그레스 프록시 없는 배포에서 자기
+            사이드카에 닿는 길 (#304). 공유·호스트 네트워크는 여기서도 거절한다.
 
     Returns:
         The container specification.
@@ -169,6 +175,16 @@ def build_container_spec(
             agent=manifest.name,
             details={"network": network},
         )
+
+    for extra in extra_networks:
+        if extra in _FORBIDDEN_NETWORKS:
+            raise MalkuthError(
+                category=ErrorCategory.RUNTIME,
+                code=ErrorCode.RT_001,
+                message=f"agent containers must not use the '{extra}' network",
+                agent=manifest.name,
+                details={"network": extra},
+            )
 
     runtime = manifest.spec.runtime
 
@@ -215,6 +231,7 @@ def build_container_spec(
             "malkuth.group": manifest.group,
             "malkuth.replica": str(replica),
         },
+        extra_networks=tuple(extra_networks),
     )
 
 

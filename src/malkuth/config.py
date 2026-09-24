@@ -98,6 +98,9 @@ class EgressProxyConfig(BaseModel):
     """CONNECT 창구 — ``http://egress:8080``."""
     providers_url: str = Field(min_length=1)
     """provider 종단 창구 — ``http://egress:8081``."""
+    container: str | None = Field(default=None, pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_.-]*$")
+    """프록시 컨테이너 이름 — MCP 사이드카를 쓰려면 필요하다 (#304). runtime 이 에이전트마다의
+    사이드카 네트워크에 이 컨테이너를 붙여, 사이드카에 닿는 것이 프록시뿐이게 한다."""
 
     @model_validator(mode="after")
     def _plain_urls(self) -> EgressProxyConfig:

@@ -10,6 +10,11 @@
 3. 신원을 떼고 운영자가 허용한 자격만 붙여, 확인한 주소로 보낸다
 
 그래서 한 도구를 회수해도 같은 서버의 다른 도구는 계속 되고, 자격은 에이전트 env 에 없다.
+
+에이전트 전용 사이드카(#304)도 같은 길이다. 주소는 runtime 이 띄운 이름에서 나오고, 사이드카는
+에이전트마다의 사이드카 네트워크에 있어 프록시만 닿는다. 바깥 목적지가 아니므로 ``egress`` 판정은
+없고 도구마다의 ``mcp_tool`` 판정만 있다. 자격을 싣지 않으므로(선언이 ``auth`` 를 막는다) 평문이다 —
+다만 사설 주소로 풀릴 때만 보낸다.
 """
 
 from __future__ import annotations
@@ -34,6 +39,7 @@ from malkuth.access.baselines import url_target
 from malkuth.access.client import DecisionSource
 from malkuth.access.model import ResourceKind
 from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
+from malkuth.core.manifest import McpTransport, sidecar_url
 from malkuth.egress.connect import UNKNOWN_IDENTITY, EgressMode, is_public, resolve
 
 if TYPE_CHECKING:
@@ -69,6 +75,8 @@ class McpUpstream:
     url: str
     target: str
     token: str | None
+    sidecar: bool = False
+    """에이전트 전용 사이드카 — 바깥 목적지가 아니라 egress 판정이 없다."""
 
 
 @dataclass(frozen=True)
@@ -87,7 +95,7 @@ class McpUpstreams:
     tokens: frozenset[str]
 
     def resolve(self, agent: str, server: str) -> McpUpstream | None:
-        """The declared remote server — None when the agent declares no such remote server.
+        """The declared remote or sidecar server — None when the agent declares no such server.
 
         Raises:
             MalkuthError: CONFIG/``CFG_002`` if the declared credential is not provided to the
@@ -100,7 +108,13 @@ class McpUpstreams:
                 return None
             raise
         declared = next((s for s in manifest.spec.mcp.servers if s.name == server), None)
-        if declared is None or declared.url is None:
+        if declared is None or declared.transport is McpTransport.STDIO:
+            return None
+        if declared.sidecar is not None:
+            # 주소는 선언이 아니라 runtime 의 이름 규칙에서 — 에이전트가 고르지 못한다
+            url = sidecar_url(agent, declared)
+            return McpUpstream(url=url, target=url_target(url) or "", token=None, sidecar=True)
+        if declared.url is None:
             return None
         target = url_target(declared.url)
         if target is None:
@@ -187,10 +201,11 @@ class McpTermination:
             return _http_error(502, err.message, code=err.code)
         if upstream is None:
             return _http_error(404, "no such remote mcp server declared for this agent")
-        verdict = await self.access.decide(credential, ResourceKind.EGRESS, upstream.target)
-        refused = self._refusal(verdict, ResourceKind.EGRESS, upstream.target)
-        if refused is not None:
-            return _http_error(*refused)
+        if not upstream.sidecar:
+            verdict = await self.access.decide(credential, ResourceKind.EGRESS, upstream.target)
+            refused = self._refusal(verdict, ResourceKind.EGRESS, upstream.target)
+            if refused is not None:
+                return _http_error(*refused)
         body = await request.body()
         denied = await self._decide_tools(credential, server, body)
         if denied is not None:
@@ -229,7 +244,10 @@ class McpTermination:
     ) -> Response:
         agent, server = owner
         parts = urlsplit(upstream.url)
-        plaintext = self.allow_plaintext and upstream.target in self.private_destinations
+        # 사이드카에는 자격을 싣지 않는다 — 평문이어도 나갈 비밀이 없다. 사설 주소 요구는 아래에서
+        plaintext = upstream.sidecar or (
+            self.allow_plaintext and upstream.target in self.private_destinations
+        )
         if parts.scheme == "http" and not plaintext:
             # 도구 인자와 결과도 민감하다 — 평문은 스위치를 켜고 사설로 명시한 목적지만.
             # 스위치 하나로 모든 서버를 열면 운영 설정의 실수가 공인 호스트로의 평문이 된다 (#302)

@@ -126,10 +126,11 @@ def main() -> None:
         if config.runtime.egress_proxy is not None:
             from malkuth.runtime.deployments import EgressEndpoints
 
+            proxy = config.runtime.egress_proxy
             deployments.egress = EgressEndpoints(
-                connect_url=config.runtime.egress_proxy.connect_url,
-                providers_url=config.runtime.egress_proxy.providers_url,
+                connect_url=proxy.connect_url, providers_url=proxy.providers_url
             )
+            deployments.sidecar_proxy = sidecar_proxy(proxy)
     # 실행 중 run 과 배포가 참조하는 선언은 지우거나 덮어쓰지 못한다 (#242 리뷰 / #243)
     pins: list[InUse] = [run_backed(store, catalog)]
     if deployments is not None:
@@ -214,6 +215,18 @@ def _deployment_manager(
         memory_tokens=memory_tokens,
         ready_timeout_s=orchestrator.deployment_ready_timeout_s,
     )
+
+
+def sidecar_proxy(proxy: Any) -> Any:
+    """사이드카 네트워크에 붙일 프록시 — 컨테이너 이름을 모르면 None (사이드카 배포가 거절된다)."""
+    from urllib.parse import urlsplit
+
+    from malkuth.runtime.sidecars import ProxyAttachment
+
+    if proxy.container is None:
+        return None
+    # 사이드카가 물려받는 HTTPS_PROXY 가 이 이름을 가리킨다 — 같은 별칭으로 붙인다
+    return ProxyAttachment(container=proxy.container, alias=urlsplit(proxy.connect_url).hostname)
 
 
 def agent_engine(runtime: Any, client: Any) -> Any:

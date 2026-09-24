@@ -500,9 +500,14 @@ EGRESS = {
 }
 
 
-def test_the_egress_proxy_reaches_deployments(tmp_path, monkeypatch):
-    """배포에 물리지 않으면 에이전트는 설정과 무관하게 모델 키를 받고 직접 나간다."""
+@pytest.mark.parametrize("container", [None, "malkuth-egress-1"])
+def test_the_egress_proxy_reaches_deployments(tmp_path, monkeypatch, container):
+    """배포에 물리지 않으면 에이전트는 설정과 무관하게 모델 키를 받고 직접 나간다.
+
+    프록시 컨테이너는 사이드카 네트워크에 붙일 대상이다 (#304) — 에이전트가 쓰는 이름을 별칭으로.
+    """
     from malkuth.runtime.deployments import EgressEndpoints
+    from malkuth.runtime.sidecars import ProxyAttachment
 
     orchestrator = {
         "access_store": str(tmp_path / "access.db"),
@@ -513,7 +518,12 @@ def test_the_egress_proxy_reaches_deployments(tmp_path, monkeypatch):
 
     def with_runtime(directory, values):
         (directory / "local.yaml").write_text(
-            yaml.safe_dump({"orchestrator": values, "runtime": {"egress_proxy": EGRESS}}),
+            yaml.safe_dump(
+                {
+                    "orchestrator": values,
+                    "runtime": {"egress_proxy": {**EGRESS, "container": container}},
+                }
+            ),
             encoding="utf-8",
         )
 
@@ -524,6 +534,8 @@ def test_the_egress_proxy_reaches_deployments(tmp_path, monkeypatch):
         globals()["write_config"] = original
 
     assert deployments.egress == EgressEndpoints(**EGRESS)
+    expected = ProxyAttachment(container, "malkuth-egress") if container else None
+    assert deployments.sidecar_proxy == expected
 
 
 def test_an_egress_proxy_without_the_registry_is_refused(tmp_path, monkeypatch):

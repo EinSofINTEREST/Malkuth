@@ -34,6 +34,7 @@ from malkuth.protocols.mcp.transport import MCP_PROXY_URL_ENV
 from malkuth.runtime.images import image_tag
 from malkuth.runtime.launcher import LaunchedAgent, MemoryEndpoint
 from malkuth.runtime.scope import ScopedSecrets
+from malkuth.runtime.sidecars import McpSidecars, sidecars_of
 from malkuth.runtime.spec import (
     A2A_EDGES_ENV,
     A2A_PEERS_ENV,
@@ -49,6 +50,7 @@ if TYPE_CHECKING:
     from malkuth.core.manifest import AgentManifest
     from malkuth.orchestrator.topology import GraphTopology
     from malkuth.runtime.launcher import AgentLauncher
+    from malkuth.runtime.sidecars import ProxyAttachment
 
 log = structlog.get_logger(__name__)
 
@@ -362,6 +364,9 @@ class DeploymentManager:
     egress: EgressEndpoints | None = None
     """이그레스 프록시 (#293) — 있으면 외부 HTTPS·모델 API 를 프록시로 보내고 모델 키를 넣지
     않는다."""
+    sidecar_proxy: ProxyAttachment | None = None
+    """사이드카 네트워크에 붙일 프록시 컨테이너 (#304) — 프록시를 켠 배포에서 사이드카를 쓰려면
+    필요하다. 에이전트가 사이드카에 직접 닿지 않고 프록시의 도구 판정을 거치게 한다."""
     ready_timeout_s: float = DEFAULT_READY_TIMEOUT_S
     ready_poll_s: float = DEFAULT_READY_POLL_S
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
@@ -417,6 +422,7 @@ class DeploymentManager:
         manifests = self._agents_of(topology)
         # 기록을 남기기 전에 — 거절된 배포는 실패한 배포가 아니라 시작되지 않은 배포다
         self._check_images(manifests)
+        self._check_sidecars(manifests)
         deployment_id = f"dep-{uuid.uuid4().hex[:12]}"
         record = DeploymentRecord(
             deployment_id=deployment_id,
@@ -433,16 +439,21 @@ class DeploymentManager:
 
         provisions: dict[str, Provision] = {}
         launched: list[LaunchedAgent] = []
+        attempted: list[str] = []
         try:
             credentials = self._issue_identities(manifests, deployment_id, graph_name)
             provisions = self._provision(
                 topology, manifests, a2a_secret=record.a2a_secret, credentials=credentials
             )
             for manifest in manifests:
+                # 사이드카부터 선다 — 반쯤 선 사이드카도 되감기가 치우도록 먼저 적는다
+                attempted.append(manifest.name)
                 launched.append(await self._launch(manifest, provisions[manifest.name]))
             await self._wait_ready(launched)
         except BaseException as err:
             await self._rollback(launched)
+            for name in attempted:
+                await self.sidecars.stop(name)
             self._release_ports(provisions)
             # 되감긴 배포의 신원이 살아 있으면 존재하지 않는 컨테이너 이름으로 강제 지점을 통과한다
             self._revoke_identities(deployment_id)
@@ -484,10 +495,14 @@ class DeploymentManager:
         record = self.get(deployment_id)
         if record.status in (DeploymentStatus.STOPPED, DeploymentStatus.FAILED):
             return record
+        names = list(dict.fromkeys(agent.name for agent in record.agents))
         try:
-            for agent in record.agents:
-                await self.launcher.stop(agent.name)
+            for name in names:
+                await self.launcher.stop(name)
         finally:
+            # 에이전트 정지가 실패해도 사이드카는 치운다 — 03 Placement 1, lifecycle 을 함께한다
+            for name in names:
+                await self.sidecars.stop(name)
             # 해체를 요청한 이상 신원은 죽인다 — 정지 하나가 실패했다고 모든 신원이 살아 남으면
             # 운영자가 끝냈다고 믿는 배포가 강제 지점을 계속 통과한다
             self._revoke_identities(deployment_id)
@@ -519,6 +534,10 @@ class DeploymentManager:
                 self._mark_lost(record, f"cannot rebuild from declarations: {err.message}", touched)
                 continue
             if not await self._isolated(record, touched):
+                continue
+            unready = await self._resume_sidecars(restart_args)
+            if unready:
+                self._mark_lost(record, f"mcp sidecars not restored: {', '.join(unready)}", touched)
                 continue
             missing = []
             for agent in record.agents:
@@ -591,6 +610,21 @@ class DeploymentManager:
         except Exception:  # noqa: BLE001 — 주소가 없으면 붙을 수 없는 컨테이너다
             return None
         return container_id, host, port
+
+    async def _resume_sidecars(self, restart_args: Mapping[str, Mapping[str, Any]]) -> list[str]:
+        """재부착 전에 사이드카를 되살린다 — 떠 있으면 그대로, 사라졌으면 같은 선언으로 다시.
+
+        Docker 의 재시작 상한을 넘겨 멈춘 사이드카도 여기서 다시 선다. 세울 수 없으면 그 에이전트
+        이름을 돌려준다 — 배포는 lost 로 드러난다.
+        """
+        unready = []
+        for name, args in restart_args.items():
+            try:
+                await self.sidecars.start(args["manifest"], args["secrets"], reuse=True)
+            except MalkuthError as err:
+                log.error("mcp sidecars could not be restored", agent=name, error_code=err.code)
+                unready.append(name)
+        return unready
 
     def _refresh(self, record: DeploymentRecord) -> DeploymentRecord:
         """launcher 가 아는 현재 컨테이너로 기록을 맞춘다 — 재시작이 id/포트를 바꾼다."""
@@ -714,6 +748,31 @@ class DeploymentManager:
             )
         return provisions
 
+    @property
+    def sidecars(self) -> McpSidecars:
+        """이 배포들의 MCP 사이드카 — 상태가 없으므로 부를 때마다 만든다."""
+        return McpSidecars(client=self.launcher.engine.client, proxy=self.sidecar_proxy)
+
+    def _check_sidecars(self, manifests: Sequence[AgentManifest]) -> None:
+        """프록시를 켠 배포는 프록시를 사이드카 네트워크에 붙일 수 있어야 사이드카를 띄운다 (#304).
+
+        붙일 수 없으면 에이전트를 사이드카에 직접 잇는 수밖에 없는데, 그러면 도구 단위 판정이
+        에이전트 컨테이너 안의 검사로 떨어진다 — 강제가 아니다. 띄우지 않는다.
+
+        Raises:
+            MalkuthError: CONFIG/``CFG_001`` — ``runtime.egress_proxy.container`` 가 없다.
+        """
+        if self.egress is None or self.sidecar_proxy is not None:
+            return
+        declaring = [m.name for m in manifests if sidecars_of(m)]
+        if declaring:
+            raise MalkuthError(
+                category=ErrorCategory.CONFIG,
+                code=ErrorCode.CFG_001,
+                message="mcp sidecars behind the egress proxy need runtime.egress_proxy.container",
+                details={"agents": declaring, "setting": "runtime.egress_proxy.container"},
+            )
+
     def _running_stewards(self) -> dict[str, str]:
         """지금 떠 있는 권한 에이전트의 A2A 주소 — 이름 → ``container:port``.
 
@@ -814,6 +873,7 @@ class DeploymentManager:
                 "memory": self._memory_for(m, provisions[m.name]),
                 "mounts": provisions[m.name].mounts,
                 "image": deployed.get(m.name) or provisions[m.name].image,
+                "networks": self.sidecars.agent_networks(m),
             }
             for m in manifests
         }
@@ -877,13 +937,18 @@ class DeploymentManager:
         return None
 
     async def _launch(self, manifest: AgentManifest, provision: Provision) -> LaunchedAgent:
+        env = self._env_for(manifest, provision)
+        sidecars = self.sidecars
+        # 에이전트보다 먼저 — agentd 가 기동하며 사이드카 세션을 연다 (03 Startup Sequence 3)
+        await sidecars.start(manifest, env)
         return await self.launcher.start(
             manifest,
-            secrets=self._env_for(manifest, provision),
+            secrets=env,
             memory=self._memory_for(manifest, provision),
             mounts=provision.mounts,
             a2a_port=provision.a2a_port,
             image=provision.image,
+            networks=sidecars.agent_networks(manifest),
         )
 
     def _release_ports(self, provisions: Mapping[str, Provision]) -> None:

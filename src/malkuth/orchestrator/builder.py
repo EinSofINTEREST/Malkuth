@@ -30,7 +30,7 @@ from malkuth.core.agent import (
     TraceContext,
 )
 from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError, RetryPolicy
-from malkuth.orchestrator.state import extract_input, merge_output, resolve_state_schema
+from malkuth.orchestrator.state import extract_input, merge_output, resolve_graph_state
 from malkuth.orchestrator.telemetry import OrchestratorTelemetry
 from malkuth.orchestrator.topology import (
     END,
@@ -168,7 +168,7 @@ class GraphBuilder:
         self._topology = topology
         self._control_overhead_s = control_overhead_s
         self._runtime = runtime
-        self._schema = state_schema or resolve_state_schema(topology.spec.state.schema_ref)
+        self._schema = state_schema or resolve_graph_state(topology.spec.state, graph=topology.name)
         self._node_timeout_s = node_timeout_s
         # 06 은 시간 의존 로직이 테스트에서 실제로 자는 것을 금지한다
         self._retry_sleep = retry_sleep

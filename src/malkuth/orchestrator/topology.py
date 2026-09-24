@@ -226,16 +226,56 @@ class ServiceSpec(BaseModel):
         return value
 
 
-class StateSpec(BaseModel):
-    """Graph state schema binding.
+StateFieldType = Literal["string", "integer", "number", "boolean", "array", "object"]
 
-    그래프 state 스키마 바인딩. ``schema`` 는 pydantic 모델 import ref 다.
+
+class StateField(BaseModel):
+    """One state field declared inline in the graph.
+
+    그래프 YAML 안에 선언한 state 필드 하나 — promptset 변수 선언과 같은 어휘다.
     """
 
     model_config = ConfigDict(frozen=True)
 
-    schema_ref: str = Field(alias="schema")
+    type: StateFieldType
+    required: bool = False
+    default: Any = None
+    description: str | None = None
+
+    @model_validator(mode="after")
+    def _required_has_no_default(self) -> StateField:
+        """기본값이 있는 필수 필드는 필수가 아니다 — 둘 중 무엇을 뜻했는지 모호하다."""
+        if self.required and self.default is not None:
+            raise ValueError("a required state field cannot declare a default")
+        return self
+
+
+class StateSpec(BaseModel):
+    """Graph state schema binding.
+
+    그래프 state 스키마 바인딩 — 둘 중 하나로 선언한다:
+
+    - ``fields``: 그래프 YAML 안의 필드 선언. ``src/`` 를 고치지 않고 새 그래프를 만든다 (#316)
+    - ``schema``: ``malkuth.graphs`` 의 pydantic 모델 import ref (deprecated — 한 버전 유지)
+    """
+
+    model_config = ConfigDict(frozen=True, populate_by_name=True)
+
+    schema_ref: str | None = Field(default=None, alias="schema")
+    declared_fields: dict[str, StateField] | None = Field(default=None, alias="fields")
     checkpointer: str = "default"
+
+    @model_validator(mode="after")
+    def _exactly_one_schema(self) -> StateSpec:
+        if (self.schema_ref is None) == (self.declared_fields is None):
+            raise ValueError("state declares exactly one of 'fields' or 'schema'")
+        for name in self.declared_fields or {}:
+            # _run_id / _iterations 같은 예약 채널과 겹치면 프레임워크 값이 덮인다
+            if not name.isidentifier() or name.startswith("_"):
+                raise ValueError(
+                    f"state field name must be an identifier not starting with '_': {name}"
+                )
+        return self
 
 
 class GraphMetadata(BaseModel):

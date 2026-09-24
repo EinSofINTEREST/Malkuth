@@ -19,7 +19,7 @@ import structlog
 from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
 from malkuth.orchestrator.builder import build_graph
 from malkuth.orchestrator.run import RunHandle, RunManager, RunStatus, ServiceRunner
-from malkuth.orchestrator.state import resolve_state_schema, validate_state
+from malkuth.orchestrator.state import resolve_graph_state, validate_state
 from malkuth.orchestrator.topology import GraphMode
 
 if TYPE_CHECKING:
@@ -173,7 +173,8 @@ class RunSubmitter:
         """
         # resolve_state_schema 는 실패 시 예외를 던지고 성공 시 항상 모델을
         # 준다 — None 분기를 두면 "schema 가 없을 수도 있다" 는 잘못된 신호가 된다
-        validate_state(resolve_state_schema(topology.spec.state.schema_ref), dict(initial_state))
+        schema = resolve_graph_state(topology.spec.state, graph=topology.metadata.name)
+        validate_state(schema, dict(initial_state))
 
     async def resume(self, topology: GraphTopology, run_id: str) -> RunResult:
         """Continue a run from its last checkpoint.

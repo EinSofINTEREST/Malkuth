@@ -23,6 +23,7 @@ from malkuth.orchestrator.run import (
 from malkuth.orchestrator.state import (
     extract_input,
     merge_output,
+    resolve_graph_state,
     resolve_state_schema,
     schema_defaults,
     state_fields,
@@ -80,6 +81,7 @@ __all__ = [
     "merge_output",
     "resolve_condition",
     "resolve_import_ref",
+    "resolve_graph_state",
     "resolve_state_schema",
     "state_fields",
     "validate_state",

@@ -819,6 +819,7 @@ runtime:
   egress_proxy:
     connect_url: http://malkuth-egress:8080
     providers_url: http://malkuth-egress:8081
+    container: malkuth-egress   # needed only for MCP sidecars — see below
 ```
 
 Deployments then give each agent `HTTPS_PROXY` (its own identity as credentials),
@@ -948,11 +949,57 @@ rejected, since the proxy-held credential would reach a process inside the conta
 
 Not covered: stdio MCP servers run inside the agent container, so their tools are not decided one by
 one — their outside effects go through the proxy's destination decisions, and local effects are not
-controlled at run time. Sidecar MCP servers cannot be started by this runtime yet, so a graph whose
-agents declare one is refused at deployment (`VAL_002`).
+controlled at run time.
 
 **agentd now starts the declared MCP sessions.** The tools are advertised on the card and run from the
 first task. A required server that fails stops startup (`MCP_001`), and reload keeps the live sessions.
+
+#### MCP sidecars
+
+A server declared with `sidecar` runs in a container of its own, owned by one agent:
+
+```yaml
+spec:
+  mcp:
+    servers:
+      - name: browser
+        transport: streamable-http
+        sidecar:
+          image: mcp/playwright:1.2.0   # a pinned tag
+          resources: {cpu: "0.5", memory: 512Mi}
+          port: 8000                    # default
+          path: /mcp                    # default
+        allowed_tools: [navigate, screenshot]
+```
+
+The runtime starts it before the agent as `malkuth-<agent>--mcp-<server>` and removes it when the
+deployment is torn down or rolled back. The address comes from that name; a sidecar never declares a
+URL.
+
+- **A network of its own.** An agent's sidecars sit on an internal network, `malkuth-<agent>--mcp`,
+  never on the agent network. With `runtime.egress_proxy`, the only other container on it is the
+  proxy: the agent calls `…/mcp/<server>` as it would a remote server, and the proxy decides
+  `mcp_tool` for every `tools/call`. Revoking one tool refuses its next call, the server's other tools
+  keep working, and nothing restarts. There is no `egress` decision, because a sidecar is not an
+  outside destination. Without the proxy, the owning agent's replicas join that network directly, and
+  other agents still cannot reach it.
+- **The proxy has to be attached.** Set `runtime.egress_proxy.container` to the proxy's container name;
+  the runtime attaches it to each sidecar network under the host name of `connect_url`. A graph with a
+  sidecar behind the proxy is refused without this setting (`CFG_001`), because joining the agent to its
+  sidecar directly would leave the tool decisions to a check inside the agent's container.
+- **Hardened like an agent.** uid 1000, a read-only root filesystem with a writable `/tmp` (also
+  `HOME`), `cap-drop ALL`, `no-new-privileges`, a PID limit, and no published ports. Undeclared
+  resources default to the agent default (1 CPU, 1Gi), and each sidecar counts toward the group quota
+  once, whatever the replica count.
+- **Environment.** Only the server's `env_allowlist`, plus the owning agent's `HTTPS_PROXY` when the
+  proxy is on, so the sidecar's outside calls are decided per destination under the agent's identity.
+  Without the proxy a sidecar has no way out.
+- **Plain http, private addresses only.** A sidecar carries no credential (`auth` is rejected for
+  sidecars), so the proxy calls it over `http`, and only at an address that resolves privately.
+- **Restarts.** Docker restarts a sidecar that exits with an error, up to five times. After a control
+  plane restart, reattach brings back a sidecar that is gone or stopped and marks the deployment
+  `lost` if it cannot. agentd waits up to about ten seconds for a sidecar that is still starting; a
+  remote server is not waited for.
 
 ### A2A enforcement
 

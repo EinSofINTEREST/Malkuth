@@ -166,13 +166,16 @@ class RunManager:
 
     def active(self, mode: GraphMode) -> int:
         """해당 모드로 진행 중인 run 수."""
-        return sum(
-            1
-            for run in self._runs.values()
-            if run.mode is mode and run.status in (RunStatus.RUNNING, RunStatus.DRAINING)
-        )
+        return sum(1 for run in self._runs.values() if run.mode is mode and self._is_live(run))
 
-    def acquire(self, topology: GraphTopology, *, run_id: str | None = None) -> RunHandle:
+    @staticmethod
+    def _is_live(run: RunHandle) -> bool:
+        """슬롯을 쥐고 있는 run — 진행 중이거나 drain 중."""
+        return run.status in (RunStatus.RUNNING, RunStatus.DRAINING)
+
+    def acquire(
+        self, topology: GraphTopology, *, run_id: str | None = None, resuming: bool = False
+    ) -> RunHandle:
         """Reserve a run slot for a graph.
 
         그래프의 run 슬롯을 확보합니다.
@@ -180,6 +183,8 @@ class RunManager:
         Args:
             topology: The graph to run.
             run_id: Optional run id; generated when omitted.
+            resuming: 끝난 run 을 같은 id 로 다시 잡는다 — 재개 전용. 새 제출이 끝난 run 의
+                id 를 재사용하면 옛 checkpoint 위에 새 실행이 얹히므로 제출에는 열지 않는다.
 
         Returns:
             The run handle.
@@ -200,7 +205,8 @@ class RunManager:
             )
 
         resolved_id = run_id or f"run-{uuid.uuid4()}"
-        if resolved_id in self._runs:
+        existing = self._runs.get(resolved_id)
+        if existing is not None and not (resuming and not self._is_live(existing)):
             # 덮어쓰면 앞선 run 의 추적이 사라지고 슬롯 회계가 어긋난다
             raise MalkuthError(
                 category=ErrorCategory.VALIDATION,

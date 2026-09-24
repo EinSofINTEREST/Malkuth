@@ -25,6 +25,7 @@ from malkuth.orchestrator.topology import GraphMode
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
 
+    from langchain_core.runnables import RunnableConfig
     from langgraph.checkpoint.base import BaseCheckpointSaver
 
     from malkuth.observability.metrics import Metrics
@@ -56,7 +57,7 @@ class RunResult:
         return self.status is RunStatus.COMPLETED
 
 
-def _thread_config(run_id: str) -> dict[str, Any]:
+def _thread_config(run_id: str) -> RunnableConfig:
     """checkpointer 의 thread 를 run 에 고정한다 — 재개가 같은 흐름을 잇도록."""
     return {"configurable": {"thread_id": run_id}}
 
@@ -174,17 +175,18 @@ class RunSubmitter:
         # 준다 — None 분기를 두면 "schema 가 없을 수도 있다" 는 잘못된 신호가 된다
         validate_state(resolve_state_schema(topology.spec.state.schema_ref), dict(initial_state))
 
-    async def resume(
-        self, topology: GraphTopology, run_id: str, initial_state: Mapping[str, Any] | None = None
-    ) -> RunResult:
+    async def resume(self, topology: GraphTopology, run_id: str) -> RunResult:
         """Continue a run from its last checkpoint.
 
-        마지막 checkpoint 에서 run 을 이어갑니다. checkpointer 가 없으면
-        이어갈 지점이 없으므로 거부합니다 — 조용히 처음부터 다시 돌면
-        부수효과가 두 번 일어납니다.
+        마지막 checkpoint 에서 run 을 이어갑니다. 완료된 노드는 다시 돌지 않고 실패한
+        노드부터 이어갑니다 — 그래프에 **입력 없이**(``None``) 들어가야 LangGraph 가 중단
+        지점에서 잇습니다. 입력을 넘기면 채널은 남지만 START 부터 새 실행이 시작돼, 앞선
+        노드의 부수효과가 두 번 일어납니다 (#309).
 
         Raises:
-            MalkuthError: STORAGE/``STOR_002`` when no checkpointer is attached.
+            MalkuthError: STORAGE/``STOR_002`` when no checkpointer is attached or
+                the run left no checkpoint to continue from.
+            MalkuthError: GRAPH/``GRAPH_006`` if the run is still running (HTTP 409).
         """
         if self.checkpointer is None:
             raise MalkuthError(
@@ -193,9 +195,30 @@ class RunSubmitter:
                 message="cannot resume without a checkpointer",
                 details={"run_id": run_id, "graph": topology.metadata.name},
             )
+        live = self.manager.runs.get(run_id)
+        if live is not None and live.status in (RunStatus.RUNNING, RunStatus.DRAINING):
+            # 같은 thread 를 두 실행이 이어 쓰면 checkpoint 가 뒤엉킨다
+            raise MalkuthError(
+                category=ErrorCategory.GRAPH,
+                code=ErrorCode.GRAPH_006,
+                message="run is still running",
+                details={"run_id": run_id, "status": str(live.status)},
+            )
 
-        handle = self.manager.acquire(topology, run_id=run_id)
-        return await self._drive(topology, handle, initial_state or {})
+        if await self.checkpointer.aget_tuple(_thread_config(run_id)) is None:
+            # 이어갈 지점이 없는데 입력 없이 들어가면 LangGraph 는 아무것도 하지 않고 끝난다 —
+            # "재개 성공" 으로 보이는 빈 결과를 내느니 거부한다
+            raise MalkuthError(
+                category=ErrorCategory.STORAGE,
+                code=ErrorCode.STOR_002,
+                message="run has no checkpoint to resume from",
+                details={"run_id": run_id, "graph": topology.metadata.name},
+            )
+
+        # 이 프로세스가 끝까지 지켜본 run(실패한 run 을 UI 에서 재개)도 이어갈 수 있어야 한다 —
+        # 재시작한 프로세스만 재개할 수 있으면 재개 버튼이 같은 프로세스에서 409 로 막힌다
+        handle = self.manager.acquire(topology, run_id=run_id, resuming=True)
+        return await self._drive(topology, handle, None)
 
     async def start_service(
         self,
@@ -399,9 +422,12 @@ class RunSubmitter:
         self,
         topology: GraphTopology,
         handle: RunHandle,
-        initial_state: Mapping[str, Any],
+        initial_state: Mapping[str, Any] | None,
     ) -> RunResult:
-        """그래프를 실행하고 슬롯을 반드시 반납한다."""
+        """그래프를 실행하고 슬롯을 반드시 반납한다.
+
+        ``initial_state`` 가 None 이면 새 실행이 아니라 checkpoint 에서 잇는다.
+        """
         graph = build_graph(
             topology,
             self.runtime,
@@ -413,10 +439,10 @@ class RunSubmitter:
         outcome = RunStatus.FAILED
 
         try:
-            final = await graph.ainvoke(
-                seed_state(initial_state, run_id=handle.run_id),
-                config=_thread_config(handle.run_id),
+            payload = (
+                None if initial_state is None else seed_state(initial_state, run_id=handle.run_id)
             )
+            final = await graph.ainvoke(payload, config=_thread_config(handle.run_id))
         except MalkuthError as err:
             bound.error("graph run failed", error_code=err.code, mode=str(topology.spec.mode))
             return RunResult(

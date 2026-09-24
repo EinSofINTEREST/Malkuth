@@ -172,13 +172,33 @@ async def test_service_graph_is_rejected_for_completion(node_runtime):
 
 
 @requires_docker
-async def test_resume_continues_the_same_run(node_runtime):
-    """재개는 같은 run_id 로 이어져 checkpoint 흐름이 연결된다."""
-    submit = submitter(node_runtime)
+async def test_resume_continues_from_the_failed_node(node_runtime):
+    """재개는 checkpoint 에서 잇는다 — 이미 끝난 노드의 컨테이너를 다시 부르지 않는다 (#309)."""
+
+    class FailResearcherOnce:
+        """researcher 의 첫 호출만 실패시키고 나머지는 실제 컨테이너로 보낸다."""
+
+        def __init__(self) -> None:
+            self.invoked: list[str] = []
+
+        async def invoke(self, node, task):
+            self.invoked.append(node.id)
+            if node.id == "researcher" and self.invoked.count(node.id) == 1:
+                raise MalkuthError(
+                    category=ErrorCategory.GRAPH, code=ErrorCode.GRAPH_002, message="injected"
+                )
+            return await node_runtime.invoke(node, task)
+
+    runtime = FailResearcherOnce()
+    submit = submitter(runtime)  # type: ignore[arg-type]
+    failed = await submit.submit(topology("research-pipeline"), {"query": "q"}, run_id="e2e-resume")
+    assert not failed.ok
 
     result = await submit.resume(topology("research-pipeline"), "e2e-resume")
 
+    assert result.ok, result.error
     assert result.run_id == "e2e-resume"
+    assert runtime.invoked == ["planner", "researcher", "researcher", "writer"]
 
 
 @requires_docker

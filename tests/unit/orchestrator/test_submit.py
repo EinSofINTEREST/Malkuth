@@ -29,6 +29,20 @@ class ScriptedRuntime:
         return TaskResult.completed(task, output=self._outputs.get(node.id, {}))
 
 
+class FailOnceRuntime(ScriptedRuntime):
+    """지정한 노드가 첫 호출에서만 실패한다 — 재개가 어디서 잇는지 본다."""
+
+    def __init__(self, failing: str) -> None:
+        super().__init__()
+        self._failing = failing
+
+    async def invoke(self, node, task):
+        self.invoked.append(node.id)
+        if node.id == self._failing and self.invoked.count(node.id) == 1:
+            raise MalkuthError(category=ErrorCategory.GRAPH, code="GRAPH_002", message="flaky")
+        return TaskResult.completed(task, output={})
+
+
 class RecordingRuntime:
     """노드가 받은 태스크의 추적 정보를 기록하는 런타임 대역."""
 
@@ -194,25 +208,51 @@ async def test_resume_without_a_checkpointer_is_rejected():
     assert exc_info.value.code == "STOR_002"
 
 
-async def test_resume_reuses_the_run_id():
-    """재개는 같은 run_id 로 이어져야 checkpoint 흐름이 연결된다."""
+async def test_resume_without_a_checkpoint_is_rejected():
+    """이어갈 지점이 없으면 입력 없는 실행이 빈 결과로 "성공" 해 보인다."""
     submit = submitter()
+
+    with pytest.raises(MalkuthError) as exc_info:
+        await submit.resume(make_mission(), "run-never-started")
+
+    assert exc_info.value.code == "STOR_002"
+    assert submit.manager.runs == {}
+
+
+async def test_resume_continues_from_the_failed_node():
+    """완료된 노드가 다시 돌면 그 부수효과가 두 번 일어난다 (#309)."""
+    runtime = FailOnceRuntime(failing="researcher")
+    submit = submitter(runtime)
+    failed = await submit.submit(make_mission(), {"query": "q"}, run_id="run-resume")
+    assert not failed.ok
 
     result = await submit.resume(make_mission(), "run-resume")
 
+    assert result.ok
     assert result.run_id == "run-resume"
+    assert runtime.invoked == ["planner", "researcher", "researcher"]
+    # 예약 채널은 checkpoint 에서 온다 — 재개가 다시 주입하지 않아도 run 이 이어진다
+    assert result.state["_run_id"] == "run-resume"
 
 
-async def test_resuming_a_tracked_run_is_rejected():
-    """이미 추적 중인 run 을 다시 acquire 하면 슬롯 회계가 어긋난다.
-
-    재개는 프로세스가 재시작되어 추적이 비어 있는 상태를 전제로 한다.
-    """
+async def test_resuming_a_running_run_is_a_conflict():
+    """같은 thread 를 두 실행이 이어 쓰면 checkpoint 가 뒤엉킨다."""
     submit = submitter()
-    await submit.submit(make_mission(), {"query": "q"}, run_id="run-live")
+    submit.manager.acquire(make_mission(), run_id="run-live")
 
     with pytest.raises(MalkuthError) as exc_info:
         await submit.resume(make_mission(), "run-live")
+
+    assert exc_info.value.code == "GRAPH_006"
+
+
+async def test_a_new_submission_cannot_reuse_a_finished_run_id():
+    """끝난 run 의 id 로 새로 제출하면 옛 checkpoint 위에 새 실행이 얹힌다 — 재개만 연다."""
+    submit = submitter()
+    await submit.submit(make_mission(), {"query": "q"}, run_id="run-done")
+
+    with pytest.raises(MalkuthError) as exc_info:
+        await submit.submit(make_mission(), {"query": "q"}, run_id="run-done")
 
     assert exc_info.value.code == "VAL_002"
 

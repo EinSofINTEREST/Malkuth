@@ -52,9 +52,11 @@ async def test_recalled_memory_is_appended_to_the_prompt():
 
     await executor.execute(make_task())
 
-    prompt = executor._model.calls[0][0]  # type: ignore[attr-defined]
+    _, conversation, _ = executor._model.requests[0]  # type: ignore[attr-defined]
+    # 기억은 태스크 텍스트와 다른 블록 — 모델이 참고 자료와 지시를 구분할 수 있게
+    context, prompt = conversation[0].parts
     assert prompt.startswith("prompt:")
-    assert RECALLED in prompt
+    assert RECALLED in context
 
 
 async def test_recall_runs_once_per_task_not_per_turn():

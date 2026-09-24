@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from malkuth.agentd.executor import ModelResponse, ToolCall
+from malkuth.agentd.executor import Message, ModelResponse, ToolCall, UserTurn
 from malkuth.core.agent import ModelUsage
 from malkuth.core.skill import SkillContext
 
@@ -20,9 +20,17 @@ class FakeModel:
     def __init__(self, responses: list[ModelResponse | Exception]) -> None:
         self._responses = list(responses)
         self.calls: list[tuple[str, tuple[Any, ...]]] = []
+        """(첫 사용자 턴의 태스크 텍스트, 도구 이름들) — 태스크 입력이 무엇으로 렌더됐는지 본다."""
+        self.requests: list[tuple[str, tuple[Message, ...], tuple[Any, ...]]] = []
+        """(system, messages, tools) 그대로 — 대화 구조를 보는 테스트용."""
 
-    async def run(self, prompt: str, tools: Any) -> ModelResponse:
-        self.calls.append((prompt, tuple(tools)))
+    async def run(self, system: str, messages: Any, tools: Any) -> ModelResponse:
+        messages = tuple(messages)
+        self.requests.append((system, messages, tuple(tools)))
+        opening = messages[0]
+        self.calls.append(
+            (opening.parts[-1] if isinstance(opening, UserTurn) else "", tuple(tools))
+        )
         index = min(len(self.calls) - 1, len(self._responses) - 1)
         item = self._responses[index]
         if isinstance(item, Exception):

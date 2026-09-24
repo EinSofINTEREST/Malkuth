@@ -9,10 +9,21 @@ import asyncio
 
 import pytest
 
-from malkuth.agentd.executor import Executor, ExecutorConfig, ExecutorServices
+from malkuth.agentd.executor import (
+    AssistantTurn,
+    Executor,
+    ExecutorConfig,
+    ExecutorServices,
+    ToolCall,
+    ToolOutcome,
+    ToolTurn,
+    UserTurn,
+    tool_outcome,
+)
 from malkuth.core.agent import TaskConfig, TaskStatus
 from malkuth.core.errors import ErrorCategory, MalkuthError
 from malkuth.core.events import DoneEvent, ErrorEvent, ToolCallEvent, ToolResultEvent
+from malkuth.protocols.mcp.session import ToolResult as McpToolResult
 from tests.fixtures.builders import make_task
 from tests.fixtures.fake_model import FakeModel, FakeTools, calls, text
 
@@ -64,8 +75,13 @@ async def test_tool_results_feed_the_next_prompt():
 
     await executor.execute(make_task())
 
-    second_prompt = model.calls[1][0]
-    assert "[tool:search] found" in second_prompt
+    # 결과는 태스크 텍스트에 섞이지 않고 호출 id 로 짝지어 돌아간다 (#308)
+    _, conversation, _ = model.requests[1]
+    opening, assistant, results = conversation
+    assert isinstance(opening, UserTurn)
+    assert isinstance(assistant, AssistantTurn)
+    assert [c.id for c in assistant.tool_calls] == ["c0"]
+    assert results == ToolTurn(outcomes=(ToolOutcome(call_id="c0", content="found"),))
 
 
 # --- 상한과 타임아웃 --------------------------------------------------------
@@ -574,3 +590,37 @@ async def test_a_streamed_timeout_is_logged():
 
     [entry] = outcome_logs(logs)
     assert entry["error_code"] == "TO_001"
+
+
+# --- 대화 구조 (#308) ------------------------------------------------------------------
+
+
+async def test_the_system_instruction_is_sent_apart_from_the_task():
+    model = FakeModel([text("done")])
+    executor = Executor(
+        agent="a", model=model, tools=FakeTools(), render=lambda t: "task", system="rules"
+    )
+
+    await executor.execute(make_task())
+
+    system, conversation, _ = model.requests[0]
+    assert system == "rules"
+    assert conversation == (UserTurn(parts=("task",)),)
+
+
+@pytest.mark.parametrize(
+    ("result", "expected"),
+    [
+        ("plain", ToolOutcome(call_id="c0", content="plain")),
+        # repr 이 아니라 JSON — 모델이 파이썬 리터럴을 해석하게 두지 않는다
+        ({"hits": ["a", "b"]}, ToolOutcome(call_id="c0", content='{"hits": ["a", "b"]}')),
+        (["한글"], ToolOutcome(call_id="c0", content='["한글"]')),
+        (
+            McpToolResult(content="denied", is_error=True),
+            ToolOutcome(call_id="c0", content="denied", is_error=True),
+        ),
+        (McpToolResult(content={"ok": 1}), ToolOutcome(call_id="c0", content='{"ok": 1}')),
+    ],
+)
+def test_tool_outcome_serializes_results_for_the_model(result, expected):
+    assert tool_outcome(ToolCall(id="c0", name="search"), result) == expected

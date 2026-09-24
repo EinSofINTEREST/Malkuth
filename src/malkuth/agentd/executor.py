@@ -105,6 +105,11 @@ class ModelResponse:
     content: str = ""
     tool_calls: tuple[ToolCall, ...] = ()
     usage: ModelUsage = field(default_factory=ModelUsage)
+    raw: Any = None
+    """provider 가 돌려준 assistant 내용 그대로 — 다음 턴에 **바꾸지 않고** 되돌려 보낸다.
+
+    텍스트와 도구 호출만 다시 조립하면 provider 고유 블록(thinking 등)이 빠져, 도구를 부른 턴을
+    이어갈 때 provider 가 거부하거나 추론 맥락을 잃는다."""
 
     @property
     def is_final(self) -> bool:
@@ -112,14 +117,57 @@ class ModelResponse:
         return not self.tool_calls
 
 
+@dataclass(frozen=True)
+class UserTurn:
+    """What the caller says — 태스크 입력, 그리고 그와 **따로 표시된** 회상 기억."""
+
+    parts: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class AssistantTurn:
+    """What the model said — 텍스트와 도구 호출, provider 원본."""
+
+    content: str = ""
+    tool_calls: tuple[ToolCall, ...] = ()
+    raw: Any = None
+
+
+@dataclass(frozen=True)
+class ToolOutcome:
+    """One tool's answer, bound to the call that asked for it."""
+
+    call_id: str
+    content: str
+    is_error: bool = False
+
+
+@dataclass(frozen=True)
+class ToolTurn:
+    """Every tool answer of one assistant turn — 한 메시지에 모아 돌려준다 (병렬 호출)."""
+
+    outcomes: tuple[ToolOutcome, ...]
+
+
+Message = UserTurn | AssistantTurn | ToolTurn
+"""대화 한 칸. 역할이 번갈아 쌓인다: user → assistant → tool → assistant → …"""
+
+
 class Model(Protocol):
     """Model provider contract.
 
     모델 provider 계약. 실제 SDK 는 이 뒤에 감춰지고, 테스트는 FakeModel 로 대체한다.
+
+    ``system`` 은 운영자 지시(promptset 의 ``system`` 템플릿)이고 ``messages`` 는 태스크
+    입력·도구 결과가 쌓이는 대화다. 둘을 한 문자열로 합치면 도구 결과(신뢰하지 않는 입력)와
+    시스템 지시가 같은 자리에 놓여, 03/09 의 "도구 결과·기억 속 지시를 시스템 지시로 승격하지
+    않는다" 경계가 모델 입력에서 사라진다 (#308).
     """
 
-    async def run(self, prompt: str, tools: Sequence[Any]) -> ModelResponse:
-        """프롬프트와 tool 목록으로 한 턴을 실행한다."""
+    async def run(
+        self, system: str, messages: Sequence[Message], tools: Sequence[Any]
+    ) -> ModelResponse:
+        """시스템 지시와 대화, tool 목록으로 한 턴을 실행한다."""
         ...
 
 
@@ -212,6 +260,8 @@ class ModuleBinding:
     render: Callable[[TaskRequest], str]
     tool_schemas: tuple[Any, ...] = ()
     output_keys: Callable[[TaskRequest], Sequence[str]] | None = None
+    system: str = ""
+    """운영자 지시 — promptset 의 ``system`` 템플릿. 태스크 입력과 섞지 않고 따로 보낸다 (#308)."""
 
 
 class Executor:
@@ -230,6 +280,7 @@ class Executor:
         tool_schemas: Sequence[Any] = (),
         config: ExecutorConfig | None = None,
         services: ExecutorServices | None = None,
+        system: str = "",
     ) -> None:
         self._agent = agent
         self._model = model
@@ -240,6 +291,7 @@ class Executor:
             render=render,
             tool_schemas=tuple(tool_schemas),
             output_keys=self._services.output_keys,
+            system=system,
         )
         # 멱등성: 완료된 태스크는 같은 결과를 돌려준다 (재시도/재개 시나리오)
         self._completed: dict[str, TaskResult] = {}
@@ -416,24 +468,24 @@ class Executor:
             details={"declared": ",".join(keys), "content": content[-300:]},
         )
 
-    async def _initial_prompt(self, task: TaskRequest, binding: ModuleBinding) -> str:
-        """Build the task-entry prompt, recalling memory once.
+    async def _opening(self, task: TaskRequest, binding: ModuleBinding) -> UserTurn:
+        """Build the task-entry user turn, recalling memory once.
 
-        09 Context Assembly 의 구성 순서를 따릅니다:
-        ``system(promptset) + task input + recalled memory``.
+        09 Context Assembly 의 구성을 따릅니다: ``system(promptset)`` 은 따로 가고, 여기는
+        ``task input + recalled memory`` 입니다. 회상 기억은 태스크 입력과 **다른 블록**으로
+        싣습니다 — 과거 산출물이 현재 지시처럼 읽히지 않게 (09 Rule 6).
 
-        회상은 **태스크당 1회**입니다 — tool loop 가 N 턴 돌아도 다시 검색하지
-        않습니다 (09 Rule 7). 추가 탐색은 모델이 ``memory_search`` 를 명시
-        호출합니다.
+        회상은 **태스크당 1회**입니다 — tool loop 가 N 턴 돌아도 다시 검색하지 않습니다 (09 Rule 7).
+        추가 탐색은 모델이 ``memory_search`` 를 명시 호출합니다.
         """
         prompt = binding.render(task)
         if self._services.recall is None:
-            return prompt
+            return UserTurn(parts=(prompt,))
 
         context = await self._services.recall(task)
         if not context:
-            return prompt
-        return f"{prompt}\n\n{context}"
+            return UserTurn(parts=(prompt,))
+        return UserTurn(parts=(context, prompt))
 
     async def _run(self, task: TaskRequest) -> TaskResult:
         """공용 루프를 끝까지 돌려 결과만 취한다.
@@ -447,18 +499,21 @@ class Executor:
                 return TaskResult.completed(task, output=event.output, usage=event.usage)
         raise AssertionError("event loop ended without a terminal event")  # pragma: no cover
 
-    async def _call_model(self, prompt: str, binding: ModuleBinding) -> ModelResponse:
+    async def _call_model(
+        self, messages: Sequence[Message], binding: ModuleBinding
+    ) -> ModelResponse:
         """모델 한 번 — 실패도 메트릭에 남겨야 하므로 여기서 감싼다.
 
         **재시도 안쪽**이라 시도마다 계수된다: 05 의 rate limit 알림은
         발생 빈도를 보므로, 재시도로 성공한 호출의 rate limit 이 지워지면
         provider 압박이 지표에서 사라진다.
         """
+        tools = list(binding.tool_schemas)
         if self._services.telemetry is None:
-            return await self._model.run(prompt, list(binding.tool_schemas))
+            return await self._model.run(binding.system, list(messages), tools)
 
         try:
-            response = await self._model.run(prompt, list(binding.tool_schemas))
+            response = await self._model.run(binding.system, list(messages), tools)
         except asyncio.CancelledError:
             raise
         except Exception as err:
@@ -468,7 +523,9 @@ class Executor:
         self._services.telemetry.model_called(status=STATUS_COMPLETED, usage=response.usage)
         return response
 
-    async def _model_turn(self, prompt: str, binding: ModuleBinding) -> ModelResponse:
+    async def _model_turn(
+        self, messages: Sequence[Message], binding: ModuleBinding
+    ) -> ModelResponse:
         """모델 한 턴 — 정책이 허용하는 실패는 재시도한다.
 
         **재시도 주체는 agentd 다** (05 Retry Layering). provider SDK 재시도는
@@ -479,7 +536,7 @@ class Executor:
         """
 
         async def attempt() -> ModelResponse:
-            return await self._call_model(prompt, binding)
+            return await self._call_model(messages, binding)
 
         return await retrying_any(
             self._config.retry_policies, attempt, sleep=self._config.retry_sleep, agent=self._agent
@@ -525,16 +582,6 @@ class Executor:
         """tool 호출을 메트릭에 남긴다 — telemetry 미주입 시 무동작."""
         if self._services.telemetry is not None:
             self._services.telemetry.tool_called(tool=tool, status=status)
-
-    def _extend(
-        self, prompt: str, response: ModelResponse, results: Sequence[tuple[ToolCall, Any]]
-    ) -> str:
-        """다음 턴의 프롬프트에 이번 턴의 응답과 tool 결과를 잇는다."""
-        parts = [prompt]
-        if response.content:
-            parts.append(response.content)
-        parts.extend(f"[tool:{call.name}] {result}" for call, result in results)
-        return "\n".join(parts)
 
     def _cleanup(self) -> None:
         """취소 시 진행 중 자원을 정리한다."""
@@ -647,14 +694,14 @@ class Executor:
         """
         # 이 태스크가 끝까지 쓸 모듈 묶음 — 리로드가 도중에 갈아 끼워도 섞이지 않는다
         binding = self._binding
-        prompt = await self._initial_prompt(task, binding)
+        messages: list[Message] = [await self._opening(task, binding)]
         usage = ModelUsage()
         max_turns = self._max_turns(task)
         ctx = self._skill_context(task)
 
         try:
             for turn in range(max_turns):
-                response = await self._model_turn(prompt, binding)
+                response = await self._model_turn(messages, binding)
                 usage = usage.merge(response.usage)
 
                 if response.content:
@@ -676,7 +723,7 @@ class Executor:
                         turn=turn,
                     )
 
-                results = []
+                outcomes = []
                 failure: MalkuthError | None = None
                 for event, outcome in await self._invoke_tools(
                     response.tool_calls, task, ctx, turn, binding
@@ -685,12 +732,17 @@ class Executor:
                     if isinstance(outcome, MalkuthError):
                         failure = failure or outcome
                     else:
-                        results.append(outcome)
+                        outcomes.append(outcome)
 
                 if failure is not None:
                     raise failure
 
-                prompt = self._extend(prompt, response, results)
+                # 모델이 보낸 그대로(raw) 되돌리고, 모든 결과를 **한** 메시지에 모은다 —
+                # 나눠 보내면 모델이 병렬 호출을 멈추도록 학습된다
+                messages.append(
+                    AssistantTurn(response.content, response.tool_calls, raw=response.raw)
+                )
+                messages.append(ToolTurn(outcomes=tuple(outcomes)))
         except asyncio.CancelledError:
             self._cleanup()
             raise
@@ -783,18 +835,40 @@ class Executor:
                         turn=turn,
                         duration_ms=elapsed_ms,
                     ),
-                    (call, outcome),
+                    tool_outcome(call, outcome),
                 )
             )
         return paired
 
 
+def tool_outcome(call: ToolCall, result: Any) -> ToolOutcome:
+    """Turn a tool's return value into what the model reads back.
+
+    문자열은 그대로, 그 밖은 JSON 으로 싣는다 — ``repr`` 을 실으면 모델이 파이썬 객체 표기를 읽는다.
+    MCP 도구가 **실행은 됐지만 오류를 보고한** 결과(``is_error``)는 오류로 표시해 돌려준다: 태스크를
+    실패시킬 일은 아니지만 모델이 성공으로 읽어서도 안 된다.
+    """
+    is_error = bool(getattr(result, "is_error", False))
+    payload = getattr(result, "content", result) if hasattr(result, "is_error") else result
+    if isinstance(payload, str):
+        content = payload
+    else:
+        content = json.dumps(payload, ensure_ascii=False, default=str)
+    return ToolOutcome(call_id=call.id, content=content, is_error=is_error)
+
+
 __all__ = [
+    "AssistantTurn",
     "Executor",
     "ExecutorConfig",
     "ExecutorServices",
     "Model",
+    "Message",
     "ModelResponse",
     "ToolCall",
+    "ToolOutcome",
     "ToolRegistry",
+    "ToolTurn",
+    "UserTurn",
+    "tool_outcome",
 ]

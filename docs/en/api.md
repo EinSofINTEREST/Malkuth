@@ -850,8 +850,13 @@ outside address fails. The proxy is the only way out.
   after a restart looks the address up again. The control plane must be able to reach that
   address: run it on the agent network, or on the Linux host that owns the network's bridge.
 - **The host is still reachable from agents** at the agent network's gateway address, like any
-  bridge network. A host service listening on all interfaces is reachable from agents. Bind host
-  services to loopback or to the address they serve, or firewall the bridge.
+  bridge network — a host service listening on all interfaces is a way out the proxy never sees.
+  Close it with `deployments/docker/isolate-agent-network.sh apply <network>` (root): it drops
+  connections agents open to the host and keeps the replies to connections the host opens, so the
+  control plane still reaches each agent. See the
+  [runbook](runbooks/access-control.md#closing-the-host-gateway). The control plane logs a warning at
+  startup when the proxy is on and it binds anything but loopback, because it is then one of those
+  services.
 
 Without `runtime.egress_proxy`, agents stay on a regular network with ports published on loopback, as
 before.

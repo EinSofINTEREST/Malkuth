@@ -10,9 +10,12 @@ from malkuth.core.manifest import (
     AgentManifest,
     GroupManifest,
     GroupQuotas,
+    McpServerSpec,
     McpSidecar,
     ParsedModuleRef,
     ResourceSpec,
+    sidecar_host,
+    sidecar_url,
 )
 from tests.fixtures.builders import make_manifest, manifest_dict
 
@@ -425,6 +428,51 @@ def test_unpinned_sidecar_images_are_rejected(image):
 )
 def test_pinned_sidecar_images_are_accepted(image):
     assert McpSidecar(image=image).image == image
+
+
+def test_sidecar_url_is_derived_from_the_agent_and_server():
+    server = McpServerSpec(
+        name="browser",
+        transport="streamable-http",
+        sidecar={"image": "mcp/playwright:1.2.0", "port": 3000, "path": "/rpc"},
+    )
+
+    assert sidecar_url("researcher", server) == "http://malkuth-researcher--mcp-browser:3000/rpc"
+
+
+def test_sidecar_url_defaults_to_port_8000_and_mcp_path():
+    server = McpServerSpec(
+        name="browser", transport="streamable-http", sidecar={"image": "mcp/playwright:1.2.0"}
+    )
+
+    assert sidecar_url("researcher", server) == "http://malkuth-researcher--mcp-browser:8000/mcp"
+
+
+def test_sidecar_names_never_collide_with_replicas_or_other_agents():
+    # 에이전트 이름에 하이픈 연속이 없으므로 `--` 가 두 이름을 가른다
+    assert sidecar_host("foo", "bar-0") != "malkuth-foo-mcp-bar-0"
+    assert sidecar_host("foo", "mcp-bar") != sidecar_host("foo-mcp", "bar")
+
+
+def test_sidecar_url_refuses_a_non_sidecar_server():
+    server = McpServerSpec(name="fs", transport="stdio", command=("mcp-server-filesystem",))
+
+    with pytest.raises(ValueError, match="not a sidecar"):
+        sidecar_url("researcher", server)
+
+
+@pytest.mark.parametrize(
+    "path", ["mcp", "/mcp?x=1", "/mcp#f", "//evil.example/mcp", "/a@b", "/a\\b", "/a b"]
+)
+def test_sidecar_path_cannot_rewrite_the_address(path):
+    with pytest.raises(ValidationError, match="sidecar path"):
+        McpSidecar(image="mcp/playwright:1.2.0", path=path)
+
+
+@pytest.mark.parametrize("port", [0, 65536, -1])
+def test_sidecar_port_must_be_a_real_port(port):
+    with pytest.raises(ValidationError):
+        McpSidecar(image="mcp/playwright:1.2.0", port=port)
 
 
 def test_unpinned_agent_image_with_registry_port_is_rejected():

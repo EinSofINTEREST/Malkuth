@@ -118,6 +118,23 @@ async def test_validate_reports_without_saving(api, workspace):
     assert not (workspace / "graphs" / "draft.yaml").exists()
 
 
+async def test_validate_reports_a_fan_out_the_run_could_not_survive(api):
+    """편집기가 저장 전에 병렬 분기를 거른다 — 배포 검증과 같은 finding (#313)."""
+    draft = graph_doc("fan")
+    draft["spec"]["nodes"].append({"id": "other", "agent": "agents/alpha@0.1.0"})
+    draft["spec"]["edges"] = [
+        {"from": "START", "to": "step"},
+        {"from": "step", "to": "other"},
+        {"from": "step", "to": "END"},
+        {"from": "other", "to": "END"},
+    ]
+
+    response = await api.post("/v1/validate", json={"graphs": [draft]})
+
+    fan_out = [f for f in response.json()["findings"] if f["check"] == "mode_rules"]
+    assert [(f["code"], f["node_id"]) for f in fan_out] == [("GRAPH_001", "step")]
+
+
 async def test_validate_accepts_a_draft_agent_and_graph_together(api):
     response = await api.post(
         "/v1/validate",

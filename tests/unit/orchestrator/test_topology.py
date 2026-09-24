@@ -260,7 +260,48 @@ def test_mission_cycle_with_max_iterations_passes():
         edges=[
             {"from": "START", "to": "planner"},
             {"from": "planner", "to": "researcher"},
-            {"from": "researcher", "to": "planner", "max_iterations": 3},
+            {
+                "from": "researcher",
+                "to": "planner",
+                "condition": condition_ref(),
+                "max_iterations": 3,
+            },
+            {"from": "researcher", "to": "END"},
+        ]
+    )
+
+    validate_topology(topology)
+
+
+# --- 병렬 분기 (#313) -----------------------------------------------------------------
+
+
+@pytest.mark.parametrize("source", ["START", "planner"])
+def test_unconditional_fan_out_is_rejected(source):
+    """조건 없는 edge 둘은 LangGraph 가 병렬로 돌려 병합 규칙 없는 채널에서 run 이 죽는다."""
+    edges = [
+        {"from": "START", "to": "planner"},
+        {"from": "planner", "to": "researcher"},
+        {"from": "researcher", "to": "END"},
+    ]
+    edges.append({"from": source, "to": "researcher" if source == "START" else "END"})
+    topology = make_mission(edges=edges)
+
+    with pytest.raises(MalkuthError) as exc_info:
+        validate_topology(topology)
+
+    assert_graph_001(exc_info)
+    assert "parallel branches are not supported" in exc_info.value.message
+    assert exc_info.value.details["node_id"] == source
+
+
+def test_a_conditional_branch_with_a_fallback_is_not_a_fan_out():
+    """조건 edge 가 있는 노드는 라우터가 한 곳만 고른다 — 조건 없는 edge 는 기본 경로다."""
+    topology = make_mission(
+        edges=[
+            {"from": "START", "to": "planner"},
+            {"from": "planner", "to": "researcher", "condition": condition_ref()},
+            {"from": "planner", "to": "END"},
             {"from": "researcher", "to": "END"},
         ]
     )
@@ -520,7 +561,12 @@ def test_max_iterations_on_the_cycle_edge_satisfies_the_rule():
             edges=[
                 {"from": "START", "to": "planner"},
                 {"from": "planner", "to": "researcher"},
-                {"from": "researcher", "to": "planner", "max_iterations": 3},
+                {
+                    "from": "researcher",
+                    "to": "planner",
+                    "condition": condition_ref(),
+                    "max_iterations": 3,
+                },
                 {"from": "researcher", "to": "END"},
             ]
         )

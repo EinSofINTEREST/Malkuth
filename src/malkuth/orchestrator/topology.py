@@ -480,6 +480,32 @@ def _check_mode_topology(topology: GraphTopology) -> None:
         )
 
 
+def _check_fan_out(topology: GraphTopology) -> None:
+    """조건 없는 out-edge 는 노드당 하나 — 노드는 한 번에 한 길로만 나간다.
+
+    - 조건 edge 가 없는 노드: 조건 없는 edge 가 둘이면 LangGraph 는 두 노드를 같은 superstep
+      에서 병렬로 돌린다. 두 branch 가 같은 state 키(최소한 ``_iterations``)를 쓰는데 채널에
+      병합 규칙이 없어 run 이 ``InvalidUpdateError`` 로 죽는다 (#313)
+    - 조건 edge 가 있는 노드: 조건 없는 edge 는 기본 경로이고 라우터는 **첫 번째**만 쓴다 —
+      두 번째는 조용히 버려진다
+
+    어느 쪽이든 검증은 통과하고 run 에서야 드러나던 것을 여기로 당긴다.
+    """
+    unconditional: dict[str, list[str]] = {}
+    for edge in topology.spec.edges:
+        if edge.condition is None:
+            unconditional.setdefault(edge.source, []).append(edge.target)
+    for source, targets in unconditional.items():
+        if len(targets) > 1:
+            raise _topology_error(
+                f"node has {len(targets)} edges without conditions — a node leaves by one "
+                "path; parallel branches are not supported; give the edges conditions",
+                graph=topology.name,
+                node_id=source,
+                targets=targets,
+            )
+
+
 def _check_connections(topology: GraphTopology) -> None:
     """A2A allowlist 의 caller/callee 가 모두 그래프 노드여야 한다."""
     for connection in topology.spec.connections:
@@ -583,6 +609,7 @@ def validate_topology(
     _check_edge_endpoints(topology)
     _check_reachability(topology)
     _check_mode_topology(topology)
+    _check_fan_out(topology)
     _check_connections(topology)
     _check_conditions(topology)
 

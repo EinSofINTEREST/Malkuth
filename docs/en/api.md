@@ -166,6 +166,12 @@ curl -X POST -H "Authorization: Bearer $TOKEN" -H 'content-type: application/jso
 ]}
 ```
 
+A node with two edges and no `condition` on either is a finding too (`mode_rules`,
+`GRAPH_001`, with `node_id` and `targets`). With no conditional edge beside them, both targets
+would run in parallel, and the run would fail because shared state (including the iteration
+counter `_iterations`) has no rule for merging two branches. Beside conditional edges, only
+the first would ever be taken as the fallback. Parallel branches are not supported yet.
+
 Findings are `200`, not an error status — an invalid draft is a normal answer to "is this
 valid yet?". A body that is not a draft at all is `400` (`VAL_002`).
 

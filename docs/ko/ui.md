@@ -43,13 +43,14 @@ python -m malkuth.orchestrator      # API 와 UI 를 함께 서빙한다
 
 ### 그래프 편집기 — 배선
 
-캔버스가 아니라 폼이다. 메타 블록은 이름·버전·설명·모드·목표·state schema 참조를 담고,
+캔버스가 아니라 폼이다. 메타 블록은 이름·버전·설명·모드·목표·state(필드 JSON —
+`{"query": {"type": "string", "required": true}}` — 또는 deprecated 인 schema 참조)를 담고,
 그 아래 표 세 개가 실제 배선을 담는다:
 
 - **노드** — id 와 그것이 물릴 에이전트. 에이전트는 카탈로그에서 온 드롭다운이라, 존재하지
   않는 것을 가리킬 수 없다.
-- **엣지** — `from`, `to`, 선택적 조건(`malkuth.graphs.conditions:needs_research` 같은
-  importable ref), 순환에 필요한 `max_iterations`.
+- **엣지** — `from`, `to`, 선택적 조건(`state.needs_research` 같은 식 —
+  [modules.md](modules.md) 참조), 순환에 필요한 `max_iterations`.
 - **connections** — A2A allowlist. `caller`/`callee` 선언이 있어야 실행 중 한 에이전트가
   다른 에이전트에게 위임할 수 있다. 없으면 호출이 거부된다.
 

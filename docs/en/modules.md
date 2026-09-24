@@ -103,6 +103,38 @@ The graph is the wiring module: attaching or detaching an agent is a YAML change
   midway. Give the edges conditions instead; one unconditional edge beside conditional ones is
   the fallback route
 
+### State and conditions in the YAML
+
+A new graph needs no code. Declare the state fields and write conditions as expressions:
+
+```yaml
+spec:
+  state:
+    fields:
+      query: {type: string, required: true}
+      plan: {type: string}
+      needs_research: {type: boolean, default: true}
+      findings: {type: array}
+  edges:
+    - {from: planner, to: researcher, condition: state.needs_research}
+    - {from: planner, to: END, condition: not state.needs_research}
+```
+
+- **Field types**: `string`, `integer`, `number`, `boolean`, `array`, `object`. A field is
+  optional unless `required: true`; an optional field without a `default` starts empty
+  (`array`, `object`) or null. Names starting with `_` are reserved for the framework.
+- **Conditions** read the state and nothing else: `state.<field>` (with `.key` for nested
+  values), literals (`true`, `false`, `null`, numbers, strings, `[...]`), comparisons
+  (`==`, `!=`, `<`, `<=`, `>`, `>=`, `in`, `not in`), and `and` / `or` / `not`. A bare value
+  is read as true or false — an empty list, `0` and `null` are false. Function calls and
+  anything outside `state` are refused when the graph is read (`GRAPH_001`); comparing values
+  that cannot be compared, such as `null < 3`, fails the run (`GRAPH_003`) rather than
+  silently taking the other branch.
+- **Deprecated**: `state.schema` and conditions written as import references
+  (`malkuth.graphs.conditions:needs_research`) still work for one version. They may only
+  point into `malkuth.graphs`, and validation logs a warning for each import-reference
+  condition.
+
 ## Groups
 
 A group scopes resources — quotas, secrets, group memory — for its member agents.

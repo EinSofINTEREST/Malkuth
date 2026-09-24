@@ -46,12 +46,13 @@ agent list means "none declared", while a problem entry means "this file needs f
 ### 그래프 편집기 — wiring
 
 A form, not a canvas. The metadata block covers name, version, description, mode, goal, and
-the state schema reference; three tables below it hold the moving parts:
+the state — its fields as JSON (`{"query": {"type": "string", "required": true}}`), or the
+deprecated schema reference; three tables below it hold the moving parts:
 
 - **노드** — an id plus the agent it binds to. The agent comes from a dropdown of the
   catalog, so a node cannot point at something that does not exist.
-- **엣지** — `from`, `to`, an optional condition (an importable reference such as
-  `malkuth.graphs.conditions:needs_research`), and `max_iterations` for cycles.
+- **엣지** — `from`, `to`, an optional condition (an expression such as
+  `state.needs_research`, see [modules.md](modules.md)), and `max_iterations` for cycles.
 - **connections** — the A2A allowlist. Declaring `caller`/`callee` is what permits one agent
   to delegate to another at runtime; without it the call is refused.
 

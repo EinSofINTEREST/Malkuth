@@ -169,7 +169,9 @@ def _open_streamable_http(*, url: str, headers: dict[str, str]) -> Any:
     SDK 는 헤더를 직접 받지 않는다 — 인증 헤더는 ``http_client`` 에 실어야
     ``auth.token_env`` 선언이 실제로 전달된다 (03 서버 선언 스펙).
     """
-    # SDK 가 쓰는 httpx 배포판을 그대로 쓴다 — 프로젝트의 httpx 와 다른 패키지다
+    # SDK 의 공개 시그니처가 httpx2.AsyncClient 를 받는다 (mcp 2.x) — 프로젝트의 httpx 와 다른
+    # 패키지라 바꿔 넣을 수 없다. 메이저 경계는 pyproject 가 고정하고, 시그니처가 바뀌면
+    # test_sdk 의 계약 테스트가 먼저 깨진다 (#317)
     import httpx2
     from mcp.client.streamable_http import streamable_http_client
 

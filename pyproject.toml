@@ -20,7 +20,11 @@ dependencies = [
     "uvicorn>=0.32.0",
     "docker>=7.1.0",
     "a2a-sdk>=0.2.0",
-    "mcp>=1.1.0",
+    # 2.x 부터 streamable-http 전송이 공개 시그니처로 httpx2.AsyncClient 를 받는다 — 1.x 는
+    # httpx 를 받아 protocols/mcp/sdk.py 의 인증 헤더 전달이 깨진다. 메이저 경계를 고정한다
+    "mcp>=2.1.0,<3",
+    # 직접 import 한다 (MCP 인증 헤더를 실을 클라이언트) — 전이 의존에만 기대지 않는다
+    "httpx2>=2.5.0",
     "psycopg[binary]>=3.2.0",
     "anthropic>=0.40.0",
     "langgraph-checkpoint-postgres>=3.1.2",

@@ -871,7 +871,7 @@ The proxy process takes:
 | `MALKUTH_ACCESS_URL`, `MALKUTH_ACCESS_ENFORCER_TOKEN` | the registry — both required, or it refuses to start |
 | `ANTHROPIC_API_KEY` | the key the proxy adds to model calls |
 | `MALKUTH_EGRESS_ANTHROPIC_UPSTREAM` | where model calls go (default `https://api.anthropic.com`) |
-| `MALKUTH_EGRESS_ALLOW_PLAINTEXT_UPSTREAM` | `true` to accept plain `http` to a destination **also listed** in `MALKUTH_EGRESS_PRIVATE_DESTINATIONS` — for a test double on a private network. A public host is never reached over plain `http`, whatever the settings |
+| `MALKUTH_EGRESS_ALLOW_PLAINTEXT_UPSTREAM` | `true` to accept plain `http` to a destination **also listed** in `MALKUTH_EGRESS_PRIVATE_DESTINATIONS` — for a test double on a private network. Each request resolves the name and connects only to a private address; a listed name that resolves publicly is refused (`502`). A public address is never reached over plain `http`, whatever the settings |
 | `MALKUTH_EGRESS_PORT`, `MALKUTH_EGRESS_PROVIDER_PORT` | the CONNECT and provider listeners (default `8080`, `8081`) |
 | `MALKUTH_EGRESS_MODE` | `enforce` (default) or `record` |
 | `MALKUTH_EGRESS_PRIVATE_DESTINATIONS` | comma-separated targets allowed to resolve to private addresses |

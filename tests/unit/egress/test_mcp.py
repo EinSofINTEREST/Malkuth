@@ -212,6 +212,13 @@ async def test_the_server_is_not_reached_without_a_decision(tmp_path, change, st
             {"allow_plaintext": True},
             "lab",
             {"jsonrpc": "2.0", "id": 1, "method": "ping"},
+            502,
+            "스위치만 켜고 사설로 명시하지 않은 평문 서버",
+        ),
+        (
+            {"addresses": {"mcp.corp.example": "10.0.0.5", "lab.internal": "10.0.0.9"}},
+            "corp",
+            None,
             403,
             "사설 주소로 풀리는 서버",
         ),
@@ -228,7 +235,8 @@ async def test_unsafe_or_unknown_requests_do_not_reach_any_server(
     assert server.seen == [], why
 
 
-async def test_a_listed_private_server_and_plaintext_opt_in_are_honoured(tmp_path):
+async def test_plaintext_reaches_only_a_listed_private_server(tmp_path):
+    """스위치를 켜도 공인 호스트로는 평문이 나가지 않는다 — 사설로 명시한 서버만 (#302)."""
     server = Server()
     target = termination(
         tmp_path,
@@ -242,12 +250,9 @@ async def test_a_listed_private_server_and_plaintext_opt_in_are_honoured(tmp_pat
         corp = await post(client)
         lab = await post(client, server="lab", body={"jsonrpc": "2.0", "id": 1, "method": "ping"})
 
-    assert (corp.status_code, lab.status_code) == (200, 200)
-    assert [str(r.url) for r in server.seen] == [
-        f"http://{PUBLIC}/mcp",
-        "http://10.0.0.9:9000/mcp",
-    ]
-    assert "authorization" not in server.seen[1].headers, "자격 없는 서버에 자격을 붙였다"
+    assert (corp.status_code, lab.status_code) == (502, 200)
+    assert [str(r.url) for r in server.seen] == ["http://10.0.0.9:9000/mcp"]
+    assert "authorization" not in server.seen[0].headers, "자격 없는 서버에 자격을 붙였다"
 
 
 async def test_a_batch_with_a_denied_tool_is_refused_whole(tmp_path):
@@ -307,3 +312,21 @@ def test_a_seal_binds_agent_and_server():
     assert seal.open("researcher", "lab", sealed) is None
     assert SessionSeal(key=b"x" * 32).open("researcher", "corp", sealed) is None
     assert seal.open("researcher", "corp", "abc") is None
+
+
+async def test_a_listed_plaintext_server_that_resolves_publicly_is_refused(tmp_path):
+    """사설로 적어 둔 이름이 공인 주소로 풀리면 평문으로 보내지 않는다 (#305 리뷰)."""
+    server = Server()
+    target = termination(
+        tmp_path,
+        Identities(),
+        server,
+        corp={"url": "http://mcp.corp.example/mcp"},
+        private_destinations=("mcp.corp.example:80",),
+        allow_plaintext=True,
+    )
+    async with client_for(target) as client:
+        response = await post(client)
+
+    assert response.status_code == 502
+    assert server.seen == [], "공인 주소로 평문을 보냈다"

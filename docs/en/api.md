@@ -876,7 +876,7 @@ The proxy process takes:
 | `MALKUTH_ACCESS_URL`, `MALKUTH_ACCESS_ENFORCER_TOKEN` | the registry — both required, or it refuses to start |
 | `ANTHROPIC_API_KEY` | the key the proxy adds to model calls |
 | `MALKUTH_EGRESS_ANTHROPIC_UPSTREAM` | where model calls go (default `https://api.anthropic.com`) |
-| `MALKUTH_EGRESS_ALLOW_PLAINTEXT_UPSTREAM` | `true` to accept an `http` upstream — for a test double only, since the key travels to it |
+| `MALKUTH_EGRESS_ALLOW_PLAINTEXT_UPSTREAM` | `true` to accept plain `http` to a destination **also listed** in `MALKUTH_EGRESS_PRIVATE_DESTINATIONS` — for a test double on a private network. Each request resolves the name and connects only to a private address; a listed name that resolves publicly is refused (`502`). A public address is never reached over plain `http`, whatever the settings |
 | `MALKUTH_EGRESS_PORT`, `MALKUTH_EGRESS_PROVIDER_PORT` | the CONNECT and provider listeners (default `8080`, `8081`) |
 | `MALKUTH_EGRESS_MODE` | `enforce` (default) or `record` |
 | `MALKUTH_EGRESS_PRIVATE_DESTINATIONS` | comma-separated targets allowed to resolve to private addresses |
@@ -929,8 +929,10 @@ The proxy needs two more settings for this:
 `auth.token_env` gets `502` (`CFG_002`) instead of that value. The list itself may not name secrets the
 proxy holds for other purposes — `ANTHROPIC_API_KEY` or any `MALKUTH_*` name refuses to start
 (`CFG_001`). A remote MCP server must use `https`: plain `http` is refused (`502`) unless
-`MALKUTH_EGRESS_ALLOW_PLAINTEXT_UPSTREAM=true`, which is for test doubles only. A server that resolves to
-a private address must be listed in `MALKUTH_EGRESS_PRIVATE_DESTINATIONS`, like any destination.
+`MALKUTH_EGRESS_ALLOW_PLAINTEXT_UPSTREAM=true` **and** the server is listed in
+`MALKUTH_EGRESS_PRIVATE_DESTINATIONS` — the switch alone opens nothing, so a switch left on in a
+production config cannot send a credential in the clear to a public host. A server that resolves to a
+private address must be listed there too, like any destination.
 
 **Sessions belong to one agent and one server.** Every agent reaches a server with the same proxy
 credential, so the server cannot tell their sessions apart. The proxy signs each `mcp-session-id` it

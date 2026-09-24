@@ -52,18 +52,38 @@ def test_listener_ports_default_and_accept_the_bounds():
     assert settings({**REGISTRY, "MALKUTH_EGRESS_PROVIDER_PORT": "1"})["provider_port"] == 1
 
 
-def test_a_plaintext_provider_upstream_needs_an_explicit_opt_in():
-    """프록시가 키를 실어 보내는 곳이다 — http 는 대역을 쓰는 테스트에서만 켠다."""
+def test_a_plaintext_provider_upstream_needs_the_switch_and_a_private_listing():
+    """키를 실어 보내는 곳이다 — http 는 사설로 명시한 대역에, 스위치를 켰을 때만 (#302)."""
     plain = {**REGISTRY, "MALKUTH_EGRESS_ANTHROPIC_UPSTREAM": "http://fake-provider:8000"}
-    with pytest.raises(MalkuthError) as exc_info:
-        settings(plain)
-    assert exc_info.value.code == ErrorCode.CFG_001
-    with pytest.raises(MalkuthError):
-        settings({**plain, "MALKUTH_EGRESS_ALLOW_PLAINTEXT_UPSTREAM": "yes"})
+    listed = {**plain, "MALKUTH_EGRESS_PRIVATE_DESTINATIONS": "fake-provider:8000"}
+    switch = {"MALKUTH_EGRESS_ALLOW_PLAINTEXT_UPSTREAM": "true"}
 
-    allowed = settings({**plain, "MALKUTH_EGRESS_ALLOW_PLAINTEXT_UPSTREAM": "true"})
+    for refused in (
+        plain,
+        listed,
+        {**plain, **switch},
+        {**listed, "MALKUTH_EGRESS_ALLOW_PLAINTEXT_UPSTREAM": "yes"},
+    ):
+        with pytest.raises(MalkuthError) as exc_info:
+            settings(refused)
+        assert exc_info.value.code == ErrorCode.CFG_001
+
+    allowed = settings({**listed, **switch})
     assert allowed["anthropic_upstream"] == "http://fake-provider:8000"
     assert settings(REGISTRY)["anthropic_upstream"] == "https://api.anthropic.com"
+
+
+def test_a_public_provider_host_is_never_plaintext_whatever_the_settings():
+    """운영 설정에 스위치가 섞여 들어가도 공인 호스트로 평문 키가 나가지 않는다 (#302)."""
+    with pytest.raises(MalkuthError):
+        settings(
+            {
+                **REGISTRY,
+                "MALKUTH_EGRESS_ANTHROPIC_UPSTREAM": "http://api.anthropic.com",
+                "MALKUTH_EGRESS_ALLOW_PLAINTEXT_UPSTREAM": "true",
+                "MALKUTH_EGRESS_PRIVATE_DESTINATIONS": "fake-provider:8000",
+            }
+        )
 
 
 @pytest.mark.parametrize(

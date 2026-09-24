@@ -838,7 +838,7 @@ spec:
 | `MALKUTH_ACCESS_URL`, `MALKUTH_ACCESS_ENFORCER_TOKEN` | 레지스트리 — 둘 다 필수, 없으면 기동 거부 |
 | `ANTHROPIC_API_KEY` | 프록시가 모델 호출에 붙이는 키 |
 | `MALKUTH_EGRESS_ANTHROPIC_UPSTREAM` | 모델 호출이 가는 곳 (기본 `https://api.anthropic.com`) |
-| `MALKUTH_EGRESS_ALLOW_PLAINTEXT_UPSTREAM` | `true` 면 `http` upstream 을 받는다 — 키가 그리로 가므로 테스트용 대역에만 |
+| `MALKUTH_EGRESS_ALLOW_PLAINTEXT_UPSTREAM` | `true` 이고 목적지가 `MALKUTH_EGRESS_PRIVATE_DESTINATIONS` 에도 **있을 때만** 평문 `http` 를 받는다 — 사설망의 테스트 대역용. 요청마다 이름을 풀어 사설 주소로만 붙고, 목록의 이름이 공인 주소로 풀리면 거부한다(`502`). 공인 주소로는 설정을 어떻게 해도 평문이 나가지 않는다 |
 | `MALKUTH_EGRESS_PORT`, `MALKUTH_EGRESS_PROVIDER_PORT` | CONNECT 창구와 provider 창구 (기본 `8080`, `8081`) |
 | `MALKUTH_EGRESS_MODE` | `enforce`(기본) 또는 `record` |
 | `MALKUTH_EGRESS_PRIVATE_DESTINATIONS` | 사설 주소로 풀려도 되는 목적지, 쉼표로 |
@@ -888,8 +888,10 @@ spec:
 **목록에 있는 자격 이름만 보낸다.** 선언이 다른 비밀을 `auth.token_env` 로 적으면 그 값 대신
 `502`(`CFG_002`) 로 답한다. 목록에도 프록시가 다른 용도로 쥔 비밀은 올리지 못한다 — `ANTHROPIC_API_KEY` 나
 `MALKUTH_*` 이름이 있으면 기동을 거부한다(`CFG_001`). 원격 MCP 서버는 `https` 여야 한다: 평문 `http` 는
-테스트 대역용인 `MALKUTH_EGRESS_ALLOW_PLAINTEXT_UPSTREAM=true` 가 아니면 거부한다(`502`). 사설 주소로 풀리는
-서버는 여느 목적지처럼 `MALKUTH_EGRESS_PRIVATE_DESTINATIONS` 에 있어야 한다.
+`MALKUTH_EGRESS_ALLOW_PLAINTEXT_UPSTREAM=true` 이고 **동시에** 그 서버가 `MALKUTH_EGRESS_PRIVATE_DESTINATIONS`
+에 있을 때만 받고, 아니면 거부한다(`502`). 스위치 하나로는 아무것도 열리지 않으므로 운영 설정에 스위치가 남아
+있어도 공인 호스트로 자격이 평문으로 나가지 않는다. 사설 주소로 풀리는 서버는 여느 목적지처럼 그 목록에 있어야
+한다.
 
 **세션은 한 에이전트와 한 서버의 것이다.** 모든 에이전트가 같은 프록시 자격으로 서버에 닿으므로 서버는 세션
 주인을 가리지 못한다. 프록시는 돌려주는 `mcp-session-id` 마다 발급받은 에이전트·서버로 서명을 붙이고,

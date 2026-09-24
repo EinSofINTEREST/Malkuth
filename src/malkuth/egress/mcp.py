@@ -229,8 +229,10 @@ class McpTermination:
     ) -> Response:
         agent, server = owner
         parts = urlsplit(upstream.url)
-        if parts.scheme == "http" and not self.allow_plaintext:
-            # 도구 인자와 결과도 민감하다 — 자격 없는 서버라도 평문은 명시 허용(테스트 대역)일 때만
+        plaintext = self.allow_plaintext and upstream.target in self.private_destinations
+        if parts.scheme == "http" and not plaintext:
+            # 도구 인자와 결과도 민감하다 — 평문은 스위치를 켜고 사설로 명시한 목적지만.
+            # 스위치 하나로 모든 서버를 열면 운영 설정의 실수가 공인 호스트로의 평문이 된다 (#302)
             log.error("mcp over plaintext refused", agent=agent,
                       resource=ResourceKind.EGRESS.value, target=upstream.target)  # fmt: skip
             return _http_error(502, "remote mcp server must use https")
@@ -242,6 +244,10 @@ class McpTermination:
                         resource=ResourceKind.MCP_TOOL.value, target=server)  # fmt: skip
             return _http_error(404, "unknown mcp session")
         address = await self._address(parts, upstream.target)
+        if address is None and parts.scheme == "http":
+            log.error("mcp plaintext to a public address refused", agent=agent,
+                      resource=ResourceKind.EGRESS.value, target=upstream.target)  # fmt: skip
+            return _http_error(502, "plain http is sent only to a server that resolves privately")
         if address is None:
             log.warning("mcp upstream at a private address refused", agent=agent,
                         resource=ResourceKind.EGRESS.value, target=upstream.target,
@@ -276,6 +282,11 @@ class McpTermination:
             addresses = await asyncio.wait_for(self.resolver(parts.hostname, port), 10.0)
         except (OSError, TimeoutError):
             return None
+        if parts.scheme == "http":
+            # 평문은 **실제로 사설 주소로 풀린** 곳에만 — 목록에 있는 이름이 공인 주소로 풀려도
+            # 자격이 평문으로 나가지 않게 (#305 리뷰)
+            private = [a for a in addresses if not is_public(a)]
+            return private[0] if private else None
         if target in self.private_destinations:
             return addresses[0] if addresses else None
         public = [a for a in addresses if is_public(a)]

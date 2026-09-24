@@ -10,9 +10,11 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 import structlog
@@ -22,10 +24,18 @@ from starlette.background import BackgroundTask
 
 from malkuth.access.client import DecisionSource
 from malkuth.access.model import ResourceKind
-from malkuth.egress.connect import UNKNOWN_IDENTITY, Decider, EgressMode
+from malkuth.egress.connect import (
+    UNKNOWN_IDENTITY,
+    Decider,
+    EgressMode,
+    Resolver,
+    is_public,
+    resolve,
+)
 
 log = structlog.get_logger(__name__)
 
+RESOLVE_TIMEOUT_S = 10.0
 UPSTREAM_TIMEOUT_S = 600.0
 """모델 호출은 길다 — 스트리밍 응답이 끝날 때까지 기다린다."""
 
@@ -67,6 +77,7 @@ def create_provider_app(
     mode: EgressMode = EgressMode.ENFORCE,
     http: httpx.AsyncClient | None = None,
     routers: Sequence[APIRouter] = (),
+    resolver: Resolver = resolve,
 ) -> FastAPI:
     """Build the termination app — ``/{provider}/{path}`` forwards to that provider.
 
@@ -106,9 +117,14 @@ def create_provider_app(
             if name.lower() not in _HOP_BY_HOP | _IDENTITY_HEADERS
         }
         headers[upstream.key_header] = upstream.api_key
+        base = await _pinned_base(upstream.base_url, resolver, headers)
+        if base is None:
+            log.error("provider plaintext to a public address refused", agent=verdict.agent or "",
+                      resource=ResourceKind.EGRESS.value, target=upstream.logical_host)  # fmt: skip
+            return _error(502, "plain http is sent only to an upstream that resolves privately")
         outbound = client.build_request(
             request.method,
-            f"{upstream.base_url.rstrip('/')}/{path}",
+            f"{base}/{path}",
             params=request.query_params,
             headers=headers,
             content=await request.body(),
@@ -132,6 +148,28 @@ def create_provider_app(
         )
 
     return app
+
+
+async def _pinned_base(base_url: str, resolver: Resolver, headers: dict[str, str]) -> str | None:
+    """요청을 보낼 base URL — 평문이면 **사설로 풀린 주소**로 고정하고, 못 하면 None.
+
+    기동 검증은 이름이 사설 목록에 있는지만 본다. 그 이름이 공인 주소로 풀리면 키가 평문으로
+    나간다 — 보낼 때마다 풀어 사설 주소일 때만 그 주소로 붙는다 (#305 리뷰). https 는 그대로.
+    """
+    parts = urlsplit(base_url)
+    if parts.scheme != "http" or not parts.hostname:
+        return base_url.rstrip("/")
+    port = parts.port or 80
+    try:
+        addresses = await asyncio.wait_for(resolver(parts.hostname, port), RESOLVE_TIMEOUT_S)
+    except (OSError, TimeoutError):
+        return None
+    private = [address for address in addresses if not is_public(address)]
+    if not private:
+        return None
+    headers["host"] = parts.netloc
+    host = f"[{private[0]}]" if ":" in private[0] else private[0]
+    return urlunsplit(("http", f"{host}:{port}", parts.path.rstrip("/"), "", ""))
 
 
 def _refusal(verdict: Any, target: str, mode: EgressMode) -> Response | None:

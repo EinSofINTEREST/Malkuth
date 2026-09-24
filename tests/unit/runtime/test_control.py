@@ -14,7 +14,7 @@ from contextlib import asynccontextmanager
 import httpx
 import pytest
 
-from malkuth.core.agent import HealthState, TaskStatus
+from malkuth.core.agent import CONTROL_OVERHEAD_S, HealthState, TaskConfig, TaskResult, TaskStatus
 from malkuth.core.errors import ErrorCategory, MalkuthError
 from malkuth.core.events import DoneEvent, TokenEvent, ToolCallEvent
 from malkuth.runtime.control import ControlClient, control_url
@@ -175,6 +175,21 @@ async def test_timeout_becomes_retryable_net_002():
     assert exc_info.value.code == "NET_002"
     assert exc_info.value.category is ErrorCategory.TIMEOUT
     assert exc_info.value.retryable is True
+
+
+async def test_invoke_waits_past_the_task_timeout_for_the_agents_answer():
+    """HTTP 가 timeout_s 에 끊으면 agentd 가 그 순간 보낸 TO_001 결과를 받지 못한다 (#314)."""
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(request.extensions["timeout"])
+        return httpx.Response(200, json=TaskResult.completed(task).model_dump(mode="json"))
+
+    task = make_task(config=TaskConfig(timeout_s=10))
+    async with client_with(handler) as client:
+        await client.invoke(task)
+
+    assert seen["read"] == 10 + CONTROL_OVERHEAD_S
 
 
 async def test_server_error_is_retryable_runtime_error():

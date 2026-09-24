@@ -94,5 +94,21 @@ class ControlNodeRuntime:
         )
         return await client.invoke(task)
 
+    async def cancel(self, node: NodeSpec, task_id: str) -> None:
+        """Ask the node's agent to cancel a task the orchestrator stopped waiting for.
+
+        orchestrator 가 먼저 끊은 태스크의 취소를 담당 에이전트에게 알립니다. 떠 있는
+        컨테이너가 없으면 취소할 대상도 없습니다.
+
+        Raises:
+            MalkuthError: On transport or non-2xx responses from the Control API.
+        """
+        if node.agent is None:
+            return
+        client = self.clients.get(agent_of(node.agent))
+        if client is None:
+            return
+        await client.cancel(task_id)
+
 
 __all__ = ["ControlNodeRuntime", "agent_of"]

@@ -14,13 +14,21 @@ import time
 import uuid
 from collections.abc import Hashable
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any, Protocol, TypedDict
+from typing import TYPE_CHECKING, Any, Protocol, TypedDict, runtime_checkable
 
+import structlog
 from langgraph.graph import END as LG_END
 from langgraph.graph import START as LG_START
 from langgraph.graph import StateGraph
 
-from malkuth.core.agent import TaskConfig, TaskRequest, TaskResult, TaskStatus, TraceContext
+from malkuth.core.agent import (
+    CONTROL_OVERHEAD_S,
+    TaskConfig,
+    TaskRequest,
+    TaskResult,
+    TaskStatus,
+    TraceContext,
+)
 from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError, RetryPolicy
 from malkuth.orchestrator.state import extract_input, merge_output, resolve_state_schema
 from malkuth.orchestrator.telemetry import OrchestratorTelemetry
@@ -41,7 +49,11 @@ if TYPE_CHECKING:
 
     from malkuth.observability.metrics import Metrics
 
+log = structlog.get_logger(__name__)
+
 _ITERATION_KEY = "_iterations"
+CANCEL_TIMEOUT_S = 5.0
+"""먼저 끊은 태스크의 취소 요청을 기다리는 상한 — 취소는 best-effort 다."""
 
 
 NODE_RETRY = RetryPolicy(
@@ -105,6 +117,15 @@ class NodeRuntime(Protocol):
         ...
 
 
+@runtime_checkable
+class CancellableRuntime(Protocol):
+    """진행 중 태스크를 취소할 수 있는 노드 런타임 — orchestrator 가 먼저 끊을 때 쓴다."""
+
+    async def cancel(self, node: NodeSpec, task_id: str) -> None:
+        """노드의 에이전트에게 태스크 취소를 요청한다."""
+        ...
+
+
 def _graph_error(
     code: ErrorCode, message: str, *, retryable: bool = False, **details: Any
 ) -> MalkuthError:
@@ -142,8 +163,10 @@ class GraphBuilder:
         node_timeout_s: float = 300.0,
         metrics: Metrics | None = None,
         retry_sleep: Callable[[float], Awaitable[None]] | None = None,
+        control_overhead_s: float = CONTROL_OVERHEAD_S,
     ) -> None:
         self._topology = topology
+        self._control_overhead_s = control_overhead_s
         self._runtime = runtime
         self._schema = state_schema or resolve_state_schema(topology.spec.state.schema_ref)
         self._node_timeout_s = node_timeout_s
@@ -251,12 +274,15 @@ class GraphBuilder:
             # 태스크는 **재시도 밖에서** 만든다 — 회차마다 새 task_id 를 발급하면
             # agentd 의 멱등 캐시가 걸리지 않아 부수효과가 겹친다 (02 Rule 3)
             task = self._make_task(node, state)
-            timeout = node.timeout_s or self._node_timeout_s
+            # 강제는 agentd 가 timeout_s 에 한다 — 같은 값으로 끊으면 왕복만큼 먼저 끊어
+            # agentd 가 보낸 TO_001 결과를 버린다 (#314). 여기는 그 결과가 올 틈까지 기다린다
+            wait_s = task.config.timeout_s + self._control_overhead_s
 
             async def attempt() -> TaskResult:
                 try:
-                    return await asyncio.wait_for(self._runtime.invoke(node, task), timeout=timeout)
+                    return await asyncio.wait_for(self._runtime.invoke(node, task), timeout=wait_s)
                 except TimeoutError as err:
+                    await self._cancel_quietly(node, task)
                     raise _graph_error(
                         ErrorCode.TO_003,
                         f"node timed out: {node.id}",
@@ -335,6 +361,26 @@ class GraphBuilder:
             task_id=task_id,
         )
 
+    async def _cancel_quietly(self, node: NodeSpec, task: TaskRequest) -> None:
+        """먼저 끊은 태스크의 취소를 best-effort 로 알린다.
+
+        알리지 않으면 에이전트는 아무도 기다리지 않는 태스크를 끝까지 돌며 슬롯과 비용을 쓴다.
+        취소 실패가 노드 실패의 원인(TO_003)을 가리지 않도록 경고만 남긴다.
+        """
+        if not isinstance(self._runtime, CancellableRuntime):
+            return
+        try:
+            await asyncio.wait_for(self._runtime.cancel(node, task.task_id), CANCEL_TIMEOUT_S)
+        except (MalkuthError, TimeoutError) as err:
+            log.warning(
+                "node task cancel failed",
+                graph=self._topology.name,
+                run_id=task.run_id,
+                node_id=node.id,
+                task_id=task.task_id,
+                error_code=err.code if isinstance(err, MalkuthError) else ErrorCode.TO_003,
+            )
+
     def _make_task(self, node: NodeSpec, state: dict[str, Any]) -> TaskRequest:
         """state 로부터 노드 태스크를 구성한다."""
         run_id = str(state.get("_run_id") or "run-unknown")
@@ -358,6 +404,7 @@ def build_graph(
     node_timeout_s: float = 300.0,
     metrics: Metrics | None = None,
     retry_sleep: Callable[[float], Awaitable[None]] | None = None,
+    control_overhead_s: float = CONTROL_OVERHEAD_S,
 ) -> Any:
     """Build a runnable graph from a topology.
 
@@ -372,6 +419,8 @@ def build_graph(
         metrics: Optional metric registry for node latency.
         retry_sleep: Injected wait for node retries — 06 은 시간 의존 로직이
             테스트에서 실제로 자는 것을 금지합니다.
+        control_overhead_s: 노드 timeout 위에 더 기다리는 여유 — agentd 의 ``TO_001``
+            결과가 돌아올 틈이다.
 
     Returns:
         The compiled graph.
@@ -383,5 +432,6 @@ def build_graph(
         node_timeout_s=node_timeout_s,
         retry_sleep=retry_sleep,
         metrics=metrics,
+        control_overhead_s=control_overhead_s,
     )
     return builder.build(checkpointer=checkpointer)

@@ -166,6 +166,10 @@ curl -X POST -H "Authorization: Bearer $TOKEN" -H 'content-type: application/jso
 ]}
 ```
 
+A node with two edges and no `condition` on either is a finding too (`mode_rules`,
+`GRAPH_001`, with `node_id` and `targets`): both targets would run in parallel and the run
+would fail when their outputs collide. Parallel branches are not supported yet.
+
 Findings are `200`, not an error status — an invalid draft is a normal answer to "is this
 valid yet?". A body that is not a draft at all is `400` (`VAL_002`).
 

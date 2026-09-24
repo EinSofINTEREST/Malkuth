@@ -82,6 +82,9 @@ Memoryset 은 memory space 의 정책을 고정합니다: scope (`run | local | 
 - `mode: service` — 상주형; idle backoff 정책 필수, iteration 마다 checkpoint
 - `connections` — A2A peer 호출 allowlist (방향 유의, peer 는 동등)
 - 배포 시 검증이 dangling ref / 미도달 노드 / mode 위반을 차단
+- 노드는 **한 번에 한 길로만** 나간다: `condition` 없는 edge 는 노드당 하나까지다.
+  조건 없는 edge 가 둘이면 두 대상이 병렬로 돌고, state 에는 두 분기를 합치는 규칙이 없어
+  run 이 도중에 죽는다. 대신 edge 에 조건을 준다 — 조건 edge 옆의 조건 없는 edge 는 기본 경로다
 
 ## 그룹
 

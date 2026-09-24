@@ -56,6 +56,46 @@ def prompt_of(payload: dict[str, Any]) -> str:
 
 
 _ASKS_FOR = re.compile(r"exactly these keys: (.+)")
+_USE_TOOL = re.compile(r"use tool (\S+)(?: with (\{.*?\}))?")
+
+
+def tool_use_for(payload: dict[str, Any], prompt: str) -> dict[str, Any] | None:
+    """프롬프트가 ``use tool <name> [with {json}]`` 을 담으면 그 도구를 부른다 — **한 번만**.
+
+    도구 호출을 거치는 E2E(MCP 세션 장애 등)가 실제 실행 루프를 타게 하려는 것이다. 요청의
+    ``tools`` 에 없는 이름이면 부르지 않는다 (광고되지 않은 도구를 모델이 부를 수는 없다).
+    대화에 이미 ``tool_result`` 가 있으면 텍스트로 끝낸다 — 매번 부르면 루프가 상한까지 돈다.
+    """
+    wanted = _USE_TOOL.search(prompt)
+    if wanted is None or _answered(payload):
+        return None
+    name = wanted.group(1)
+    if name not in {tool.get("name") for tool in payload.get("tools") or []}:
+        return None
+    arguments = json.loads(wanted.group(2)) if wanted.group(2) else {}
+    digest = hashlib.blake2b(prompt.encode("utf-8"), digest_size=6).hexdigest()
+    return {
+        "id": f"msg_{digest}",
+        "type": "message",
+        "role": "assistant",
+        "model": "fake-model",
+        "content": [
+            {"type": "tool_use", "id": f"toolu_{digest}", "name": name, "input": arguments}
+        ],
+        "stop_reason": "tool_use",
+        "stop_sequence": None,
+        "usage": {"input_tokens": max(len(prompt) // 4, 1), "output_tokens": 8},
+    }
+
+
+def _answered(payload: dict[str, Any]) -> bool:
+    for message in payload.get("messages") or []:
+        content = message.get("content")
+        if isinstance(content, list) and any(
+            isinstance(block, dict) and block.get("type") == "tool_result" for block in content
+        ):
+            return True
+    return False
 
 
 def _content_for(prompt: str, digest: str) -> str:
@@ -200,7 +240,7 @@ class Handler(BaseHTTPRequestHandler):
         else:
             prompt = prompt_of(payload)
             _remember(prompt)
-            answer = respond_to(prompt)
+            answer = tool_use_for(payload, prompt) or respond_to(prompt)
         body = json.dumps(answer).encode()
         self.send_response(200)
         self.send_header("content-type", "application/json")

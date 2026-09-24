@@ -122,7 +122,7 @@ const rowFactories = {
     el("input", { name: "node_output", placeholder: "plan=output.plan" }),
   ],
   edge: () => [el("input", { name: "edge_from", placeholder: "START" }), el("input", { name: "edge_to", placeholder: "END" }),
-    el("input", { name: "edge_condition", placeholder: "malkuth.graphs.conditions:needs_research" }), el("input", { name: "edge_max", type: "number", min: 1 })],
+    el("input", { name: "edge_condition", placeholder: "state.needs_research" }), el("input", { name: "edge_max", type: "number", min: 1 })],
   connection: () => [el("input", { name: "conn_caller" }), el("input", { name: "conn_callee" })],
 };
 const tables = { node: "#graph-nodes", edge: "#graph-edges", connection: "#graph-connections" };
@@ -192,6 +192,19 @@ function rows(kind) {
   return [...document.querySelectorAll(`${tables[kind]} tbody tr`)].map((tr) => [...tr.querySelectorAll("input, select")].map((i) => i.value.trim()));
 }
 
+// 인라인 필드가 있으면 그것이 state 다 — schema import ref 는 한 버전만 남는 옛 방식이다.
+// 둘 다 보내면 서버가 거부해 운영자가 어느 쪽인지 고르게 한다
+function stateDeclaration(f) {
+  const fields = f.state_fields.value.trim();
+  const schema = f.state_schema.value.trim();
+  const state = {};
+  if (fields) {
+    try { state.fields = JSON.parse(fields); } catch (err) { throw new Error(`state 필드가 JSON 이 아니다: ${err.message}`); }
+  }
+  if (schema) state.schema = schema;
+  return state;
+}
+
 function graphDocument() {
   const f = graphForm;
   const doc = emptyGraph(f.name.value.trim());
@@ -199,7 +212,7 @@ function graphDocument() {
   doc.metadata.description = f.description.value.trim();
   doc.spec.mode = f.mode.value;
   doc.spec.goal = f.goal.value.trim();
-  doc.spec.state = { schema: f.state_schema.value.trim() };
+  doc.spec.state = stateDeclaration(f);
   doc.spec.nodes = rows("node").map(([id, agent, input, output]) => {
     const node = pruneEmpty({ id, agent });
     const inputMap = parsePairs(input);
@@ -220,6 +233,7 @@ function showGraph(doc) {
   const f = graphForm;
   f.name.value = doc.metadata.name; f.version.value = doc.metadata.version; f.description.value = doc.metadata.description || "";
   f.mode.value = doc.spec.mode; f.goal.value = doc.spec.goal || ""; f.state_schema.value = doc.spec.state?.schema || "";
+  f.state_fields.value = doc.spec.state?.fields ? JSON.stringify(doc.spec.state.fields, null, 2) : "";
   syncServiceFields(doc.spec.mode === "service");
   if (doc.spec.service) { f.idle_min.value = doc.spec.service.idle.min_delay_s; f.idle_max.value = doc.spec.service.idle.max_delay_s; f.failure_streak.value = doc.spec.service.max_failure_streak ?? 5; }
   for (const kind of Object.keys(tables)) $(`${tables[kind]} tbody`).replaceChildren();

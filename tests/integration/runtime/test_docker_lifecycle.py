@@ -125,6 +125,14 @@ class CliDockerClient:
             args.append(f"--tmpfs={path}")
         for key, value in kwargs.get("environment", {}).items():
             args.extend(["-e", f"{key}={value}"])
+        for key, value in kwargs.get("labels", {}).items():
+            args.extend(["--label", f"{key}={value}"])
+        for option in kwargs.get("security_opt", ()):
+            args.append(f"--security-opt={option}")
+        policy = kwargs.get("restart_policy")
+        if policy:
+            retries = policy.get("MaximumRetryCount")
+            args.append(f"--restart={policy['Name']}" + (f":{retries}" if retries else ""))
         args.append(kwargs["image"])
 
         container_id = docker(*args)
@@ -154,6 +162,26 @@ class CliDockerClient:
         for key, value in (buildargs or {}).items():
             args += ["--build-arg", f"{key}={value}"]
         return docker(*args, context)
+
+    def connect(self, network: str, container: str, *, aliases: tuple[str, ...] = ()) -> None:
+        if network in self.networks_of(container):
+            return
+        flags = [f"--alias={alias}" for alias in aliases]
+        docker("network", "connect", *flags, network, container)
+
+    def disconnect(self, network: str, container: str) -> None:
+        if not docker("inspect", "-f", "{{.Id}}", container, check=False):
+            return
+        if network in self.networks_of(container):
+            docker("network", "disconnect", network, container)
+
+    def remove_network(self, name: str) -> None:
+        if docker("network", "inspect", "-f", "{{.Id}}", name, check=False):
+            docker("network", "rm", name)
+
+    def labeled(self, labels: dict[str, str]) -> tuple[str, ...]:
+        filters = [f"--filter=label={key}={value}" for key, value in labels.items()]
+        return tuple(docker("ps", "-aq", "--no-trunc", *filters).split())
 
     def find(self, name: str) -> str | None:
         found = docker("inspect", "--format", "{{.Id}}", name, check=False)

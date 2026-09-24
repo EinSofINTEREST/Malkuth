@@ -119,6 +119,22 @@ class DockerClient(Protocol):
         """
         ...
 
+    def connect(self, network: str, container: str, *, aliases: tuple[str, ...] = ()) -> None:
+        """컨테이너를 네트워크에 붙인다 — 이미 붙어 있으면 그대로 둔다 (#304 사이드카)."""
+        ...
+
+    def disconnect(self, network: str, container: str) -> None:
+        """네트워크에서 뗀다 — 붙어 있지 않거나 네트워크가 없으면 그대로 둔다."""
+        ...
+
+    def remove_network(self, name: str) -> None:
+        """네트워크를 지운다 — 없으면 그대로 둔다."""
+        ...
+
+    def labeled(self, labels: Mapping[str, str]) -> tuple[str, ...]:
+        """라벨이 모두 맞는 컨테이너의 id — 멈춘 것도 포함한다 (정리할 것을 놓치지 않게)."""
+        ...
+
     def find(self, name: str) -> str | None:
         """이름으로 컨테이너 id 를 찾는다 — 없으면 None.
 

@@ -170,6 +170,29 @@ class SdkDockerClient:
             raise ImageBuildError(tag, _log_of(err.build_log), err) from err
         return _log_of(stream)
 
+    def connect(self, network: str, container: str, *, aliases: tuple[str, ...] = ()) -> None:
+        if network in self.networks_of(container):
+            return
+        self._sdk.networks.get(network).connect(container, aliases=list(aliases) or None)
+
+    def disconnect(self, network: str, container: str) -> None:
+        try:
+            if network not in self.networks_of(container):
+                return
+            self._sdk.networks.get(network).disconnect(container)
+        except NotFound:
+            return  # 컨테이너나 네트워크가 이미 없다 — 떼어 낼 것이 없다
+
+    def remove_network(self, name: str) -> None:
+        try:
+            self._sdk.networks.get(name).remove()
+        except NotFound:
+            return
+
+    def labeled(self, labels: Mapping[str, str]) -> tuple[str, ...]:
+        filters = {"label": [f"{key}={value}" for key, value in labels.items()]}
+        return tuple(c.id for c in self._sdk.containers.list(all=True, filters=filters))
+
     def find(self, name: str) -> str | None:
         try:
             container_id: str = self._sdk.containers.get(name).id

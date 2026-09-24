@@ -49,6 +49,9 @@ class FakeDockerClient:
         self.removed: list[str] = []
         self.built: list[tuple[str, str]] = []
         self.contexts: list[dict[str, str]] = []
+        self.connected: list[tuple[str, str, tuple[str, ...]]] = []
+        self.disconnected: list[tuple[str, str]] = []
+        self.removed_networks: list[str] = []
 
     def ensure_image(self, image: str) -> None:
         if self._image_error is not None:
@@ -110,6 +113,27 @@ class FakeDockerClient:
             }
         )
         return f"built {tag}"
+
+    def connect(self, network: str, container: str, *, aliases: tuple[str, ...] = ()) -> None:
+        self.connected.append((network, container, tuple(aliases)))
+
+    def disconnect(self, network: str, container: str) -> None:
+        self.disconnected.append((network, container))
+
+    def remove_network(self, name: str) -> None:
+        self.removed_networks.append(name)
+
+    def labeled(self, labels: dict[str, str]) -> tuple[str, ...]:
+        """라벨이 맞는 **살아 있는** 컨테이너 — 지워진 것은 없는 것이다."""
+        found = []
+        for index, kwargs in enumerate(self.created, start=1):
+            container_id = f"container-{index:04d}" + "0" * 20
+            carried = kwargs.get("labels") or {}
+            if container_id not in self.removed and all(
+                carried.get(k) == v for k, v in labels.items()
+            ):
+                found.append(container_id)
+        return tuple(found)
 
     def find(self, name: str) -> str | None:
         """이름이 같은 **살아 있는** 컨테이너의 id — 지워진 것은 없는 것이다."""

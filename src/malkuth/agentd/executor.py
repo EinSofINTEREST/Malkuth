@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Final, Protocol
 
@@ -63,6 +64,12 @@ log = structlog.get_logger(__name__)
 
 
 MODEL_RETRY_POLICIES: Final = (RATE_LIMIT_RETRY, NETWORK_RETRY)
+REMEMBERED_RESULTS: Final = 1024
+"""멱등 캐시가 기억하는 완료 결과 수 — 넘치면 오래된 것부터 잊는다.
+
+상주 컨테이너는 수명이 길어 상한이 없으면 모든 태스크 결과(output 포함)를 끝까지 쥔다 (#315).
+재시도 창(05 NETWORK_RETRY: 최대 30s × 3)에 드는 태스크 수보다 넉넉하면 된다.
+"""
 """모델 호출이 내는 두 실패에 각각의 backoff — rate limit 을 1초 간격으로
 두드리면 상황이 악화된다. 순서가 곧 우선순위다.
 
@@ -294,7 +301,7 @@ class Executor:
             system=system,
         )
         # 멱등성: 완료된 태스크는 같은 결과를 돌려준다 (재시도/재개 시나리오)
-        self._completed: dict[str, TaskResult] = {}
+        self._completed: OrderedDict[str, TaskResult] = OrderedDict()
 
     @property
     def binding(self) -> ModuleBinding:
@@ -373,8 +380,13 @@ class Executor:
         # 재시도 가능한 실패를 캐싱하면 이 계층이 유일한 재시도 계층인데도
         # 재시도가 영원히 무효화된다 — 성공과 영구 실패만 기억한다
         if result.error is None or not result.error.retryable:
-            self._completed[task.task_id] = result
+            self._remember(task.task_id, result)
         return result
+
+    def _remember(self, task_id: str, result: TaskResult) -> None:
+        self._completed[task_id] = result
+        while len(self._completed) > REMEMBERED_RESULTS:
+            self._completed.popitem(last=False)
 
     def _log_outcome(
         self,

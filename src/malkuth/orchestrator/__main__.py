@@ -111,6 +111,7 @@ def main() -> None:
         raise config_egress_without_registry()
     if orchestrator.access_store is not None and orchestrator.access_agent_url is None:
         raise config_missing_agent_url()
+    warn_if_agents_reach_the_host(config.runtime, orchestrator.control_host)
 
     store = SqliteRunStore(path=orchestrator.run_store)
     # 설정의 registry.roots 는 상대 경로다 — 작업 디렉토리가 아니라 레포 루트 기준
@@ -361,6 +362,26 @@ def config_missing_enforcer_token(host: str) -> Exception:
         ),
         details={"setting": "orchestrator.access_enforcer_token", "host": host},
     )
+
+
+def warn_if_agents_reach_the_host(runtime: Any, control_host: str) -> bool:
+    """Warn when isolated agents can still reach this process through the network gateway (#303).
+
+    프록시를 켜면 에이전트는 외부 경로 없는 내부 네트워크에 있다 (#280). 그래도 Docker 브리지의
+    게이트웨이는 호스트 자신이라, 모든 인터페이스에 바인드한 호스트 서비스는 에이전트가 부를 수
+    있다 — 판정을 거치지 않는 출구다. 운영자 API 는 토큰이 막지만, 표면이 열려 있다는 사실을 알린다.
+    막는 절차는 ``deployments/docker/isolate-agent-network.sh`` 와 access-control runbook 에 있다.
+    """
+    if runtime.egress_proxy is None or is_loopback(control_host):
+        return False
+    log.warning(
+        "control plane is reachable from isolated agents through the network gateway",
+        host=control_host,
+        network=runtime.network,
+        remedy="bind to loopback, or block the agent network's gateway with "
+        "deployments/docker/isolate-agent-network.sh",
+    )
+    return True
 
 
 def is_loopback(host: str) -> bool:

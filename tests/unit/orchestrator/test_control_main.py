@@ -582,3 +582,40 @@ def test_the_startup_grace_and_ready_timeout_reach_the_runtime(tmp_path, monkeyp
         OrchestratorConfig().deployment_ready_timeout_s
         > MalkuthConfig().runtime.health_check.startup_grace_s
     )
+
+
+@pytest.mark.parametrize(
+    ("proxy", "host", "warned"),
+    [
+        (True, "0.0.0.0", True),  # noqa: S104 — 판정 입력이다, 바인드가 아니다
+        (True, "10.0.0.5", True),
+        (True, "127.0.0.1", False),
+        (True, "::1", False),
+        (False, "0.0.0.0", False),  # noqa: S104
+    ],
+)
+def test_isolated_agents_reaching_the_control_plane_is_warned(proxy, host, warned):
+    """격리돼도 브리지 게이트웨이는 호스트다 — 모든 인터페이스에 열린 control plane 을 알린다 (#303)."""
+    from malkuth.config import RuntimeConfig
+
+    runtime = RuntimeConfig(
+        egress_proxy=(
+            {"connect_url": "http://egress:8080", "providers_url": "http://egress:8081"}
+            if proxy
+            else None
+        )
+    )
+
+    assert entrypoint.warn_if_agents_reach_the_host(runtime, host) is warned
+
+
+def test_the_entrypoint_checks_host_reachability(tmp_path, monkeypatch):
+    """경고 함수만 있고 진입점이 부르지 않으면 아무도 모른다 — 배선을 본다."""
+    calls = []
+    monkeypatch.setattr(
+        entrypoint, "warn_if_agents_reach_the_host", lambda runtime, host: calls.append(host)
+    )
+
+    _serve_with(tmp_path, monkeypatch, {})
+
+    assert calls == ["127.0.0.1"]

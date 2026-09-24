@@ -325,6 +325,14 @@ ImportRef = Annotated[str, Field(pattern=r"^[\w.]+:[\w.]+$")]
 """Importable reference — ``module.path:attribute``."""
 
 
+IMPORTABLE_PACKAGE = "malkuth.graphs"
+"""그래프 선언이 import 할 수 있는 유일한 패키지 — state 모델과 조건 함수를 두는 곳."""
+
+
+def _importable(module_path: str) -> bool:
+    return module_path == IMPORTABLE_PACKAGE or module_path.startswith(f"{IMPORTABLE_PACKAGE}.")
+
+
 def resolve_import_ref(ref: str) -> Any:
     """Import an object from a ``module:attribute`` reference.
 
@@ -343,6 +351,12 @@ def resolve_import_ref(ref: str) -> Any:
         raise _topology_error(f"invalid import ref: {ref}", ref=ref)
 
     module_path, _, attribute = ref.partition(_IMPORT_REF_SEPARATOR)
+    if not _importable(module_path):
+        # 검증 단계에서 import 하는 순간 모듈 최상위 코드가 돈다 — 저장된 YAML 문자열 하나로
+        # 임의 모듈을 실행시킬 수 없게, 그래프 계약을 두는 패키지만 연다 (#316)
+        raise _topology_error(
+            f"import ref outside {IMPORTABLE_PACKAGE}: {ref}", ref=ref, allowed=IMPORTABLE_PACKAGE
+        )
     try:
         module = importlib.import_module(module_path)
     except (ImportError, ValueError) as err:

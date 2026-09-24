@@ -176,9 +176,13 @@ class McpSidecars:
         라벨로 찾는다: 선언이 바뀌었거나 읽을 수 없어도 이 에이전트의 사이드카를 남기지 않는다.
         """
         network = sidecar_network(agent)
-        labeled = await asyncio.to_thread(
-            self.client.labeled, {AGENT_LABEL: agent, ROLE_LABEL: SIDECAR_ROLE}
-        )
+        try:
+            labeled = await asyncio.to_thread(
+                self.client.labeled, {AGENT_LABEL: agent, ROLE_LABEL: SIDECAR_ROLE}
+            )
+        except Exception as err:  # noqa: BLE001 — 찾지 못해도 네트워크 정리는 한다; 로그로 드러낸다
+            log.warning("mcp sidecars could not be listed", agent=agent, error=type(err).__name__)
+            labeled = ()
         for container_id in labeled:
             await self._discard(agent, container_id)
         if self.proxy is not None:

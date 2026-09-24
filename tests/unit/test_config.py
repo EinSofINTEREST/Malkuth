@@ -426,3 +426,24 @@ def test_egress_proxy_urls_need_a_port_and_nothing_extra(url):
 
     with pytest.raises(ValidationError):
         EgressProxyConfig(connect_url=url, providers_url="http://egress:8081")
+
+
+@pytest.mark.parametrize("container", ["-leading", "has space", "a/b", ""])
+def test_the_egress_proxy_container_is_a_docker_name(container):
+    """사이드카 네트워크에 붙일 컨테이너 (#304) — Docker 이름 규칙 밖이면 기동 전에 거절한다."""
+    from malkuth.config import EgressProxyConfig
+
+    with pytest.raises(ValidationError):
+        EgressProxyConfig(
+            connect_url="http://egress:8080",
+            providers_url="http://egress:8081",
+            container=container,
+        )
+
+
+def test_the_egress_proxy_container_is_optional():
+    from malkuth.config import EgressProxyConfig
+
+    base = {"connect_url": "http://egress:8080", "providers_url": "http://egress:8081"}
+    assert EgressProxyConfig(**base).container is None
+    assert EgressProxyConfig(**base, container="malkuth-egress-1").container == "malkuth-egress-1"

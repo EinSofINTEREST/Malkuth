@@ -1440,3 +1440,187 @@ def test_an_ipv6_proxy_address_keeps_its_brackets():
 
     parsed = urlsplit(env["HTTPS_PROXY"])
     assert (parsed.hostname, parsed.port, parsed.password) == ("fd00::5", 8080, "cred")
+
+
+# --- MCP 사이드카 (#304) -------------------------------------------------------------
+
+SIDECAR = "malkuth-alpha--mcp-search"
+SIDECAR_NET = "malkuth-alpha--mcp"
+
+
+def with_sidecar(workspace: Path, agent: str = "alpha", image: str = "mcp/search:0.3.0") -> None:
+    doc = agent_doc(agent)
+    doc["spec"]["mcp"] = {
+        "servers": [{"name": "search", "transport": "streamable-http", "sidecar": {"image": image}}]
+    }
+    write(workspace / "agents" / agent / "manifest.yaml", doc)
+
+
+def sidecar_manager(workspace: Path, docker: FakeDockerClient, store=None) -> DeploymentManager:
+    catalog = Catalog.under(workspace)
+    return DeploymentManager(
+        catalog=catalog,
+        author=Author(catalog=catalog),
+        launcher=AgentLauncher(
+            engine=DockerEngine(client=docker), health_interval_s=10.0, health_sleep=Tick()
+        ),
+        store=store or InMemoryDeploymentStore(),
+        secrets_env={"ANTHROPIC_API_KEY": "k"},
+        ready_timeout_s=5.0,
+        ready_poll_s=0.0,
+        sleep=NoSleep(),
+    )
+
+
+def behind_the_proxy(manager: DeploymentManager) -> None:
+    from malkuth.runtime.deployments import EgressEndpoints
+    from malkuth.runtime.sidecars import ProxyAttachment
+
+    with_access(manager)
+    manager.launcher.engine.internal = True
+    manager.egress = EgressEndpoints(
+        connect_url="http://malkuth-egress:8080", providers_url="http://malkuth-egress:8081"
+    )
+    manager.sidecar_proxy = ProxyAttachment(container="malkuth-egress-1", alias="malkuth-egress")
+
+
+def created(docker: FakeDockerClient, name: str) -> dict:
+    [found] = [c for c in docker.created if c["name"] == name]
+    return found
+
+
+async def test_a_sidecar_starts_before_its_agent_which_joins_its_network(
+    manager, docker, workspace
+):
+    with_sidecar(workspace)
+
+    record = await manager.deploy("two")
+
+    names = [c["name"] for c in docker.created]
+    assert names.index(SIDECAR) < names.index("malkuth-alpha-0")
+    alpha = next(a for a in record.agents if a.name == "alpha")
+    # 프록시가 없는 배포 — 에이전트만 자기 사이드카 네트워크에 붙는다. beta 는 붙지 않는다
+    assert docker.connected == [(SIDECAR_NET, alpha.container_id, ())]
+
+    await manager.teardown(record.deployment_id)
+
+    assert docker.find(SIDECAR) is None, "해체가 사이드카를 남겼다"
+    assert docker.removed_networks == [SIDECAR_NET, "malkuth-beta--mcp"]
+    assert running(docker) == []
+
+
+async def test_behind_the_proxy_only_the_proxy_reaches_the_sidecar(manager, docker, workspace):
+    with_sidecar(workspace)
+    behind_the_proxy(manager)
+
+    record = await manager.deploy("two")
+
+    assert docker.connected == [(SIDECAR_NET, "malkuth-egress-1", ("malkuth-egress",))]
+    agent_env, sidecar_env = env_of(docker, "alpha"), created(docker, SIDECAR)["environment"]
+    # 바깥 호출은 소유 에이전트의 신원으로 같은 판정을 받는다 — 그 밖의 에이전트 env 는 없다
+    assert sidecar_env["HTTPS_PROXY"] == agent_env["HTTPS_PROXY"]
+    assert ACCESS_CREDENTIAL_ENV not in sidecar_env and "ANTHROPIC_API_KEY" not in sidecar_env
+    alpha = next(a for a in record.agents if a.name == "alpha")
+    await manager.launcher.stop_all()
+    await manager.teardown(record.deployment_id)
+    assert (SIDECAR_NET, "malkuth-egress-1") in docker.disconnected
+    assert alpha.container_id not in {c for _, c, _ in docker.connected}
+
+
+async def test_behind_the_proxy_without_its_container_sidecars_are_refused(
+    manager, docker, workspace
+):
+    """프록시를 붙일 수 없으면 에이전트를 사이드카에 직접 이을 수밖에 없다 — 띄우지 않는다."""
+    with_sidecar(workspace)
+    behind_the_proxy(manager)
+    manager.sidecar_proxy = None
+
+    with pytest.raises(MalkuthError) as caught:
+        await manager.deploy("two")
+
+    assert caught.value.code == ErrorCode.CFG_001
+    assert caught.value.details["agents"] == ["alpha"]
+    assert docker.created == [] and manager.deployments() == []
+
+
+async def test_a_graph_without_sidecars_deploys_behind_the_proxy_without_its_container(
+    manager, docker
+):
+    behind_the_proxy(manager)
+    manager.sidecar_proxy = None
+
+    record = await manager.deploy("two")
+
+    assert record.status == DeploymentStatus.READY
+    await manager.launcher.stop_all()
+
+
+async def test_a_failed_deploy_removes_the_sidecars_it_started(workspace, healthy):
+    """beta 의 사이드카를 세우지 못하면 alpha 와 그 사이드카까지 되감긴다."""
+    with_sidecar(workspace)
+    with_sidecar(workspace, "beta", image="mcp/broken:0.1.0")
+
+    class NoBroken(TrackingDocker):
+        def ensure_image(self, image: str) -> None:
+            if image == "mcp/broken:0.1.0":
+                raise RuntimeError("pull denied")
+            super().ensure_image(image)
+
+    docker = NoBroken()
+    manager = sidecar_manager(workspace, docker)
+
+    with pytest.raises(MalkuthError) as caught:
+        await manager.deploy("two")
+
+    assert caught.value.code == ErrorCode.RT_004
+    assert docker.find(SIDECAR) is None
+    assert running(docker) == []
+    assert set(docker.removed_networks) >= {SIDECAR_NET, "malkuth-beta--mcp"}
+    assert [r.status for r in manager.deployments()] == [DeploymentStatus.FAILED]
+
+
+async def test_reattach_brings_back_a_sidecar_that_disappeared(workspace, docker, healthy):
+    with_sidecar(workspace)
+    store = InMemoryDeploymentStore()
+    record = await sidecar_manager(workspace, docker, store).deploy("two")
+    lost = docker.find(SIDECAR)
+    docker.remove(lost)
+
+    second = sidecar_manager(workspace, docker, store)
+    touched = await second.reattach()
+
+    assert [r.status for r in touched] == [DeploymentStatus.READY]
+    assert docker.find(SIDECAR) not in (None, lost)
+    await second.launcher.stop_all()
+    await second.teardown(record.deployment_id)
+
+
+async def test_reattach_keeps_a_running_sidecar(workspace, docker, healthy):
+    with_sidecar(workspace)
+    store = InMemoryDeploymentStore()
+    await sidecar_manager(workspace, docker, store).deploy("two")
+    alive = docker.find(SIDECAR)
+
+    second = sidecar_manager(workspace, docker, store)
+    await second.reattach()
+
+    assert docker.find(SIDECAR) == alive and alive not in docker.removed
+    await second.launcher.stop_all()
+
+
+async def test_reattach_marks_lost_when_a_sidecar_cannot_be_restored(workspace, docker, healthy):
+    with_sidecar(workspace)
+    store = InMemoryDeploymentStore()
+    await sidecar_manager(workspace, docker, store).deploy("two")
+    docker.remove(docker.find(SIDECAR))
+
+    class NoPull(TrackingDocker):
+        def ensure_image(self, image: str) -> None:
+            raise RuntimeError("registry down")
+
+    broken = NoPull()
+    broken.created, broken.removed, broken.started = docker.created, docker.removed, docker.started
+    touched = await sidecar_manager(workspace, broken, store).reattach()
+
+    assert [r.status for r in touched] == [DeploymentStatus.LOST]
+    assert "mcp sidecars not restored: alpha" in (touched[0].error or "")

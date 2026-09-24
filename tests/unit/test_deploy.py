@@ -239,23 +239,21 @@ def test_declared_group_passes():
     assert report.ok
 
 
-# --- MCP 사이드카 (#282) ----------------------------------------------------------
+# --- MCP 사이드카 (#282, #304) ----------------------------------------------------------
 
 
-def test_a_sidecar_mcp_server_is_refused_before_anything_starts():
-    """runtime 이 사이드카를 띄우지 못한다 — 기동에서 MCP_001 로 넘어지기 전에 배포가 거절한다."""
+def test_a_sidecar_mcp_server_passes_deploy_validation():
+    """runtime 이 사이드카를 띄운다 (#304) — 배포 검증은 더 이상 거절하지 않는다."""
     sidecar = {
         "name": "browser",
         "transport": "streamable-http",
         "sidecar": {"image": "mcp/x:1.0.0"},
     }
-    remote = {"name": "corp", "transport": "streamable-http", "url": "https://mcp.example/mcp"}
-    manifests = {"planner": agent("planner", mcp={"servers": [sidecar, remote]})}
+    manifests = {"planner": agent("planner", mcp={"servers": [sidecar]})}
 
     report = run([make_topology(["planner"])], manifests=manifests)
 
-    [finding] = [f for f in report.findings if f.check == "mcp_sidecar"]
-    assert finding.details == {"agent": "planner", "mcp_server": "browser"}
+    assert report.ok, report.findings
 
 
 # --- 4. env_allowlist ---------------------------------------------------------

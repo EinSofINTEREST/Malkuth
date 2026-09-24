@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
-from malkuth.core.agent import HealthStatus, TaskRequest, TaskResult
+from malkuth.core.agent import CONTROL_OVERHEAD_S, HealthStatus, TaskRequest, TaskResult
 from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError, RetryPolicy
 from malkuth.core.events import TaskEvent
 from malkuth.resilience import retrying
@@ -119,7 +119,7 @@ class ControlClient:
         payload = await self._post_json(
             "/v1/invoke",
             body=task.model_dump(mode="json"),
-            timeout_s=timeout_s or task.config.timeout_s,
+            timeout_s=timeout_s or _task_wait_s(task),
             task_id=task.task_id,
         )
         return TaskResult.model_validate(payload)
@@ -150,7 +150,7 @@ class ControlClient:
                 url,
                 json=task.model_dump(mode="json"),
                 headers=self._headers(),
-                timeout=timeout_s or task.config.timeout_s,
+                timeout=timeout_s or _task_wait_s(task),
             ) as response:
                 self._raise_for_status(response, task_id=task.task_id)
                 async for line in response.aiter_lines():
@@ -350,3 +350,8 @@ def control_url(host: str, port: int = DEFAULT_CONTROL_PORT) -> str:
     Control API 기본 URL 을 만듭니다 — 포트는 runtime 이 결정합니다.
     """
     return f"http://{host}:{port}"
+
+
+def _task_wait_s(task: TaskRequest) -> float:
+    """태스크를 기다리는 상한 — agentd 의 ``TO_001`` 결과가 돌아올 여유를 더한다 (#314)."""
+    return task.config.timeout_s + CONTROL_OVERHEAD_S

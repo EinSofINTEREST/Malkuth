@@ -26,6 +26,9 @@ class FakeControlClient:
         self.calls.append(task.task_id)
         return TaskResult.completed(task, output=self._output)
 
+    async def cancel(self, task_id):
+        self.calls.append(f"cancel:{task_id}")
+
 
 def node(node_id: str = "planner", agent: str | None = "agents/planner@0.1.0") -> NodeSpec:
     return NodeSpec.model_validate({"id": node_id, "agent": agent})
@@ -100,3 +103,25 @@ async def test_failed_node_is_not_tracked_as_invoked():
         await runtime.invoke(node(), make_task())
 
     assert runtime.invoked == []
+
+
+# --- 취소 (#314) ----------------------------------------------------------------
+
+
+async def test_cancel_reaches_the_nodes_agent():
+    client = FakeControlClient()
+    runtime = ControlNodeRuntime(clients={"planner": client})
+
+    await runtime.cancel(node(), "t-1")
+
+    assert client.calls == ["cancel:t-1"]
+
+
+@pytest.mark.parametrize("target", [subgraph_node(), node(agent="agents/gone@0.1.0")])
+async def test_cancel_without_a_container_is_a_no_op(target):
+    """취소할 컨테이너가 없으면 취소할 태스크도 없다."""
+    client = FakeControlClient()
+
+    await ControlNodeRuntime(clients={"planner": client}).cancel(target, "t-1")
+
+    assert client.calls == []

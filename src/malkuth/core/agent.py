@@ -24,6 +24,13 @@ DEFAULT_TASK_TIMEOUT_S = 300.0
 DEFAULT_MAX_TURNS = 20
 DEFAULT_TOOL_TIMEOUT_S = 60.0
 DEFAULT_A2A_DEPTH_LIMIT = 3
+CONTROL_OVERHEAD_S = 5.0
+"""태스크 timeout 위에 호출자가 더 기다리는 여유 — Control API 왕복과 결과 직렬화 몫.
+
+호출자(orchestrator, Control API 클라이언트)가 ``timeout_s`` 에 정확히 끊으면 agentd 의
+``TO_001`` 결과보다 호출자의 timeout 이 먼저 나서, 에이전트가 이미 보고한 실패를 버리게 된다
+(#314). 강제는 agentd 가 하고, 호출자는 그 결과가 돌아올 틈을 준다.
+"""
 
 
 class TaskStatus(StrEnum):

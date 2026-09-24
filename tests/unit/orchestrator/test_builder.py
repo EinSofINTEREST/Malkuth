@@ -7,6 +7,7 @@ runtime 을 fake 로 치환하고 checkpointer 는 in-memory 를 쓴다.
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
 import pytest
 from langgraph.checkpoint.memory import MemorySaver
@@ -221,10 +222,85 @@ async def test_node_timeout_raises_to_003():
     )
 
     with pytest.raises(MalkuthError) as exc_info:
-        await build_graph(topology, SlowRuntime()).ainvoke({"query": "q", "_run_id": "r"})
+        await build_graph(topology, SlowRuntime(), control_overhead_s=0).ainvoke(
+            {"query": "q", "_run_id": "r"}
+        )
 
     assert exc_info.value.code == "TO_003"
     assert exc_info.value.retryable is True
+
+
+# --- timeout 경계: agentd 가 강제하고 orchestrator 는 결과를 기다린다 (#314) ----------------
+
+
+def _timed_topology(timeout_s: float) -> Any:
+    return make_mission(
+        nodes=[
+            {"id": "planner", "agent": "agents/planner@0.1.0", "timeout_s": timeout_s},
+            {"id": "researcher", "agent": "agents/researcher@0.1.0"},
+        ]
+    )
+
+
+async def test_an_agent_timeout_reaches_the_graph_as_to_001():
+    """agentd 가 timeout_s 에 보낸 TO_001 결과를 orchestrator 가 먼저 끊어 버리면 안 된다."""
+
+    class AgentTimesOut:
+        async def invoke(self, node, task):
+            # agentd 는 정확히 timeout_s 에 끊고, 결과는 왕복만큼 늦게 도착한다
+            await asyncio.sleep(task.config.timeout_s + 0.02)
+            err = MalkuthError(category=ErrorCategory.TIMEOUT, code="TO_001", message="late")
+            return TaskResult.failed(task, err)
+
+    graph = build_graph(_timed_topology(0.05), AgentTimesOut(), control_overhead_s=0.5)
+
+    with pytest.raises(MalkuthError) as exc_info:
+        await graph.ainvoke({"query": "q", "_run_id": "r"})
+
+    assert exc_info.value.code == "GRAPH_002"
+    assert exc_info.value.details["error_code"] == "TO_001"
+
+
+async def test_the_orchestrator_cancels_a_task_it_stopped_waiting_for():
+    """취소를 알리지 않으면 에이전트는 아무도 기다리지 않는 태스크를 끝까지 돈다."""
+
+    class Hangs:
+        def __init__(self) -> None:
+            self.cancelled: list[tuple[str, str]] = []
+            self.task_ids: list[str] = []
+
+        async def invoke(self, node, task):
+            self.task_ids.append(task.task_id)
+            await asyncio.sleep(10)
+
+        async def cancel(self, node, task_id):
+            self.cancelled.append((node.id, task_id))
+
+    runtime = Hangs()
+
+    with pytest.raises(MalkuthError) as exc_info:
+        await build_graph(_timed_topology(0.01), runtime, control_overhead_s=0).ainvoke(
+            {"query": "q", "_run_id": "r"}
+        )
+
+    assert exc_info.value.code == "TO_003"
+    assert runtime.cancelled == [("planner", runtime.task_ids[0])]
+
+
+async def test_a_failed_cancel_does_not_hide_the_timeout():
+    class CancelFails:
+        async def invoke(self, node, task):
+            await asyncio.sleep(10)
+
+        async def cancel(self, node, task_id):
+            raise MalkuthError(category=ErrorCategory.NETWORK, code="NET_001", message="down")
+
+    with pytest.raises(MalkuthError) as exc_info:
+        await build_graph(_timed_topology(0.01), CancelFails(), control_overhead_s=0).ainvoke(
+            {"query": "q", "_run_id": "r"}
+        )
+
+    assert exc_info.value.code == "TO_003"
 
 
 # --- checkpoint 재개 --------------------------------------------------------

@@ -84,6 +84,31 @@ allowed. The cost is that revoking does not work during the outage.
 3. A registry that answers but **rejects** an enforcement point (a wrong enforcer token) is not an
    outage: that enforcement point drops its cache and denies everything. Fix the token.
 
+## Closing the Host Gateway
+
+With the egress proxy on, agents sit on an internal network with no route out — except to the host
+itself, which is the network's gateway. Any host service listening on all interfaces is reachable
+from agents without passing through the proxy. Close it once per agent network, on the host:
+
+```bash
+sudo deployments/docker/isolate-agent-network.sh apply malkuth-net     # runtime.network
+sudo deployments/docker/isolate-agent-network.sh status malkuth-net
+```
+
+- It adds a chain to `INPUT` for that network's bridge: connections agents **open** to the host are
+  dropped; replies to connections the host opened (the control plane calling an agent's Control API)
+  pass. IPv6 gets the same rule when `ip6tables` is present.
+- Apply it **after** the network exists (the control plane creates it on the first isolated
+  deployment) and again after a reboot or a firewall reload — the rule is not persistent.
+- Services agents must reach (the egress proxy, the Memory Service, whatever answers
+  `orchestrator.access_agent_url`) belong **on the agent network**, not on the host. After this rule
+  they cannot be reached through the gateway.
+- `remove` takes it out. The script refuses to `apply` to a network that is not internal.
+
+The control plane warns at startup (`control plane is reachable from isolated agents through the
+network gateway`) when the proxy is on and it binds anything but loopback. Bind it to loopback, or
+apply the rule.
+
 ## Widening a Permission
 
 Operators do not grant. A worker agent asks the permission agent over A2A, and the registry limits

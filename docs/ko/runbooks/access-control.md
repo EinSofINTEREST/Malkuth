@@ -78,6 +78,29 @@
 3. 레지스트리가 답하면서 강제 지점을 **거절**하는 경우(강제 지점 토큰이 틀림)는 장애가 아니다: 그
    강제 지점은 캐시를 버리고 모두 거부한다. 토큰을 고친다.
 
+## 호스트 게이트웨이 닫기
+
+이그레스 프록시를 켜면 에이전트는 외부 경로 없는 내부 네트워크에 있다 — 단, 그 네트워크의 게이트웨이인
+호스트 자신에게는 닿는다. 모든 인터페이스에서 받는 호스트 서비스는 프록시를 거치지 않고 에이전트가 닿을
+수 있다. 에이전트 네트워크마다 한 번, 호스트에서 닫는다:
+
+```bash
+sudo deployments/docker/isolate-agent-network.sh apply malkuth-net     # runtime.network
+sudo deployments/docker/isolate-agent-network.sh status malkuth-net
+```
+
+- 그 네트워크 브리지에 대해 `INPUT` 에 체인을 하나 더한다: 에이전트가 호스트로 **여는** 연결은 버리고,
+  호스트가 연 연결의 응답(control plane 이 에이전트 Control API 를 부르는 것)은 통과한다. `ip6tables`
+  가 있으면 IPv6 에도 같은 규칙을 건다.
+- 네트워크가 생긴 **뒤에** 적용한다 (첫 격리 배포 때 control plane 이 만든다). 재부팅이나 방화벽 재적재
+  뒤에도 다시 적용한다 — 규칙은 영속되지 않는다.
+- 에이전트가 닿아야 하는 서비스(이그레스 프록시, Memory Service, `orchestrator.access_agent_url` 에 답하는
+  것)는 호스트가 아니라 **에이전트 네트워크 위에** 둔다. 이 규칙 뒤에는 게이트웨이로 닿지 않는다.
+- `remove` 로 뺀다. 내부 네트워크가 아닌 곳에는 `apply` 를 거부한다.
+
+프록시를 켰는데 control plane 이 루프백이 아닌 주소에 바인드하면 기동 시 경고한다 (`control plane is
+reachable from isolated agents through the network gateway`). 루프백에 바인드하거나 규칙을 적용한다.
+
 ## 권한을 넓힐 때
 
 운영자는 부여하지 않는다. 작업 에이전트가 A2A 로 권한 에이전트에게 요청하고, 레지스트리가 줄 수 있는

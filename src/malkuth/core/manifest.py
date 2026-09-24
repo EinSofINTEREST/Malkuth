@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 from enum import StrEnum
 from pathlib import PurePosixPath
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -100,11 +100,17 @@ def _require_pinned_image(value: str, subject: str) -> str:
 
 
 class McpTransport(StrEnum):
-    """MCP transport 종류."""
+    """MCP transport 종류.
+
+    ``sse`` 는 두지 않는다 — MCP 명세가 legacy 로 내린 전송이고 연결 경로가 없다. 선언을
+    받아 두면 매니페스트는 통과하고 initialize 에서야 실패한다 (#318).
+    """
 
     STDIO = "stdio"
     STREAMABLE_HTTP = "streamable-http"
-    SSE = "sse"
+
+
+LEGACY_SSE_TRANSPORT = "sse"
 
 
 class MemoryMode(StrEnum):
@@ -292,6 +298,17 @@ class McpServerSpec(BaseModel):
     allowed_tools: tuple[str, ...] = ()
     env_allowlist: tuple[str, ...] = ()
     optional: bool = False
+
+    @field_validator("transport", mode="before")
+    @classmethod
+    def _no_legacy_sse(cls, value: Any) -> Any:
+        """enum 오류("stdio 또는 streamable-http") 대신 무엇으로 바꿀지 알려 준다."""
+        if value == LEGACY_SSE_TRANSPORT:
+            raise ValueError(
+                "mcp transport 'sse' is not supported — it is legacy in the MCP spec; "
+                "use 'streamable-http'"
+            )
+        return value
 
     @field_validator("name")
     @classmethod

@@ -148,6 +148,14 @@ def test_stdio_mcp_server_accepts_executable():
     assert server.optional is False
 
 
+def test_a_legacy_sse_server_is_rejected_with_the_replacement():
+    """선언을 받아 두면 매니페스트는 통과하고 initialize 에서야 실패한다 — 연결 경로가 없다."""
+    server = {"name": "legacy", "transport": "sse", "url": "https://mcp.example.com/sse"}
+
+    with pytest.raises(ValidationError, match="use 'streamable-http'"):
+        make_manifest(spec=_spec_with(mcp={"servers": [server]}))
+
+
 def test_http_mcp_server_requires_exactly_one_of_sidecar_or_url():
     with pytest.raises(ValidationError, match="exactly one"):
         make_manifest(

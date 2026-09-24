@@ -305,6 +305,7 @@ async def _standard_executor(
         tools=binding.tools,
         render=binding.render,
         tool_schemas=binding.tool_schemas,
+        system=binding.system,
         # 05 Retry Layering — 모델 호출의 재시도 주체는 agentd 다.
         # 여기서 켜지 않으면 정책은 정의만 되고 아무 일도 하지 않는다
         config=ExecutorConfig(retry_policies=MODEL_RETRY_POLICIES),
@@ -357,6 +358,7 @@ async def load_modules(
         render=lambda task: _render(result, task),
         tool_schemas=tuple(_executable_schemas(result, tools)),
         output_keys=lambda task: _template_output_keys(result, task),
+        system=_system(result),
     )
 
 
@@ -581,6 +583,22 @@ def _template_output_keys(result: Any, task: Any) -> tuple[str, ...]:
         return ()
     template = result.promptset.manifest.spec.templates.get(task.template_name)
     return () if template is None else template.output_keys
+
+
+SYSTEM_TEMPLATE = "system"
+"""운영자 지시 템플릿 이름 — 모든 promptset 이 선언한다. 태스크 입력과 **따로** 보낸다 (#308)."""
+
+
+def _system(result: Any) -> str:
+    """promptset 의 ``system`` 템플릿 — 없으면 빈 지시.
+
+    선언돼 있는데 렌더되지 않으면 도구 결과를 믿지 말라는 운영자 지시가 모델에 닿지 않는다.
+    변수 없이 렌더한다: 운영자 지시는 태스크마다 바뀌는 입력이 아니다.
+    """
+    if result.promptset is None or SYSTEM_TEMPLATE not in result.promptset.template_names:
+        return ""
+    rendered: str = result.promptset.render(SYSTEM_TEMPLATE)
+    return rendered.strip()
 
 
 def _render(result: Any, task: Any) -> str:

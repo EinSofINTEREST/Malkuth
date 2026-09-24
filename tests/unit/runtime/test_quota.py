@@ -74,6 +74,39 @@ def test_demand_multiplies_by_replicas():
     assert totals == ResourceTotals(cpu_cores=3.0, memory_bytes=3 * GIB, agents=3)
 
 
+def test_sidecars_count_once_each_whatever_the_replicas():
+    """MCP 사이드카는 에이전트 몫이다 (#304) — 레플리카마다가 아니라 서버마다 하나."""
+    manifest = make_manifest(
+        metadata={"name": "worker", "version": "0.1.0", "group": "research"},
+        spec={
+            "runtime": {"resources": {"cpu": "1.0", "memory": "1Gi"}, "replicas": 2},
+            "mcp": {
+                "servers": [
+                    {
+                        "name": "browser",
+                        "transport": "streamable-http",
+                        "sidecar": {
+                            "image": "mcp/playwright:1.2.0",
+                            "resources": {"cpu": "0.5", "memory": "512Mi"},
+                        },
+                    },
+                    {
+                        "name": "search",
+                        "transport": "streamable-http",
+                        "sidecar": {"image": "mcp/search:0.3.0"},
+                    },
+                    {"name": "corp", "transport": "streamable-http", "url": "https://x.example"},
+                ]
+            },
+        },
+    )
+
+    totals = demand_of(manifest)
+
+    # 레플리카 2 × (1.0, 1Gi) + browser (0.5, 512Mi) + search 기본값 (1.0, 1Gi); 원격 서버는 0
+    assert totals == ResourceTotals(cpu_cores=3.5, memory_bytes=3 * GIB + GIB // 2, agents=2)
+
+
 def test_total_demand_sums_across_agents():
     totals = total_demand([agent("a", cpu="1.0"), agent("b", cpu="2.5")])
 

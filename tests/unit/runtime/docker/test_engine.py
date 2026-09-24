@@ -97,6 +97,48 @@ async def test_an_isolated_engine_publishes_nothing_and_is_reached_inside_the_ne
     assert handle.control_url == "http://172.30.0.7:8080"
 
 
+async def test_extra_networks_are_joined_before_the_container_starts():
+    """프록시 없는 배포의 사이드카 네트워크 (#304) — 기동 전에 붙어야 agentd 가 세션을 연다."""
+    order: list[str] = []
+
+    class Ordered(FakeDockerClient):
+        def connect(self, network, container, *, aliases=()):
+            order.append(f"connect {network}")
+            super().connect(network, container, aliases=aliases)
+
+        def start(self, container_id):
+            order.append("start")
+            super().start(container_id)
+
+    client = Ordered()
+    manifest = make_manifest()
+    handle = await engine(client).start(
+        build_container_spec(manifest, extra_networks=("malkuth-test-agent--mcp",))
+    )
+
+    assert client.connected == [("malkuth-test-agent--mcp", handle.container_id, ())]
+    assert order == ["connect malkuth-test-agent--mcp", "start"]
+
+
+async def test_an_isolated_agent_never_joins_another_network():
+    """격리된 에이전트가 다른 네트워크에 붙으면 그 길로 프록시를 건너뛴다 (#304)."""
+    client = FakeDockerClient()
+    isolated = DockerEngine(client=client, network="agents", internal=True)
+
+    with pytest.raises(MalkuthError) as caught:
+        await isolated.start(build_container_spec(make_manifest(), extra_networks=("side",)))
+
+    assert caught.value.code == "RT_001"
+    assert client.created == [] and client.connected == []
+
+
+def test_extra_networks_cannot_be_shared_or_host_networks():
+    with pytest.raises(MalkuthError) as caught:
+        build_container_spec(make_manifest(), extra_networks=("host",))
+
+    assert caught.value.code == "RT_001"
+
+
 async def test_a_plain_engine_publishes_on_loopback_and_asks_for_a_normal_network():
     client = FakeDockerClient(host_port=49153)
 

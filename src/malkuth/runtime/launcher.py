@@ -133,6 +133,7 @@ class AgentLauncher:
         lifecycle: AgentLifecycle | None = None,
         mounts: Sequence[Mapping[str, Any]] = (),
         image: str | None = None,
+        networks: Sequence[str] = (),
     ) -> LaunchedAgent:
         """Start one agent with its token injected and wired.
 
@@ -150,6 +151,8 @@ class AgentLauncher:
                 (`build_container_spec`). 재시작에도 같은 것을 다시 건다.
             image: Baked image for a custom agent (#266). 재시작에도 같은 이미지로
                 다시 세운다 — 빠뜨리면 재시작한 컨테이너만 base 이미지로 돈다.
+            networks: 더 붙을 네트워크 — 이그레스 프록시 없는 배포의 사이드카 네트워크 (#304).
+                재시작에도 같은 것을 다시 건다.
             lifecycle: 이어붙일 상태. **재시작은 반드시 넘겨야 한다** — 새로
                 만들면 `RestartPolicy` 의 창(window)이 리셋되어 crash-loop
                 상한(02 Rule 6)이 영원히 걸리지 않는다.
@@ -186,6 +189,7 @@ class AgentLauncher:
             network=self.engine.network,
             mounts=mounts,
             image=image,
+            extra_networks=networks,
         )
 
         # 02 Lifecycle — 이미지는 배포 파이프라인이 굽는다 (Rule 1). runtime 이
@@ -218,6 +222,7 @@ class AgentLauncher:
                 "memory": memory,
                 "mounts": mounts,
                 "image": image,
+                "networks": networks,
             },
             a2a_port=a2a_port,
         )

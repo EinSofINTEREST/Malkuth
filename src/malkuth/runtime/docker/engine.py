@@ -202,6 +202,13 @@ class DockerEngine:
         """
         agent = agent_of(spec)
         container_control_port = control_port_of(spec)
+        if self.internal and spec.extra_networks:
+            # 격리된 에이전트가 다른 네트워크에 붙으면 그 길로 프록시를 건너뛴다 — 사이드카도
+            # 프록시가 부른다 (#304)
+            raise invalid_spec(
+                agent, spec.image, reason="isolated agents join only the agent network",
+                networks=list(spec.extra_networks),
+            )  # fmt: skip
 
         try:
             await asyncio.to_thread(self.client.ensure_image, spec.image)
@@ -231,6 +238,8 @@ class DockerEngine:
             raise start_failed(agent, spec.image, reason=type(err).__name__) from err
 
         try:
+            for extra in spec.extra_networks:
+                await asyncio.to_thread(self.client.connect, extra, container_id)
             await asyncio.to_thread(self.client.start, container_id)
             host, port = await self.control_address(container_id, container_control_port)
         except Exception as err:

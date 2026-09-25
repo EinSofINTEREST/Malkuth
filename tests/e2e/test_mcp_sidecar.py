@@ -109,3 +109,55 @@ def test_without_the_proxy_only_the_owner_joins_its_sidecar_network(plane):
     assert status == 200, stopped
     assert docker("ps", "-aq", "--filter", f"name=^{SIDECAR}$") == ""
     assert docker("network", "ls", "-q", "--filter", f"name=^{SIDECAR_NET}$") == ""
+
+
+# 컨테이너 안에서 자기 Control API 를 부르고 **곧바로** health 를 읽는다 — 배포된 에이전트의 포트는
+# 호스트에 열려 있지 않다. 한 exec 안에서 읽어야 runtime 이 컨테이너를 바꾸기 전의 상태를 본다
+INVOKE_THEN_HEALTH = """
+import json, os, sys, urllib.request
+body = {"task_id": sys.argv[1], "run_id": "direct-" + sys.argv[1], "node_id": None,
+        "input": {"query": sys.argv[2]}, "config": {}, "trace": {"trace_id": sys.argv[1]}}
+request = urllib.request.Request(
+    "http://127.0.0.1:8080/v1/invoke", data=json.dumps(body).encode(),
+    headers={"Authorization": "Bearer " + os.environ["MALKUTH_AGENT_TOKEN"],
+             "content-type": "application/json"})
+result = json.loads(urllib.request.urlopen(request, timeout=90).read())
+health = json.loads(urllib.request.urlopen("http://127.0.0.1:8080/v1/health", timeout=5).read())
+print((result.get("error") or {}).get("code") or result["status"], health["status"])
+"""
+HEALTH = """
+import json, urllib.request
+body = urllib.request.urlopen("http://127.0.0.1:8080/v1/health", timeout=5).read()
+print(json.loads(body)["status"])
+"""
+
+
+def container_id(name: str) -> str:
+    return docker("inspect", "-f", "{{.Id}}", name, check=False)
+
+
+def test_a_session_that_cannot_reconnect_makes_the_agent_unhealthy_and_restarted(plane):
+    """재연결을 소진한 필수 MCP 세션을 가진 에이전트가 Ready 로 남으면 안 된다 (#311)."""
+    status, record = api("POST", "/v1/deployments", {"graph": GRAPH})
+    assert status == 201, record
+    assert run_in(RESEARCHER, HEALTH) == "healthy"
+    before = container_id(RESEARCHER)
+
+    docker("stop", SIDECAR)
+    # 대역 모델이 사이드카 도구를 부르게 한다 — 세션은 도구 호출에서 단절을 알아채고
+    # 재연결을 시도한다
+    outcome, health = run_in(
+        RESEARCHER,
+        INVOKE_THEN_HEALTH,
+        "e2e-mcp-down",
+        'use tool mcp__tools__echo with {"text": "hi"}',
+    ).split()
+
+    assert outcome.startswith("MCP_"), outcome
+    assert health == "unhealthy"
+    # runtime 의 health 루프가 Unhealthy 를 보고 컨테이너를 바꾼다 (02 Lifecycle 6)
+    until(
+        lambda: container_id(RESEARCHER) not in ("", before),
+        what="the unhealthy agent replaced by the runtime",
+        timeout_s=90,
+    )

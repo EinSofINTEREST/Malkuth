@@ -15,7 +15,7 @@ from typing import get_args, get_type_hints
 import httpx2
 import pytest
 
-from malkuth.protocols.mcp.sdk import _open_streamable_http, _render_block, _terminate
+from malkuth.protocols.mcp.sdk import _call, _open_streamable_http, _render_block, _terminate
 from malkuth.protocols.mcp.session import Connection
 
 
@@ -87,3 +87,39 @@ async def test_auth_headers_ride_on_the_client_the_sdk_receives(monkeypatch):
         assert client.headers["authorization"] == "Bearer t"
     finally:
         await client.aclose()
+
+
+# --- 연결 끊김은 전송 단절이다 (#311) -------------------------------------------------
+
+
+class _Session:
+    def __init__(self, error: Exception) -> None:
+        self._error = error
+
+    async def call_tool(self, tool, arguments):
+        raise self._error
+
+
+def _connection_raising(error: Exception) -> Connection:
+    live = type("Live", (), {"session": _Session(error)})()
+    return Connection(handle=live, tools=("echo",), protocol_version="2025-06-18")
+
+
+async def test_a_closed_connection_is_a_transport_loss_not_a_tool_failure():
+    """도구 실패로 분류되면 세션이 재연결하지 않고, 서버가 사라져도 에이전트는 healthy 로 남는다."""
+    from mcp.shared.exceptions import MCPError
+    from mcp_types import CONNECTION_CLOSED
+
+    connection = _connection_raising(MCPError(code=CONNECTION_CLOSED, message="Connection closed"))
+
+    with pytest.raises(ConnectionError):
+        await _call(connection, "echo", {})
+
+
+async def test_other_protocol_errors_stay_tool_failures():
+    from mcp.shared.exceptions import MCPError
+
+    connection = _connection_raising(MCPError(code=-32602, message="invalid params"))
+
+    with pytest.raises(MCPError):
+        await _call(connection, "echo", {})

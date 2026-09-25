@@ -14,6 +14,8 @@ from typing import TYPE_CHECKING, Any
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+from mcp.shared.exceptions import MCPError
+from mcp_types import CONNECTION_CLOSED
 
 from malkuth.protocols.mcp.session import Connection, ToolResult
 
@@ -100,7 +102,14 @@ async def _load_tools(connection: Connection) -> Connection:
 async def _call(connection: Connection, tool: str, arguments: Mapping[str, Any]) -> ToolResult:
     """SDK 로 tool 을 실행하고 결과를 프레임워크 표현으로 옮긴다."""
     live: _Live = connection.handle
-    result = await live.session.call_tool(tool, dict(arguments))
+    try:
+        result = await live.session.call_tool(tool, dict(arguments))
+    except MCPError as err:
+        if err.code != CONNECTION_CLOSED:
+            raise
+        # 서버가 사라지면 SDK 는 전송 예외가 아니라 이 코드로 답한다 — 도구 실패(MCP_003)로 두면
+        # 세션이 재연결하지 않고, 재연결 소진이 health 에 닿지 않는다 (#311)
+        raise ConnectionError("mcp connection closed") from err
     return ToolResult(
         content=[_render_block(block) for block in getattr(result, "content", [])],
         is_error=bool(getattr(result, "is_error", False)),

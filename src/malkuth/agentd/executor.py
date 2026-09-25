@@ -12,11 +12,13 @@ import asyncio
 import json
 import time
 from collections import OrderedDict
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Final, Protocol
 
 import structlog
 
+from malkuth.agentd.health import ModelHealth
 from malkuth.agentd.telemetry import (
     DIRECT_GRAPH,
     STATUS_COMPLETED,
@@ -254,6 +256,17 @@ def _tool_error(name: str, task: TaskRequest, agent: str, err: BaseException) ->
     )
 
 
+@dataclass
+class _ModelWatch:
+    """태스크 하나의 모델 호출이 마감으로 잘렸는지 — 사용자 취소와 가르기 위해 execute 가 본다."""
+
+    cut: bool = False
+
+
+_MODEL_WATCH: ContextVar[_ModelWatch | None] = ContextVar("malkuth_model_watch", default=None)
+"""wait_for 가 만든 자식 태스크도 같은 객체를 본다 — 컨텍스트는 복사돼도 값은 공유된다."""
+
+
 @dataclass(frozen=True)
 class ModuleBinding:
     """What the executor takes from modules — the unit a reload swaps (#274).
@@ -269,6 +282,8 @@ class ModuleBinding:
     output_keys: Callable[[TaskRequest], Sequence[str]] | None = None
     system: str = ""
     """운영자 지시 — promptset 의 ``system`` 템플릿. 태스크 입력과 섞지 않고 따로 보낸다 (#308)."""
+    degraded: tuple[str, ...] = ()
+    """기동(또는 리로드) 때 뜨지 못한 optional MCP 서버 — health 가 degraded 로 보고한다."""
 
 
 class Executor:
@@ -293,6 +308,8 @@ class Executor:
         self._model = model
         self._config = config or ExecutorConfig()
         self._services = services or ExecutorServices()
+        # health 는 provider 를 부르지 않고 최근 호출 결과로 판정한다 (#311)
+        self.model_health = ModelHealth()
         self._binding = ModuleBinding(
             tools=tools,
             render=render,
@@ -338,9 +355,14 @@ class Executor:
             return cached
 
         started = time.perf_counter()
+        watch = _ModelWatch()
+        watching = _MODEL_WATCH.set(watch)
         try:
             result = await asyncio.wait_for(self._run(task), timeout=task.config.timeout_s)
         except TimeoutError:
+            if watch.cut:
+                # 모델이 태스크 마감까지 답하지 않았다 — health 가 그것을 봐야 한다
+                self.model_health.failed(ErrorCode.TO_001)
             result = TaskResult.failed(
                 task,
                 MalkuthError(
@@ -372,6 +394,8 @@ class Executor:
                     details={"cause": type(err).__name__},
                 ),
             )
+        finally:
+            _MODEL_WATCH.reset(watching)
 
         duration_s = time.perf_counter() - started
         self._record_task(result, task=task, duration_s=duration_s)
@@ -521,18 +545,24 @@ class Executor:
         provider 압박이 지표에서 사라진다.
         """
         tools = list(binding.tool_schemas)
-        if self._services.telemetry is None:
-            return await self._model.run(binding.system, list(messages), tools)
-
+        telemetry = self._services.telemetry
         try:
             response = await self._model.run(binding.system, list(messages), tools)
         except asyncio.CancelledError:
+            # 마감에 잘린 것인지 사용자 취소인지는 execute 가 안다 — 여기서는 표시만 한다
+            watch = _MODEL_WATCH.get()
+            if watch is not None:
+                watch.cut = True
             raise
         except Exception as err:
-            self._services.telemetry.model_called(status=_model_status(err))
+            self.model_health.failed(err.code if isinstance(err, MalkuthError) else "INTERNAL_001")
+            if telemetry is not None:
+                telemetry.model_called(status=_model_status(err))
             raise
 
-        self._services.telemetry.model_called(status=STATUS_COMPLETED, usage=response.usage)
+        self.model_health.succeeded()
+        if telemetry is not None:
+            telemetry.model_called(status=STATUS_COMPLETED, usage=response.usage)
         return response
 
     async def _model_turn(

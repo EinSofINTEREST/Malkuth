@@ -29,6 +29,10 @@ so a crash loop cannot burn model quota indefinitely.
 3. Resume from the last iteration checkpoint: `malkuth run resume <run_id>`.
 
 The run continues from the **next** iteration; completed iterations are not repeated.
+Its state is read back from the checkpointer, even after the control plane restarted: the
+output of the last iteration if it finished, or the input of the last iteration if it failed
+(a failed iteration's partial results are dropped, as in a live run). A run that left no
+iteration checkpoint cannot be resumed (`STOR_002`) — start a new run instead.
 
 ## Node Failure Mid-Run
 

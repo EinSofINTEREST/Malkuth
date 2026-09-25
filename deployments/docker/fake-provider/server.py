@@ -56,7 +56,8 @@ def prompt_of(payload: dict[str, Any]) -> str:
 
 
 _ASKS_FOR = re.compile(r"exactly these keys: (.+)")
-_USE_TOOL = re.compile(r"use tool (\S+)(?: with (\{.*?\}))?")
+_USE_TOOL = re.compile(r"use tool (\S+)")
+_WITH = re.compile(r"\s+with\s+")
 
 
 def tool_use_for(payload: dict[str, Any], prompt: str) -> dict[str, Any] | None:
@@ -72,7 +73,9 @@ def tool_use_for(payload: dict[str, Any], prompt: str) -> dict[str, Any] | None:
     name = wanted.group(1)
     if name not in {tool.get("name") for tool in payload.get("tools") or []}:
         return None
-    arguments = json.loads(wanted.group(2)) if wanted.group(2) else {}
+    arguments = _arguments_after(prompt, wanted.end())
+    if arguments is None:
+        return None
     digest = hashlib.blake2b(prompt.encode("utf-8"), digest_size=6).hexdigest()
     return {
         "id": f"msg_{digest}",
@@ -86,6 +89,21 @@ def tool_use_for(payload: dict[str, Any], prompt: str) -> dict[str, Any] | None:
         "stop_sequence": None,
         "usage": {"input_tokens": max(len(prompt) // 4, 1), "output_tokens": 8},
     }
+
+
+def _arguments_after(prompt: str, start: int) -> dict[str, Any] | None:
+    """``with {json}`` 의 객체 전체 — 중첩·여러 줄도 읽는다. 없으면 ``{}``, 깨졌으면 None.
+
+    정규식으로 ``{...}`` 를 자르면 중첩된 첫 ``}`` 에서 끊겨 요청 처리 중에 예외가 난다.
+    """
+    joined = _WITH.match(prompt, start)
+    if joined is None:
+        return {}
+    try:
+        value, _ = json.JSONDecoder().raw_decode(prompt, joined.end())
+    except json.JSONDecodeError:
+        return None
+    return value if isinstance(value, dict) else None
 
 
 def _answered(payload: dict[str, Any]) -> bool:

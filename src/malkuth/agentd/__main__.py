@@ -692,14 +692,22 @@ async def _run(manifest: AgentManifest, metrics: Metrics) -> None:
         )
         await _serve(app, manifest, executor)
     finally:
-        await _close_mcp(executor)
+        await _close_wiring(executor)
 
 
-async def _close_mcp(executor: Any) -> None:
-    """종료 시 MCP 세션과 자식 프로세스를 정리한다 — 좀비 금지 (03 Session Management 2)."""
-    mcp = getattr(getattr(getattr(executor, "binding", None), "tools", None), "mcp", None)
+async def _close_wiring(executor: Any) -> None:
+    """종료 시 배선이 쥔 연결을 정리한다.
+
+    MCP 세션과 자식 프로세스 — 좀비 금지 (03 Session Management 2). Memory Service 클라이언트 —
+    열린 커넥션을 두고 끝내지 않는다 (#321).
+    """
+    tools = getattr(getattr(executor, "binding", None), "tools", None)
+    mcp = getattr(tools, "mcp", None)
     if mcp is not None:
         await mcp.shutdown()
+    close_memory = getattr(getattr(tools, "memory", None), "aclose", None)
+    if close_memory is not None:
+        await close_memory()
 
 
 async def _serve(app: Any, manifest: AgentManifest, executor: Any) -> None:

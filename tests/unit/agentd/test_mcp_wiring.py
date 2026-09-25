@@ -228,3 +228,32 @@ async def test_an_optional_server_that_failed_at_startup_shows_as_degraded(root,
     assert status.status is HealthState.DEGRADED
     assert status.components["mcp:corp"].state is HealthState.DEGRADED
     await launchers.built[0].shutdown()
+
+
+async def test_shutdown_closes_the_memory_client_too():
+    """열린 Memory Service 커넥션을 두고 끝내지 않는다 (#321)."""
+    from types import SimpleNamespace
+
+    closed = []
+
+    class Memory:
+        async def aclose(self):
+            closed.append("memory")
+
+    executor = SimpleNamespace(
+        binding=SimpleNamespace(tools=SimpleNamespace(mcp=None, memory=Memory()))
+    )
+
+    await agentd._close_wiring(executor)
+
+    assert closed == ["memory"]
+
+
+async def test_shutdown_without_memory_wiring_is_quiet():
+    from types import SimpleNamespace
+
+    executor = SimpleNamespace(
+        binding=SimpleNamespace(tools=SimpleNamespace(mcp=None, memory=None))
+    )
+
+    await agentd._close_wiring(executor)

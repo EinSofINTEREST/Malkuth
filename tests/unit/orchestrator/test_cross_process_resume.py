@@ -114,17 +114,92 @@ def test_manager_without_a_store_is_unchanged(tmp_path):
     assert excinfo.value.code == ErrorCode.NF_001
 
 
+class PlansThenFails:
+    """watcher 가 처음 몇 회차는 plan 을 남기고, 그 뒤로는 실패한다 — halted 로 가는 run."""
+
+    def __init__(self, succeed: int) -> None:
+        self.succeed = succeed
+        self.calls = 0
+
+    async def invoke(self, node: Any, task: Any) -> TaskResult:
+        self.calls += 1
+        if self.calls > self.succeed:
+            raise MalkuthError(category="graph", code="GRAPH_002", message="watcher down")
+        return TaskResult.completed(task, output={"plan": f"plan-{self.calls}"})
+
+
+# 필수 필드(query)가 있는 state — 빈 state 로 재개하면 GRAPH_003 으로 거부된다
+REQUIRED_STATE = {"schema": "malkuth.graphs.schemas:ResearchState"}
+NODES = [
+    {"id": "watcher", "agent": "agents/feed-watcher@0.1.0", "output_map": {"plan": "output.plan"}},
+    {"id": "notifier", "agent": "agents/notifier@0.1.0"},
+]
+
+
+def accumulating_service() -> Any:
+    """회차마다 plan 을 state 에 남기는 상주 그래프."""
+    return make_service(state=REQUIRED_STATE, nodes=NODES)
+
+
+def process(store_path: str, runtime: Any, checkpointer: Any) -> RunSubmitter:
+    """저장소와 **외부** checkpointer 를 공유하는 프로세스 하나."""
+    return RunSubmitter(
+        runtime=runtime,
+        manager=RunManager(store=SqliteRunStore(path=store_path)),
+        checkpointer=checkpointer,
+    )
+
+
+async def halted_elsewhere(store_path: str, checkpointer: Any) -> Any:
+    """다른 프로세스가 두 회차를 성공한 뒤 실패를 거듭해 halted 로 멈춘 run."""
+    topology = accumulating_service()
+    first = process(store_path, PlansThenFails(succeed=2), checkpointer)
+    handle = await first.start_service(topology, {"query": "q"}, run_id="svc", sleep=no_sleep)
+    await first.services[handle.run_id]
+    assert handle.status is RunStatus.HALTED
+    return topology, handle
+
+
 async def test_service_resume_continues_past_the_restart(store_path):
-    """01 — 재시작 뒤 마지막 iteration **다음**부터 이어간다."""
-    SqliteRunStore(path=store_path).upsert(halted_record(iteration=5))
-    submitter = restarted(store_path)
+    """01 — 재시작 뒤 마지막 iteration **다음**부터, 그 iteration 의 state 로 이어간다 (#310)."""
+    checkpointer = build_checkpointer("memory")
+    topology, halted = await halted_elsewhere(store_path, checkpointer)
+    restarted_process = process(store_path, EchoRuntime(), checkpointer)
 
-    handle = await submitter.resume_service(make_service(), "svc", max_iterations=8, sleep=no_sleep)
-    await submitter.services[handle.run_id]
+    handle = await restarted_process.resume_service(
+        topology, "svc", max_iterations=halted.iteration + 1, sleep=no_sleep
+    )
+    await restarted_process.services[handle.run_id]
 
-    assert handle.iteration == 8
     # 실패한 회차를 다시 돌리면 부수효과가 겹친다
-    assert handle.iteration > 5
+    assert handle.iteration == halted.iteration + 1
+    # 필수 필드와 누적이 checkpoint 에서 왔다 — 빈 state 였다면 GRAPH_003 으로 거부됐다
+    assert handle.state["query"] == "q"
+    assert handle.state["plan"] == "plan-2"
+
+
+async def test_a_completed_last_iteration_hands_over_its_output(store_path):
+    checkpointer = build_checkpointer("memory")
+    topology = accumulating_service()
+    first = process(store_path, PlansThenFails(succeed=3), checkpointer)
+    handle = await first.start_service(
+        topology, {"query": "q"}, run_id="svc", max_iterations=3, sleep=no_sleep
+    )
+    await first.services[handle.run_id]
+
+    state = await first._iteration_state(topology, handle)
+
+    assert state["plan"] == "plan-3"
+
+
+async def test_a_run_that_left_no_checkpoint_cannot_resume(store_path):
+    """이어갈 state 가 없는데 빈 state 로 시작하면 누적이 조용히 사라진다."""
+    SqliteRunStore(path=store_path).upsert(halted_record(iteration=5))
+
+    with pytest.raises(MalkuthError) as excinfo:
+        await restarted(store_path).resume_service(make_service(), "svc", max_iterations=6)
+
+    assert excinfo.value.code == ErrorCode.STOR_002
 
 
 async def test_resume_still_refuses_a_run_that_is_not_halted(store_path):

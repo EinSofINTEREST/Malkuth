@@ -86,6 +86,11 @@ class LogField:
     DECISION_SOURCE: Final = "decision_source"
     GRANT_ID: Final = "grant_id"
     DECIDED_BY: Final = "decided_by"
+    # 결정 모델 (01 Decision Models)
+    DECISION_USE: Final = "decision_use"
+    QUESTION: Final = "question"
+    BAND: Final = "band"
+    PROBABILITY: Final = "probability"
 
 
 STANDARD_FIELDS: Final[frozenset[str]] = frozenset(

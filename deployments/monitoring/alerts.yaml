@@ -48,6 +48,26 @@ groups:
           summary: "Agent {{ $labels.agent }} is being rate limited by {{ $labels.provider }}"
           runbook: "docs/en/runbooks/incident-response.md#modelratelimited"
 
+      - alert: DecisionModelMostlyUncertain
+        expr: |
+          sum without (band) (rate(malkuth_decision_bands_total{band="uncertain"}[30m])) /
+          sum without (band) (rate(malkuth_decision_bands_total[30m])) > 0.5
+        for: 30m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.question }} on {{ $labels.agent }} is uncertain more than half the time — the bands or the wording need recalibration"
+          runbook: "docs/en/runbooks/incident-response.md#decisionmodelmostlyuncertain"
+
+      - alert: DecisionModelUnavailable
+        expr: |
+          sum by (agent, provider) (rate(malkuth_decision_unavailable_total[10m])) > 0.5
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "Agent {{ $labels.agent }} is running without its decision model — tasks fall back to the LLM path"
+          runbook: "docs/en/runbooks/incident-response.md#decisionmodelunavailable"
+          runbook: "docs/en/runbooks/incident-response.md#modelratelimited"
+
       - alert: CheckpointFailures
         expr: |
           sum without (status) (

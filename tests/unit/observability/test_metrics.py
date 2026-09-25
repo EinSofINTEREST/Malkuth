@@ -148,6 +148,23 @@ def test_metric_contract_snapshot():
         "malkuth_memory_entries": {"kind": "gauge", "labels": ["space"]},
         "malkuth_memory_index_lag_seconds": {"kind": "gauge", "labels": ["space"]},
         "malkuth_memory_recall_injected_tokens": {"kind": "gauge", "labels": ["agent"]},
+        "malkuth_memory_recall_filtered_total": {"kind": "counter", "labels": ["agent", "band"]},
+        "malkuth_decision_calls_total": {
+            "kind": "counter",
+            "labels": ["agent", "provider", "model", "use", "status"],
+        },
+        "malkuth_decision_bands_total": {
+            "kind": "counter",
+            "labels": ["agent", "use", "question", "band"],
+        },
+        "malkuth_decision_duration_seconds": {
+            "kind": "histogram",
+            "labels": ["agent", "provider"],
+        },
+        "malkuth_decision_unavailable_total": {
+            "kind": "counter",
+            "labels": ["agent", "provider", "reason"],
+        },
         "malkuth_circuit_state": {"kind": "gauge", "labels": ["target"]},
         "malkuth_access_decisions_total": {
             "kind": "counter",

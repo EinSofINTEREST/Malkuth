@@ -35,6 +35,7 @@ class ErrorCategory(StrEnum):
 
     # Model
     MODEL = "model"
+    DECISION = "decision"  # 결정 모델 provider (01 Decision Models)
 
     # System
     RUNTIME = "runtime"
@@ -61,6 +62,7 @@ class ErrorCode(StrEnum):
     TO_001 = "TO_001"  # Task timeout (TaskConfig.timeout_s 초과)
     TO_002 = "TO_002"  # Tool timeout
     TO_003 = "TO_003"  # Node timeout (orchestrator 기준)
+    TO_004 = "TO_004"  # Decision timeout (decision.timeout_s 초과)
 
     # Model
     LLM_001 = "LLM_001"  # Provider rate limited
@@ -84,6 +86,12 @@ class ErrorCode(StrEnum):
 
     # Skillset
     SKILL_001 = "SKILL_001"  # Skillset tool 실행 실패 (skill 도메인 예외 wrapping)
+
+    # Decision model (01 Decision Models) — 쓰임 안에서는 전부 unavailable 로 원래 경로
+    DEC_001 = "DEC_001"  # 결정 provider 호출 실패 (네트워크/서버) — retryable
+    DEC_002 = "DEC_002"  # 결정 provider rate limited — retryable
+    DEC_003 = "DEC_003"  # 질문/state 가 provider 한도 초과 — 영구
+    DEC_004 = "DEC_004"  # 응답이 선언한 값 집합 밖 / 파싱 불가 — 영구
 
     # Runtime
     RT_001 = "RT_001"  # 컨테이너 기동 실패
@@ -111,7 +119,7 @@ class ErrorCode(StrEnum):
     MOD_001 = "MOD_001"  # 모듈 ref 해석 실패
     MOD_002 = "MOD_002"  # 모듈 버전/의존성 충돌
     MOD_003 = "MOD_003"  # 모듈 스키마(yaml) 검증 실패
-    MOD_004 = "MOD_004"  # Promptset 변수 검증 실패
+    MOD_004 = "MOD_004"  # Promptset 변수 검증 실패 / decisionset 질문의 state 조각 불일치
 
     # Memory
     MEM_001 = "MEM_001"  # Memory space 미선언 / access 거부

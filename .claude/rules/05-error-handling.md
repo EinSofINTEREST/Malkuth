@@ -254,6 +254,13 @@ RATE_LIMIT_RETRY = RetryPolicy(
     max_attempts=5, initial_delay_s=10, max_delay_s=300,
     retryable_categories=(ErrorCategory.RATE_LIMIT,),
 )
+
+# 결정 호출 전용 — 총 대기가 decision.timeout_s(기본 5초) 안에 들어와야 한다.
+# rate limit 도 여기서 한 번만 다시 두드리고, 소진하면 unavailable 로 원래 경로 (01 Decision Models 2)
+DECISION_RETRY = RetryPolicy(
+    max_attempts=2, initial_delay_s=0.5, max_delay_s=1,
+    retryable_categories=(ErrorCategory.NETWORK, ErrorCategory.TIMEOUT, ErrorCategory.RATE_LIMIT),
+)
 ```
 
 ### Retry Rules
@@ -271,7 +278,7 @@ RATE_LIMIT_RETRY = RetryPolicy(
 | 호출 | 재시도 주체 |
 |---|---|
 | 모델 API 호출 | agentd (provider SDK 재시도는 비활성화) |
-| 결정 모델 호출 | agentd — NETWORK_RETRY 만, 단 총 대기가 `decision.timeout_s` 를 넘지 않게. 소진하면 `unavailable` 로 원래 경로 |
+| 결정 모델 호출 | agentd — `DECISION_RETRY` (network·timeout·rate limit 모두 1회 재시도, 총 대기 < `decision.timeout_s`). 소진하면 `unavailable` 로 원래 경로 — RATE_LIMIT_RETRY 의 수십 초 백오프는 판정에 맞지 않는다 |
 | MCP tool 호출 | agentd — 단 `MCP_004` (transport) 는 재연결 후 1회만 |
 | A2A 호출 | caller 에이전트 |
 | Node 실행 전체 | orchestrator — node 별 `retry` 설정 시에만, 에이전트 내부 재시도와 중복 주의 |
@@ -564,15 +571,16 @@ groups:
 
       - alert: DecisionModelMostlyUncertain
         expr: |
-          sum by (agent, question) (rate(malkuth_decision_bands_total{band="uncertain"}[30m])) /
-          sum by (agent, question) (rate(malkuth_decision_bands_total[30m])) > 0.5
+          sum without (band) (rate(malkuth_decision_bands_total{band="uncertain"}[30m])) /
+          sum without (band) (rate(malkuth_decision_bands_total[30m])) > 0.5
         for: 30m
         labels: {severity: warning}
         annotations:
           summary: "{{ $labels.question }} on {{ $labels.agent }} is uncertain more than half the time — the bands or the wording need recalibration"
 
       - alert: DecisionModelUnavailable
-        expr: rate(malkuth_decision_unavailable_total[10m]) > 0.5
+        expr: |
+          sum by (agent, provider) (rate(malkuth_decision_unavailable_total[10m])) > 0.5
         for: 10m
         labels: {severity: warning}
         annotations:

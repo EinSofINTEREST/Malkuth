@@ -318,8 +318,10 @@ decisionset 의 `act_at` / `reject_at` 은 추측이 아니라 **라벨 데이�
 ([04-module-system.md](04-module-system.md) Decisionset Rules 2).
 
 1. **라벨 세트**: 질문마다 `modules/decisionsets/<name>/<ver>/calibration/<question>.jsonl` —
-   `{"state": {...}, "label": true}` 형태, 최소 50건, 양쪽 라벨 모두 포함. 실제 태스크·기억·도구
-   결과에서 뽑되 비밀값은 뺀다 (모듈은 git 에 실린다)
+   `{"state": {...}, "label": true}` 형태, 최소 50건, 양쪽 라벨 모두 포함. **실제 태스크·기억·
+   도구 결과를 그대로 넣지 않는다** — 모듈은 git 에 실리고, 비밀값이 아니라도 개인정보·테넌트
+   기밀이 섞인다. 합성 예시이거나 되돌릴 수 없게 비식별화한 것만 두고, 실 데이터에서 파생한
+   세트는 커밋 전에 프라이버시 검토를 거친다 (PR 본문에 검토자 명시)
 2. **구간 계산**: `malkuth decision calibrate <ref>` 가 실 provider 로 라벨 세트를 돌려 구간별
    정밀도 표를 낸다. 이것이 **유일한 실 provider 호출**이고, 비용이 드는 명시적 작업이다
    (08 규약 5 — 실 API 호출은 사전 확인). CI 에서는 돌지 않는다

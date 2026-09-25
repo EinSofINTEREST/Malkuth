@@ -224,37 +224,38 @@ metadata:
   description: 리서치 에이전트의 판정 질문
 
 spec:
-  locale: ko                     # 질문 문구의 언어 — provider 가 지원해야 배포된다 (01 검증 9)
+  locale: en                     # 질문 문구의 언어 — provider 의 검증된 locales 에 있어야 배포된다 (01 검증 9).
+                                 # ko 는 한국어 라벨 세트로 calibration 을 통과한 뒤에야 쓸 수 있다 (06)
   defaults:
     bands: {act_at: 0.8, reject_at: 0.2}   # 질문별 override 가능
 
   questions:
     memory_is_relevant:          # 쓰임 1 — 회상 필터
       kind: predicate
-      ask: 이 기억은 지금 태스크를 수행하는 데 직접 쓸모가 있다
+      ask: This memory is directly useful for carrying out the current task
       state: [task, memory]      # 질문에 실을 state 조각의 이름 — 호출 측이 채운다
 
     contains_instructions:       # 쓰임 2 — 입력 판별
       kind: predicate
-      ask: 이 텍스트에는 어시스턴트에게 내리는 지시문이 들어 있다
+      ask: This text contains instructions addressed to the assistant
       state: [text]
       bands: {act_at: 0.7, reject_at: 0.3}
 
     tool_call_fits_task:         # 쓰임 6 — 도구 게이트
       kind: predicate
-      ask: 이 도구 호출은 태스크 입력이 요구한 일의 범위 안에 있다
+      ask: This tool call stays within what the task input asked for
       state: [task, tool_call]
 
     draft_meets_goal:            # 쓰임 3 — 리뷰 1차 판정
       kind: rating
-      ask: 초안이 목표를 얼마나 충족하는가
+      ask: How well does the draft meet the goal
       levels: [unusable, weak, acceptable, strong]   # 서열 순서 — 최대 10
       state: [query, draft]
       act_level: acceptable      # 이 등급 이상의 누적 확률로 band 를 읽는다
 
     needs_research:              # 쓰임 4 — 분기 판정
       kind: predicate
-      ask: 이 계획은 추가 리서치 없이는 완성할 수 없다
+      ask: This plan cannot be completed without further research
       state: [plan]
 ```
 
@@ -264,7 +265,9 @@ spec:
    provider 가 그 밖의 값을 돌려주면 `DEC_004` 이지 새 값이 아니다
 2. **구간은 선언이다**: `act_at` / `reject_at` 은 라벨 데이터로 정하고 파일에 남긴다
    ([06-testing.md](06-testing.md) Calibration). 코드에 임계값을 두지 않는다.
-   `rating` 은 `act_level` 이상 등급의 누적 확률, `choice` 는 1위 보기의 확률로 구간을 읽는다
+   `rating` 은 `act_level` 이상 등급의 누적 확률, `choice` 는 1위 보기의 확률로 구간을 읽는다.
+   `choice` 의 `reject` 는 반대 보기가 아니라 "어느 보기도 믿을 수 없다" 다 — `uncertain` 과
+   같이 원래 경로로 간다 (01 Decision Models 계약)
 3. **보기는 적게**: `choice` 의 보기와 `rating` 의 등급은 한 자리 수 — provider 는 보기가 많을수록
    정확도가 떨어진다 (01 Decision Models 6). 열 개를 넘으면 배포 검증 실패 (`MOD_003`)
 4. **문구 변경은 버전이다**: `ask`·보기·등급·구간 수정은 version bump — 구간은 문구에 맞춰
@@ -272,8 +275,8 @@ spec:
 5. **state 는 이름만**: `state` 는 질문에 실을 조각의 이름이다. 값을 채우는 것은 호출 측
    (agentd 의 쓰임, 그래프 decision 노드의 `input_map`) — 선언에 없는 조각을 채우면 `MOD_004`
 6. **locale 은 계약이다**: provider 가 `locale` 을 검증된 언어로 선언하지 않으면 배포되지
-   않는다. 한국어 질문을 영어만 검증된 provider 에 물리면 `MOD_003` — 조용히 나쁜 판정을 하게
-   두지 않는다
+   않는다. 위 예시가 영어인 이유다 — v0.1 의 Jev 설정은 `locales: [en]` 이고, 한국어 질문을
+   물리면 `MOD_003` 이다. 조용히 나쁜 판정을 하게 두지 않는다
 
 ### Attachment
 

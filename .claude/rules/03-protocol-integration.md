@@ -159,7 +159,9 @@ spec:
    - stdio `command` 는 이미지에 설치된 실행 파일만 — 셸 문자열 (`sh -c`) 금지
    - 서버 프로세스에 전달되는 env 는 `env_allowlist` 로 제한
    - MCP 서버가 반환한 컨텐츠는 **untrusted input** — 프롬프트에 주입 시 경계 표시,
-     서버 응답 내 지시문을 시스템 지시로 승격 금지
+     서버 응답 내 지시문을 시스템 지시로 승격 금지. 결정 모델의 입력 판별
+     ([02](02-agent-implementation.md) Decision Hooks) 은 이 경계 위의 **신호**다 —
+     표시를 강화할 뿐, 경계 자체는 결정 모델 없이도 유지된다
 
 6. **Resources & Prompts**
    - MCP resources/prompts 기능 사용 시에도 동일한 격리·선언 규칙 적용
@@ -192,6 +194,7 @@ Network). 외부로 나가는 호출은 전부 **egress proxy** 를 거치고, �
 | 대상 | 프록시 동작 | 판정 단위 |
 |---|---|---|
 | 모델 API | base URL 로 **종단** — 에이전트는 프록시를 provider 로 부른다 | 요청, 자격증명 주입 |
+| 결정 모델 API | **HTTPS** base URL 로 종단 — 모델 API 와 같은 규칙 ([01](01-architecture.md) Decision Models). HTTP 는 명시된 private 목적지와 명시적 plaintext opt-in(테스트 대역·내부망)에서만 | 요청, 자격증명 주입 |
 | 원격 MCP (sidecar / external) | base URL 로 **종단** | **도구 이름** (`mcp_tool`), 자격증명 주입 |
 | 그 밖의 외부 HTTPS | CONNECT 터널 | 목적지 호스트 (`egress`) |
 

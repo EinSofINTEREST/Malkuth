@@ -64,6 +64,31 @@ METRIC_SPECS: Final[tuple[MetricSpec, ...]] = (
         ("agent", "model", "direction"),
         "Model tokens consumed by direction",
     ),
+    # Decision model — 01 Decision Models
+    MetricSpec(
+        "malkuth_decision_calls_total",
+        "counter",
+        ("agent", "provider", "model", "use", "status"),
+        "Decision model calls by use and status",
+    ),
+    MetricSpec(
+        "malkuth_decision_bands_total",
+        "counter",
+        ("agent", "use", "question", "band"),
+        "Decision outcomes by band (act / uncertain / reject)",
+    ),
+    MetricSpec(
+        "malkuth_decision_duration_seconds",
+        "histogram",
+        ("agent", "provider"),
+        "Decision model call latency",
+    ),
+    MetricSpec(
+        "malkuth_decision_unavailable_total",
+        "counter",
+        ("agent", "provider", "reason"),
+        "Decisions that fell back to the original path (timeout / error / circuit_open)",
+    ),
     # Tool / protocol
     MetricSpec(
         "malkuth_tool_calls_total",
@@ -138,6 +163,12 @@ METRIC_SPECS: Final[tuple[MetricSpec, ...]] = (
         "gauge",
         ("agent",),
         "Tokens injected into prompts by auto-recall",
+    ),
+    MetricSpec(
+        "malkuth_memory_recall_filtered_total",
+        "counter",
+        ("agent", "band"),
+        "Recalled entries seen by the decision-model filter, by band",
     ),
     # Circuit breaker
     MetricSpec(

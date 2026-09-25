@@ -69,6 +69,29 @@ The provider is rejecting requests.
 3. `RATE_LIMIT_RETRY` already backs off up to 300s — sustained alerts mean the quota
    itself is too small, not that retries are missing.
 
+### DecisionModelMostlyUncertain
+
+A decisionset question answers `uncertain` more than half the time, so the decision model is
+mostly handing work back to the LLM path.
+
+1. Check `malkuth_decision_bands_total` per question — one question, or all of them? One
+   question means its wording or bands; all of them means the provider or the locale.
+2. Re-run the calibration for that decisionset version (06 Calibration — the labeled set under
+   the module's `calibration/`) and compare the report with the declared `act_at` / `reject_at`.
+3. Publish a new decisionset version with corrected bands (patch) or wording (minor). The
+   system keeps working meanwhile — `uncertain` always takes the original path.
+
+### DecisionModelUnavailable
+
+Decisions are falling back because the provider times out, errors, or its circuit is open.
+
+1. Nothing is broken for users: every use treats `unavailable` as `uncertain`. The cost is
+   more LLM work and less filtering, not wrong answers.
+2. Check the egress proxy logs for the provider's base URL (`DEC_001` / `DEC_002` / `TO_004`)
+   and the provider's status page.
+3. If the provider is down for long, lower `decision.timeout_s` or disable `spec.decision`
+   on the busiest agents so tasks stop paying the timeout on every judgment.
+
 ### ServiceRunStalled
 
 A service run is active but has made no progress for 30 minutes.

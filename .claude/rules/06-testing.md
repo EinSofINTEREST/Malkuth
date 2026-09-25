@@ -24,6 +24,8 @@
 
 3. **Determinism Around Non-Determinism**
    - 테스트는 실제 LLM 을 호출하지 않는다 — fake model / 기록된 응답 사용
+   - 결정 모델도 같다 — `FakeDecisionModel` (스크립트된 확률) 사용. calibration 만 예외로,
+     실 provider 호출은 명시 표시된 별도 작업이다 (Calibration 절)
    - 테스트는 외부 서비스에 의존하지 않는다 — 컨테이너 fixture 또는 mock
    - 테스트는 결정적이고 병렬 실행 가능해야 한다
 
@@ -57,7 +59,10 @@ tests/
 │   ├── modules/
 │   │   ├── test_skillset.py
 │   │   └── test_promptset.py
-│   └── agentd/test_executor.py
+│   ├── agentd/test_executor.py
+│   └── decision/
+│       ├── test_bands.py          # 확률 → 구간
+│       └── test_uses.py           # 회상 필터 / 입력 판별 / 도구 게이트 — FakeDecisionModel
 │
 ├── integration/                   # Docker/실서버 fixture 사용, 느림
 │   ├── runtime/test_docker_lifecycle.py
@@ -69,6 +74,7 @@ tests/
 │
 ├── fixtures/                      # 공유 fixture / builder / fake
 │   ├── fake_model.py
+│   ├── fake_decision.py           # FakeDecisionModel — 질문별 스크립트된 확률
 │   ├── fake_mcp_server.py
 │   ├── builders.py
 │   └── manifests/                 # 테스트용 manifest/graph yaml
@@ -105,6 +111,9 @@ tests/
    실제 embedding API 호출 금지 ([09-memory-context.md](09-memory-context.md))
 6. **agentd/**: tool loop (max turns, 병렬 tool, usage 집계), cancellation 처리,
    direct 태스크 처리 (`node_id=None` → `default` 템플릿 선택, graph state 불간섭)
+7. **decision/**: 구간 판정 (predicate / rating 누적 확률 / choice 1위), 세 쓰임 각각의
+   act·uncertain·reject·unavailable 네 경로, provider 어댑터의 에러 변환 (`DEC_*`), 값 집합 밖
+   응답이 `DEC_004` 인지, decision 노드 태스크가 `decision.` 출력만 내는지
 
 ### Fake Model — LLM 호출 테스트의 표준
 
@@ -136,6 +145,37 @@ async def test_executor_runs_tool_then_completes():
 
 - 실제 provider SDK 호출 금지 — CI 에서 API key 부재로 실패해야 정상
 - 실 응답 기반 회귀가 필요하면 기록/재생(cassette) fixture 를 `tests/fixtures/` 에 저장
+
+### Fake Decision Model — 결정 모델 테스트의 표준
+
+```python
+class FakeDecisionModel:
+    """질문별로 스크립트된 확률을 돌려주는 결정 모델 대역 — 구간은 실제 코드가 읽는다."""
+
+    def __init__(self, answers: dict[str, float | Sequence[float]]) -> None:
+        self._answers = answers                # question → predicate 확률 / rating·choice 분포
+        self.asked: list[tuple[str, str]] = []  # (question, state) 검증용
+
+    async def decide(self, state: str, questions: Sequence[Question]) -> list[Decision]:
+        self.asked.extend((q.name, state) for q in questions)
+        return [decision_from(q, self._answers[q.name]) for q in questions]
+
+
+async def test_recall_filter_drops_what_the_model_rejects():
+    decision = FakeDecisionModel({"triage.memory_is_relevant": 0.05})
+    executor = Executor(model=FakeModel([text("done")]), decision=decision, recall=recall_of(2))
+
+    await executor.execute(make_task())
+
+    assert executor.injected_memories == []
+    assert len(decision.asked) == 1        # 상위 k 를 한 요청에 — 항목마다 부르지 않는다
+```
+
+- **네 경로 전부**: 각 쓰임은 `act` / `uncertain` / `reject` / `unavailable` 을 다 테스트한다.
+  특히 `unavailable` 이 원래 경로와 **같은 결과**를 내는지 — 결정 모델을 빼도 답이 같아야 한다는
+  01 의 원칙을 테스트가 증명한다
+- **배선을 뮤테이션한다**: 쓰임을 빼도 초록이면 그 테스트는 헬퍼만 본 것이다 — 게이트를
+  제거했을 때 부수효과 도구가 실행되는지, 필터를 제거했을 때 주입이 늘어나는지 본다
 
 ### Test Data — Builders and Fixtures
 
@@ -267,7 +307,35 @@ async def test_research_pipeline_full_stack(compose_stack):
 ```
 
 - E2E 에서도 실제 LLM 금지 — OpenAI/Anthropic 호환 fake provider 컨테이너 사용
+- 결정 모델도 같은 대역이 낸다 — fake provider 가 결정 API 경로를 하나 더 열고, 질문 문구에
+  포함된 지시(`answer 0.95` 등)나 해시로 결정적 확률을 돌려준다. E2E 는 세 쓰임이 실제 컨테이너
+  경계(프록시 종단 포함)를 지나는지 본다
 - CI 에서는 nightly 로만 실행 (PR gate 는 unit + integration)
+
+## Calibration — 구간은 라벨 데이터가 정한다
+
+decisionset 의 `act_at` / `reject_at` 은 추측이 아니라 **라벨 데이터**로 정한다
+([04-module-system.md](04-module-system.md) Decisionset Rules 2).
+
+1. **라벨 세트**: 질문마다 `modules/decisionsets/<name>/<ver>/calibration/<question>.jsonl` —
+   한 줄이 `{"state": {...}, "label": <gold>}` 이고 `label` 의 형태는 질문 종류가 정한다:
+   `predicate` 는 `true` / `false`, `rating` 은 선언된 등급 이름 하나(`"acceptable"`),
+   `choice` 는 선언된 보기 하나(`"bug"`). 선언 밖의 값이 있으면 로더가 거부한다 (`MOD_003`).
+   최소 50건, `predicate` 는 양쪽 라벨, `rating` / `choice` 는 모든 등급·보기가 나오게. **실제 태스크·기억·
+   도구 결과를 그대로 넣지 않는다** — 모듈은 git 에 실리고, 비밀값이 아니라도 개인정보·테넌트
+   기밀이 섞인다. 합성 예시이거나 되돌릴 수 없게 비식별화한 것만 두고, 실 데이터에서 파생한
+   세트는 커밋 전에 프라이버시 검토를 거친다 (PR 본문에 검토자 명시)
+2. **구간 계산**: `malkuth decision calibrate <ref>` 가 실 provider 로 라벨 세트를 돌려 구간별
+   정밀도 표를 낸다. 이것이 **유일한 실 provider 호출**이고, 비용이 드는 명시적 작업이다
+   (08 규약 5 — 실 API 호출은 사전 확인). CI 에서는 돌지 않는다
+3. **locale 검증**: provider 의 `locales` 는 그 언어의 라벨 세트로 calibration 을 통과한
+   언어만 적는다. 한국어 질문을 쓰려면 한국어 라벨 세트로 먼저 확인한다 — provider 문서가
+   말하지 않는 것을 믿지 않는다
+4. **회귀**: calibration 결과(구간별 정밀도)는 `calibration/report.json` 으로 남긴다. 유닛
+   테스트는 이 파일을 읽어 선언된 구간이 보고된 정밀도 안에 있는지만 확인한다 — provider 를
+   부르지 않는다
+5. **재보정 시점**: `ask` 문구를 바꿨을 때, provider·모델 id 를 바꿨을 때,
+   `DecisionModelMostlyUncertain` 알림이 울렸을 때
 
 ## Testing Access Control
 

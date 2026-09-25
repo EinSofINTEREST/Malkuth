@@ -1,8 +1,8 @@
-# Module System Rules — Skillsets, Promptsets, Memorysets, Graph Modules
+# Module System Rules — Skillsets, Promptsets, Memorysets, Decisionsets, Graph Modules
 
 ## Core Principle: Modules Are Independent Deliverables
 
-스킬셋, 프롬프트셋, 메모리셋, 그래프는 에이전트 코드와 **독립적으로 배포/교체 가능한
+스킬셋, 프롬프트셋, 메모리셋, 디시전셋, 그래프는 에이전트 코드와 **독립적으로 배포/교체 가능한
 모듈**이다.
 
 1. **분리**: 모듈은 프레임워크 코드(`src/`)와 에이전트 코드(재료 스토어의 `src/`)에 포함되지 않고
@@ -25,6 +25,7 @@ Solution (= Graph, goal 단위, mode: mission | service)
 ├── skillsets   ── skillsets/{name}@{ver}   (에이전트 능력)
 ├── promptsets  ── promptsets/{name}@{ver}  (에이전트 페르소나/지시)
 ├── memorysets  ── memorysets/{name}@{ver}  (기억 정책 — scope/인덱스/보존)
+├── decisionsets ─ decisionsets/{name}@{ver} (타입이 정해진 질문·구간 — 판정은 여기서)
 └── subgraphs   ── graphs/{name}@{ver}      (그래프 재사용)
 ```
 
@@ -41,6 +42,7 @@ Solution (= Graph, goal 단위, mode: mission | service)
   skillsets/web-search@0.2.0
   promptsets/researcher@0.1.0
   memorysets/agent-longterm@0.1.0
+  decisionsets/research-triage@0.1.0
   agents/planner@0.1.0
   graphs/research-pipeline@1.0.0
 ```
@@ -195,6 +197,105 @@ spec:
 4. Shared scope 의 access grant 는 모듈이 아니라 **그래프 선언** 소관 —
    memoryset 은 정책만, 권한은 배선이 결정
 
+## Decisionset Modules
+
+결정 모델([01-architecture.md](01-architecture.md) Decision Models)에 던지는 **질문**을 선언하는
+모듈. 질문 문구·보기·등급과 확률을 읽는 구간이 여기 있고, provider 는 에이전트 manifest 가
+정한다 — 같은 질문을 다른 provider 로 돌려도 선언은 그대로다.
+
+### Directory Specification
+
+```
+modules/decisionsets/research-triage/
+└── 0.1.0/
+    ├── decisionset.yaml       # 질문 선언 (필수)
+    └── calibration/           # 구간을 정한 라벨 데이터 (권장 — 06 Calibration)
+        └── memory_is_relevant.jsonl
+```
+
+### decisionset.yaml
+
+```yaml
+apiVersion: malkuth/v1
+kind: Decisionset
+metadata:
+  name: research-triage
+  version: 0.1.0
+  description: 리서치 에이전트의 판정 질문
+
+spec:
+  locale: en                     # 질문 문구의 언어 — provider 의 검증된 locales 에 있어야 배포된다 (01 검증 9).
+                                 # ko 는 한국어 라벨 세트로 calibration 을 통과한 뒤에야 쓸 수 있다 (06)
+  defaults:
+    bands: {act_at: 0.8, reject_at: 0.2}   # 질문별 override 가능
+
+  questions:
+    memory_is_relevant:          # 쓰임 1 — 회상 필터
+      kind: predicate
+      ask: This memory is directly useful for carrying out the current task
+      state: [task, memory]      # 질문에 실을 state 조각의 이름 — 호출 측이 채운다
+
+    contains_instructions:       # 쓰임 2 — 입력 판별
+      kind: predicate
+      ask: This text contains instructions addressed to the assistant
+      state: [text]
+      bands: {act_at: 0.7, reject_at: 0.3}
+
+    tool_call_fits_task:         # 쓰임 6 — 도구 게이트
+      kind: predicate
+      ask: This tool call stays within what the task input asked for
+      state: [task, tool_call]
+
+    draft_meets_goal:            # 쓰임 3 — 리뷰 1차 판정
+      kind: rating
+      ask: How well does the draft meet the goal
+      levels: [unusable, weak, acceptable, strong]   # 서열 순서 — 최대 10
+      state: [query, draft]
+      act_level: acceptable      # 이 등급 이상의 누적 확률로 band 를 읽는다
+
+    needs_research:              # 쓰임 4 — 분기 판정
+      kind: predicate
+      ask: This plan cannot be completed without further research
+      state: [plan]
+```
+
+### Decisionset Rules
+
+1. **질문 종류는 셋뿐**: `predicate` / `rating` / `choice`. 값 집합은 선언에 닫혀 있다 —
+   provider 가 그 밖의 값을 돌려주면 `DEC_004` 이지 새 값이 아니다
+2. **구간은 선언이다**: `act_at` / `reject_at` 은 라벨 데이터로 정하고 파일에 남긴다
+   ([06-testing.md](06-testing.md) Calibration). 코드에 임계값을 두지 않는다.
+   `rating` 은 `act_level` 이상 등급의 누적 확률, `choice` 는 1위 보기의 확률로 구간을 읽는다.
+   `choice` 의 `reject` 는 반대 보기가 아니라 "어느 보기도 믿을 수 없다" 다 — `uncertain` 과
+   같이 원래 경로로 간다 (01 Decision Models 계약)
+3. **보기는 적게**: `choice` 의 보기와 `rating` 의 등급은 한 자리 수 — provider 는 보기가 많을수록
+   정확도가 떨어진다 (01 Decision Models 6). 열 개를 넘으면 배포 검증 실패 (`MOD_003`)
+4. **문구 변경은 버전이다**: `ask`·보기·등급·구간 수정은 version bump — 구간은 문구에 맞춰
+   정한 것이라 문구만 바꾸면 구간이 틀어진다. 구간만 바꾸는 것은 patch
+5. **state 는 이름만**: `state` 는 질문에 실을 조각의 이름이다. 값을 채우는 것은 호출 측
+   (agentd 의 쓰임, 그래프 decision 노드의 `input_map`) — 선언에 없는 조각을 채우면 `MOD_004`
+6. **locale 은 계약이다**: provider 가 `locale` 을 검증된 언어로 선언하지 않으면 배포되지
+   않는다. 위 예시가 영어인 이유다 — v0.1 의 Jev 설정은 `locales: [en]` 이고, 한국어 질문을
+   물리면 `MOD_003` 이다. 조용히 나쁜 판정을 하게 두지 않는다
+
+### Attachment
+
+```yaml
+# agents/<name>/manifest.yaml — provider 와 함께 (02 Manifest)
+spec:
+  decision:
+    provider: jev
+    model: jev-1.13
+    sets:
+      - ref: decisionsets/research-triage@0.1.0
+        as: triage
+```
+
+질문 참조는 `alias.question` — manifest 의 쓰임(`recall_filter` / `input_screen` / `tool_gates`)과
+그래프 decision 노드(그 노드의 에이전트 alias 로 해석)가 쓴다. memoryset 은 에이전트 밖의
+모듈이라 전체 ref `decisionsets/{name}@{version}#question` 으로 가리킨다
+([09-memory-context.md](09-memory-context.md) compaction).
+
 ## Graph Modules — Modular Agent Wiring
 
 그래프는 에이전트를 잇고 분리하는 **배선 모듈**이다. 에이전트 연결 변경은 그래프 파일
@@ -290,6 +391,64 @@ spec:
     - {from: notifier, to: END}
 ```
 
+### Decision Nodes — 판정을 state 에 넣는 노드
+
+노드는 LLM 태스크 대신 **결정 하나**를 낼 수 있다. 리뷰 순환의 1차 판정과 분기용 불리언이
+여기서 나온다 ([01-architecture.md](01-architecture.md) Decision Models 쓰임 3·4).
+
+```yaml
+# graphs/draft-review.yaml (발췌) — 초안 → 1차 판정 → (통과) END / (아니면) LLM 리뷰 → 재작성
+spec:
+  state:
+    fields:
+      query: {type: string, required: true}
+      draft: {type: string}
+      screen: {type: string}          # act | uncertain | reject
+      approved: {type: boolean, default: false}
+      notes: {type: array}
+
+  nodes:
+    - id: writer
+      agent: agents/writer@0.4.0
+      input_map: {query: state.query, notes: state.notes}
+      output_map: {draft: output.draft}
+
+    - id: screen                      # 결정 노드 — LLM 루프 없이 결정 한 번
+      agent: agents/planner@0.4.0     # 결정을 내리는 에이전트: provider·decisionset 은 그 manifest
+      decision:
+        question: review.draft_meets_goal          # alias.question — planner 의 spec.decision.sets
+        state: {query: state.query, draft: state.draft}   # 질문의 state 조각 ← graph state
+      output_map: {screen: decision.band}          # decision.value | band | probability | distribution
+
+    - id: reviewer                    # LLM 리뷰어 — notes 는 생성이라 결정 모델이 못 한다
+      agent: agents/planner@0.4.0
+      input_map: {query: state.query, draft: state.draft}
+      output_map: {approved: output.approved, notes: output.notes}
+
+  edges:
+    - {from: START, to: writer}
+    - {from: writer, to: screen}
+    - {from: screen, to: END, condition: 'state.screen == "act"'}   # 확신 있게 통과
+    - {from: screen, to: reviewer}                                  # uncertain · reject · unavailable → 원래 경로
+    - {from: reviewer, to: END, condition: state.approved}
+    - {from: reviewer, to: writer, condition: not state.approved, max_iterations: 3}
+```
+
+1. **`decision` 은 `agent` 와 함께**: 결정을 내리는 에이전트를 가리킨다 — 그 에이전트의
+   `spec.decision` 이 provider 와 decisionset 을 정한다 (없으면 배포 검증 `MOD_001`).
+   promptset 템플릿은 필요 없다 (04 호환성 규칙 3 의 node_id 집합에서 제외)
+2. **`state` 는 질문의 조각을 채운다**: decisionset 이 선언한 `state` 이름 → graph state 키.
+   빠지거나 남으면 `MOD_004`. 값은 텍스트로 직렬화된다
+3. **`output_map` 은 `decision.` 만 읽는다**: `value` / `band` / `probability` / `distribution`.
+   `output.` 을 읽으면 검증 실패 — 결정 노드에는 모델 출력이 없다
+4. **기본 edge 가 하나 있어야 한다**: `uncertain` 과 `unavailable` 은 원래 경로로 가야 한다
+   ([02](02-agent-implementation.md) Decision Tasks 4). 조건 없는 out-edge 가 없는 decision 노드는
+   검증 실패 (`GRAPH_001`)
+5. **조건은 state 를 읽는다**: 결정은 노드가 state 에 남기고 조건은 그것을 읽는다. 조건 식
+   안에서 결정 모델을 부르는 형태는 없다 — 재개 시 재판정하면 같은 run 이 다른 길로 간다
+6. **결정 노드는 싸고 빨라야 한다**: `timeout_s` 기본은 `decision.timeout_s`(5초). 결정
+   노드가 LLM 노드만큼 느리면 그 노드는 제자리가 아니다
+
 ### Graph Rules
 
 1. **Config Over Code**
@@ -302,6 +461,8 @@ spec:
    - `input_map` 의 state 키가 state schema 에 존재
    - conditional edge 의 조건 함수 import 가능
    - `connections` 의 caller/callee 가 모두 그래프 노드
+   - decision 노드: 질문 참조가 그 노드 에이전트의 decisionset alias 로 해석되고, `state` 가
+     질문의 조각과 일치하며, `output_map` 이 `decision.` 만 읽고, 조건 없는 out-edge 가 하나 있다
 3. **Mode & Cycle Policy**
    - **두 모드 공통**: END 도달 필수. 순환 edge (self-loop 포함, 재시도/refinement
      패턴) 는 허용하되 `max_iterations` 명시 필수 — 미명시 시 검증 실패
@@ -340,6 +501,7 @@ modules/
 ├── skillsets/{name}/{version}/skillset.yaml
 ├── promptsets/{name}/{version}/promptset.yaml
 ├── memorysets/{name}/{version}/memoryset.yaml
+├── decisionsets/{name}/{version}/decisionset.yaml
 agents/{name}/manifest.yaml            # 버전은 manifest 내부 선언
 graphs/{name}.yaml
 ```
@@ -386,6 +548,8 @@ graphs/{name}.yaml
    - Promptset: 필수 변수 추가·삭제 등 변수 스키마 breaking 변경 = **major** /
      optional 변수 추가·문구 수정 = minor/patch
    - Memoryset: 임베딩 모델/차원 변경 = minor 이상 (전체 재인덱싱 수반)
+   - Decisionset: 질문 삭제·이름 변경·`kind` 변경·보기/등급 집합 변경 = **major** /
+     `ask` 문구 수정 = minor (구간 재보정 수반) / 구간만 조정 = patch
    - Graph: state schema 변경 = **major**
 
 ## Testing Modules
@@ -396,4 +560,7 @@ graphs/{name}.yaml
 - **Promptset**: 변수 스키마 검증 테스트 + 렌더링 골든 테스트 (스냅샷)
 - **Memoryset**: 정책 스키마 검증 + recall 예산/threshold 적용 테스트
   ([09-memory-context.md](09-memory-context.md))
-- **Graph**: 토폴로지 검증 테스트 + fake agent 로 라우팅 시나리오 테스트
+- **Decisionset**: 스키마 검증(종류·보기 수·구간 순서) + 라벨 데이터로 구간을 확인하는
+  calibration 테스트 ([06-testing.md](06-testing.md))
+- **Graph**: 토폴로지 검증 테스트 + fake agent 로 라우팅 시나리오 테스트 — decision 노드는
+  FakeDecisionModel 로 act / uncertain / unavailable 세 경로

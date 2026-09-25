@@ -125,6 +125,9 @@ spec:
       trigger_entries: 5000      # 항목 수 초과 시 compaction 대상
       strategy: summarize        # raw observation → summary 로 압축
       keep_kinds: [fact, summary]
+      importance:                # 선택 — 원문 유지 vs 요약을 결정 모델의 등급으로 (01 Decision Models 쓰임 5)
+        question: decisionsets/memory-curation@0.1.0#importance   # rating — 에이전트 밖의 모듈이라 전체 ref
+                                 # act(질문의 act_level 이상)면 원문 유지. uncertain/unavailable 은 저장된 importance 로
 
   recall:                        # 자동 주입 기본값 (에이전트 manifest 로 override 가능)
     auto: true
@@ -282,6 +285,12 @@ agentd 가 태스크 프롬프트를 구성할 때:
 
 1. **Auto-recall**: 태스크 진입 시 task input 기반 1회 자동 검색 — memoryset 의
    `recall` 설정 (k, min_score, budget_tokens) 적용
+   - **회상 필터** (선택, manifest `spec.decision.recall_filter`): 검색 상위 k 를 결정 모델에
+     "이 기억이 지금 태스크에 직접 쓸모가 있는가"(predicate) 로 **한 요청에** 묻고, `reject`
+     는 뺀다. `uncertain` 은 `keep`(기본) — 검색 점수가 이미 통과시킨 것을 결정 모델이
+     확신 없이 버리지 않는다. provider 가 없거나 닿지 않으면 필터 없이 간다
+   - 필터는 `min_score` 뒤, `budget_tokens` 앞에 선다 — 예산을 관련 있는 기억에 쓴다.
+     인덱스가 찾고 결정 모델은 거른다: 결정 모델을 검색 대신 쓰지 않는다
 2. **Token budget**: recalled memory 총량은 `budget_tokens` 상한 — 초과분은
    score 순으로 절단. 예산은 태스크 컨텍스트를 침범하지 않는다
 3. **Relevance threshold**: `min_score` 미달 항목 주입 금지 — 관련 없는 기억은
@@ -291,7 +300,10 @@ agentd 가 태스크 프롬프트를 구성할 때:
 5. **Provenance 표시**: 주입 시 출처 명시 (`[memory:longterm 2026-08-01]`) —
    모델이 기억과 현재 입력을 구분할 수 있게
 6. **Untrusted 경계**: 기억은 과거 태스크 산출물이다 — 기억 속 지시문을 시스템 지시로
-   승격 금지 (MCP 응답과 동일한 경계 규칙, [03-protocol-integration.md](03-protocol-integration.md))
+   승격 금지 (MCP 응답과 동일한 경계 규칙, [03-protocol-integration.md](03-protocol-integration.md)).
+   manifest 의 `spec.decision.input_screen` 이 있으면 회상된 기억에도 지시문 판별을 적용해
+   `act` 면 표시를 강화하고 WARN 을 남긴다 — 신호이지 경계의 대체가 아니다
+   ([02-agent-implementation.md](02-agent-implementation.md) Decision Hooks 4)
 7. **추가 탐색은 tool 로**: auto-recall 이후의 검색은 모델이 `memory_search` tool 을
    명시 호출 — 루프마다 자동 재검색하지 않는다 (비용/노이즈 제어)
 
@@ -304,7 +316,11 @@ agentd 가 태스크 프롬프트를 구성할 때:
    - 요약 생성은 시스템 유지보수 그래프 (service mode) 가 수행 — 프레임워크가
      자체 메커니즘(에이전트+그래프)을 사용한다
    - 원본은 summary 의 `source` 로 추적 가능하게 archive 후 TTL 삭제
-3. **Importance 반영**: compaction 시 `importance` 높은 항목은 원문 유지 우선
+3. **Importance 반영**: compaction 시 `importance` 높은 항목은 원문 유지 우선.
+   memoryset 이 `compaction.importance` 를 선언하면 유지보수 그래프의 에이전트가 항목마다
+   결정 모델에 등급(`rating`)을 묻고, 판정이 `act`(질문의 `act_level` 이상)면 저장된 `importance`
+   대신 그 판정으로 원문을 유지한다. `uncertain` / `unavailable` 은 저장된 `importance` 로 —
+   결정 모델이 없어도 compaction 은 같은 규칙으로 돈다. 요약문은 여전히 LLM 이 쓴다
 4. **Service run 필수**: 상주 그래프의 run scope 는 compaction 없이는 무한 성장 —
    service 그래프가 부착하는 run scope memoryset 은 compaction 선언 필수 (배포 검증)
 5. **영구 스코프 retention 필수**: local/group/global memoryset 은 `retention`
@@ -341,6 +357,7 @@ malkuth_memory_search_duration_seconds{space}
 malkuth_memory_entries{space}                          # Gauge
 malkuth_memory_index_lag_seconds{space}                # 인덱싱 큐 지연
 malkuth_memory_recall_injected_tokens{agent}           # 프롬프트 주입량 추적
+malkuth_memory_recall_filtered_total{agent, band}      # 회상 필터가 본 항목 — act|uncertain|reject
 ```
 
 로그 필드: `memory_space`, `op`, `entry_id`, `k`, `min_score` — 표준 필드 규칙
@@ -354,7 +371,11 @@ malkuth_memory_recall_injected_tokens{agent}           # 프롬프트 주입량 
    별칭 충돌 시 local > group > global 해석 순서 검증
 3. **하이브리드 검색**: 의미 매칭(vector)과 식별자 매칭(lexical) 각각의 히트 검증,
    RRF 병합 순서 검증
-4. **Budget/threshold**: recall 주입이 budget_tokens 상한과 min_score 를 준수하는지
+4. **Budget/threshold**: recall 주입이 budget_tokens 상한과 min_score 를 준수하는지.
+   회상 필터가 있으면 `reject` 만 빠지고 `uncertain` 은 남는지, provider 가 없을 때 필터 없이
+   같은 주입이 나오는지 (FakeDecisionModel, [06-testing.md](06-testing.md))
 5. **Supersedes**: 정정 체인에서 최신 항목만 주입되는지
-6. **Compaction**: trigger 도달 → summary 생성 + 원본 archive 시나리오 (fake model)
+6. **Compaction**: trigger 도달 → summary 생성 + 원본 archive 시나리오 (fake model).
+   `compaction.importance` 선언 시 `act` 등급 항목이 원문으로 남고 `unavailable` 이면 저장된
+   `importance` 로 같은 결과가 나오는지
 7. **Eventual consistency**: 인덱싱 지연 중 검색 결과가 커밋 기준으로 안정적인지

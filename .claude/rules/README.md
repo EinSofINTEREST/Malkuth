@@ -17,6 +17,8 @@ of an extensible agent runtime with per-agent isolation and freely composable ag
 - Connect and disconnect agents freely through config-driven, module-style graph wiring
 - Provide skillsets and promptsets as independent, versioned, swappable modules —
   a solution is assembled from modules, not written from scratch
+- Route typed judgments (yes/no, rating, choice) to a **decision model** behind one
+  contract, with the LLM path as the fallback — generation stays with the LLM
 - Give agents context memory with scope isolation and hybrid search indexes,
   governed by versioned memoryset policies
 - Manage agent resources (secrets, memory, artifacts, quotas) at three scopes —
@@ -32,6 +34,8 @@ The rules are organized into specialized domains:
 Covers:
 - Overall system architecture and layers
 - Interaction model (orchestrated / direct / peer) and execution modes (mission / service)
+- Decision models — the `DecisionModel` contract, probability bands, where judgments live
+  and where they never do
 - Resource scoping — global / group / local, and the Group specification
 - Access control — decisions outside the controlled container, per request; permission model,
   expansion ceilings, the permission agent, decision caching and registry outages
@@ -55,6 +59,8 @@ Covers:
 - Agent manifest specification
 - Docker isolation rules (image, resources, internal network + egress proxy, volumes, secrets)
 - Agent lifecycle and the Agent Control API
+- Decision hooks in the execution loop (recall filter, input screen, tool gates) and
+  decision-node tasks
 - Health checks and graceful shutdown
 
 Essential for:
@@ -79,13 +85,14 @@ Key for:
 - Keeping protocol resources from leaking across agent boundaries
 
 ### [04-module-system.md](04-module-system.md)
-**Skillsets, Promptsets, and Graph Modules**
+**Skillsets, Promptsets, Decisionsets, and Graph Modules**
 
 Covers:
 - Module types and directory specifications
 - Skillset interface and loading isolation
 - Promptset templates, variables, locale support
-- Graph topology modules (nodes, edges, connections)
+- Decisionset questions, bands, and locale contract
+- Graph topology modules (nodes, edges, connections, decision nodes)
 - Registry, versioning, and compatibility rules
 
 Key for:
@@ -114,7 +121,8 @@ Critical for:
 
 Covers:
 - Unit, integration, and E2E testing with pytest
-- Mocking LLMs, MCP servers, and A2A peers
+- Mocking LLMs, decision models, MCP servers, and A2A peers
+- Calibration — bands come from labeled data, the only place a real decision provider is called
 - Container-based integration tests (testcontainers)
 - Graph-level tests with in-memory checkpointers
 - Access control tests — no restart, next request, bypass, registry outage, expansion ceiling
@@ -162,7 +170,8 @@ Covers:
 - Memory scopes (run / local / group / global) and graph-state boundary rules
 - Memoryset modules — versioned policies for index, retention, recall
 - Hybrid index design (vector + lexical + metadata, RRF merge)
-- Retrieval API, context assembly budgets, provenance rules
+- Retrieval API, context assembly budgets, provenance rules, recall filtering and
+  compaction importance through the decision model
 - Access enforcement — identity tokens, per-request space decisions
 - Compaction, retention, and storage backends
 
@@ -199,6 +208,14 @@ Key for:
 2. Declare spaces where the scope lives: manifest (local), graph config (run),
    group.yaml (group), groups/global.yaml (global)
 3. Group spaces follow membership; global writes require explicit writers
+
+**Attaching a Decision Model:**
+1. Review [01-architecture.md](01-architecture.md) Decision Models — where judgments belong,
+   and the fallback rule (no provider / uncertain → the original path)
+2. Declare questions and bands as a decisionset per [04-module-system.md](04-module-system.md),
+   calibrate the bands per [06-testing.md](06-testing.md) before enabling a locale
+3. Attach the provider and the uses in the manifest per
+   [02-agent-implementation.md](02-agent-implementation.md), or add a decision node to the graph
 
 **Wiring a New Graph:**
 1. Choose the execution mode — mission (terminating) vs service (perpetual),

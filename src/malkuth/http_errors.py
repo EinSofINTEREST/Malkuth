@@ -52,6 +52,7 @@ CATEGORY_STATUS: Mapping[ErrorCategory, int] = {
     ErrorCategory.GRAPH: HTTPStatus.INTERNAL_SERVER_ERROR,
     ErrorCategory.MEMORY: HTTPStatus.INTERNAL_SERVER_ERROR,
     ErrorCategory.MODEL: HTTPStatus.INTERNAL_SERVER_ERROR,
+    ErrorCategory.DECISION: HTTPStatus.INTERNAL_SERVER_ERROR,
     ErrorCategory.A2A: HTTPStatus.INTERNAL_SERVER_ERROR,
     ErrorCategory.MCP: HTTPStatus.INTERNAL_SERVER_ERROR,
     ErrorCategory.INTERNAL: HTTPStatus.INTERNAL_SERVER_ERROR,

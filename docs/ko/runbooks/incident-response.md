@@ -69,6 +69,29 @@ Provider 가 요청을 거절하고 있다.
 3. `RATE_LIMIT_RETRY` 가 이미 최대 300s 까지 백오프한다 — 알림이 지속된다면
    재시도가 없어서가 아니라 quota 자체가 부족한 것이다.
 
+### DecisionModelMostlyUncertain
+
+decisionset 질문이 절반 넘게 `uncertain` 으로 답해, 결정 모델이 대부분의 일을 LLM 경로로
+되돌리고 있다.
+
+1. `malkuth_decision_bands_total` 을 질문별로 본다 — 한 질문인가, 전부인가? 한 질문이면 문구나
+   구간의 문제이고, 전부면 provider 나 locale 의 문제다.
+2. 그 decisionset 버전의 calibration 을 다시 돌려(06 Calibration — 모듈의 `calibration/` 라벨
+   세트) 보고서를 선언된 `act_at` / `reject_at` 과 비교한다.
+3. 구간을 고친 새 버전(patch) 또는 문구를 고친 새 버전(minor)을 게시한다. 그동안 시스템은
+   그대로 돈다 — `uncertain` 은 언제나 원래 경로로 간다.
+
+### DecisionModelUnavailable
+
+provider 의 timeout·오류·circuit open 으로 결정이 원래 경로로 되돌아가고 있다.
+
+1. 사용자에게 깨진 것은 없다: 모든 쓰임이 `unavailable` 을 `uncertain` 으로 취급한다. 비용은
+   LLM 작업이 늘고 필터가 줄어드는 것이지, 틀린 답이 아니다.
+2. 이그레스 프록시 로그에서 provider base URL 의 결과(`DEC_001` / `DEC_002` / `TO_004`)와
+   provider 상태 페이지를 본다.
+3. provider 장애가 길면 `decision.timeout_s` 를 낮추거나 가장 바쁜 에이전트의
+   `spec.decision` 을 끈다 — 판정마다 timeout 을 기다리며 태스크가 느려지지 않게.
+
 ### ServiceRunStalled
 
 Service run 이 활성인데 30분간 진행이 없다.

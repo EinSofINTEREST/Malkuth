@@ -37,6 +37,7 @@ class ErrorCategory(StrEnum):
 
     # Model
     MODEL = "model"
+    DECISION = "decision"      # 결정 모델 provider (01 Decision Models)
 
     # System
     RUNTIME = "runtime"        # 컨테이너/Docker
@@ -95,6 +96,7 @@ class MalkuthError(Exception):
 | `protocols/a2a/` 의 원격 호출 결과 | `A2A`, `NETWORK`, `TIMEOUT` |
 | `protocols/mcp/` 의 세션/tool 호출 결과 | `MCP`, `TIMEOUT` |
 | `agentd/executor.py` 의 모델 호출 결과 | `MODEL`, `RATE_LIMIT`, `TIMEOUT` |
+| `decision/providers/` 의 결정 호출 결과 | `DECISION`, `RATE_LIMIT`, `TIMEOUT` |
 | `orchestrator/` 의 node 실행/state 병합 결과 | `GRAPH` |
 | `modules/registry.py` 의 ref 해석/로드 결과 | `MODULE`, `CONFIG` |
 | `orchestrator/checkpoint.py` 의 저장/복원 결과 | `STORAGE` |
@@ -145,6 +147,7 @@ NET_002: Connection timeout
 TO_001:  Task timeout (TaskConfig.timeout_s 초과)
 TO_002:  Tool timeout
 TO_003:  Node timeout (orchestrator 기준)
+TO_004:  Decision timeout (decision.timeout_s 초과)
 
 LLM_001: Provider rate limited
 LLM_002: Context length exceeded
@@ -165,6 +168,13 @@ MCP_004: Transport 단절
 
 SKILL_001: Skillset tool 실행 실패 (category: module — skill 도메인 예외 wrapping.
            timeout 은 TO_002 사용)
+
+DEC_001: 결정 provider 호출 실패 (네트워크/서버 오류) — retryable
+DEC_002: 결정 provider rate limited (category: rate_limit) — retryable
+DEC_003: 질문/state 가 provider 한도 초과 (입력 길이, 보기·등급 수) — 영구
+DEC_004: 응답이 선언한 값 집합 밖이거나 파싱 불가 — 영구 (provider 어댑터 boundary 가 변환)
+         결정 호출의 timeout 은 TO_004. 쓰임 안에서는 DEC_*/TO_004 모두 "unavailable" 로 취급해
+         원래 경로로 간다 (01 Decision Models 2) — 결정 실패가 태스크를 실패시키지 않는다
 
 RT_001:  컨테이너 기동 실패
 RT_002:  컨테이너 unhealthy
@@ -189,7 +199,7 @@ GRAPH_006: Run 상태가 요청한 조작과 맞지 않음 (상태 충돌, HTTP 
 MOD_001: 모듈 ref 해석 실패
 MOD_002: 모듈 버전/의존성 충돌
 MOD_003: 모듈 스키마(yaml) 검증 실패
-MOD_004: Promptset 변수 검증 실패
+MOD_004: Promptset 변수 검증 실패 / decisionset 질문의 state 조각 불일치
 
 MEM_001: Memory space 미선언 / access 거부
 MEM_002: Memory 저장 실패
@@ -244,6 +254,13 @@ RATE_LIMIT_RETRY = RetryPolicy(
     max_attempts=5, initial_delay_s=10, max_delay_s=300,
     retryable_categories=(ErrorCategory.RATE_LIMIT,),
 )
+
+# 결정 호출 전용 — 총 대기가 decision.timeout_s(기본 5초) 안에 들어와야 한다.
+# rate limit 도 여기서 한 번만 다시 두드리고, 소진하면 unavailable 로 원래 경로 (01 Decision Models 2)
+DECISION_RETRY = RetryPolicy(
+    max_attempts=2, initial_delay_s=0.5, max_delay_s=1,
+    retryable_categories=(ErrorCategory.NETWORK, ErrorCategory.TIMEOUT, ErrorCategory.RATE_LIMIT),
+)
 ```
 
 ### Retry Rules
@@ -261,6 +278,7 @@ RATE_LIMIT_RETRY = RetryPolicy(
 | 호출 | 재시도 주체 |
 |---|---|
 | 모델 API 호출 | agentd (provider SDK 재시도는 비활성화) |
+| 결정 모델 호출 | agentd — `DECISION_RETRY` (network·timeout·rate limit 모두 1회 재시도, 총 대기 < `decision.timeout_s`). 소진하면 `unavailable` 로 원래 경로 — RATE_LIMIT_RETRY 의 수십 초 백오프는 판정에 맞지 않는다 |
 | MCP tool 호출 | agentd — 단 `MCP_004` (transport) 는 재연결 후 1회만 |
 | A2A 호출 | caller 에이전트 |
 | Node 실행 전체 | orchestrator — node 별 `retry` 설정 시에만, 에이전트 내부 재시도와 중복 주의 |
@@ -271,6 +289,8 @@ RATE_LIMIT_RETRY = RetryPolicy(
 외부 의존 대상별로 circuit breaker 를 적용한다:
 
 - 모델 provider (에이전트별)
+- 결정 provider (에이전트별) — open 이면 호출 없이 `unavailable`: 장애 중 판정마다 timeout 을
+  기다리면 태스크가 결정 수만큼 느려진다
 - MCP external/sidecar 서버 (서버별)
 - A2A peer (edge 별)
 - Agent Control API (runtime → 에이전트, 에이전트별)
@@ -378,6 +398,10 @@ log.info(f"task {task_id} done in {elapsed}ms")
 | `decision_source` | str  | 판정 출처 (`fresh`/`cache`/`unreachable`) |
 | `grant_id`      | str    | 부여 기록 id |
 | `decided_by`    | str    | 결정 주체 (`declaration`/`operator`/권한 에이전트 이름) |
+| `decision_use`  | str    | 결정 모델 쓰임 (`recall_filter`/`input_screen`/`tool_gate`/`node`/`compaction`) |
+| `question`      | str    | decisionset 질문 참조 (`alias.question`) |
+| `band`          | str    | 판정 구간 (`act`/`uncertain`/`reject`) |
+| `probability`   | float  | 판정 확률 (0.0~1.0) |
 
 **규칙:**
 - 표에 없는 컴포넌트 특화 키는 snake_case 로 추가 가능 (예: `checkpoint_id`, `edge`)
@@ -395,6 +419,7 @@ log.info(f"task {task_id} done in {elapsed}ms")
 | `protocols/a2a/` | `a2a_caller`, `a2a_callee` (+task 로그는 `a2a_task_id`) |
 | `protocols/mcp/` | `agent`, `mcp_server` (+tool 로그는 `tool`, `duration_ms`) |
 | `agentd/` | `agent`, `task_id` (+모델 호출은 `model`, `input_tokens`, `output_tokens`) |
+| `decision/` | `agent`, `task_id`, `decision_use`, `question` (+판정 로그는 `band`, `probability`, `duration_ms` / 게이트 차단은 `tool`) |
 | `modules/` | `module_ref` |
 | `access/`, `egress/` | `agent`, `resource`, `target` (+판정 로그는 `decision`, `decision_source` / 부여 로그는 `grant_id`, `decided_by`) |
 
@@ -452,6 +477,12 @@ malkuth_agent_task_duration_seconds{agent, group, graph} # Histogram
 # Model metrics
 malkuth_model_requests_total{agent, provider, model, status}
 malkuth_model_tokens_total{agent, model, direction}      # direction: input|output
+
+# Decision metrics (01 Decision Models)
+malkuth_decision_calls_total{agent, provider, model, use, status}   # use: recall_filter|input_screen|tool_gate|node|compaction
+malkuth_decision_bands_total{agent, use, question, band}            # band: act|uncertain|reject — uncertain 비율이 구간 건강도
+malkuth_decision_duration_seconds{agent, provider}
+malkuth_decision_unavailable_total{agent, provider, reason}         # reason: timeout|error|circuit_open — 원래 경로로 간 횟수
 
 # Tool / protocol metrics
 malkuth_tool_calls_total{agent, source, tool, status}    # source: skillset|mcp
@@ -537,6 +568,23 @@ groups:
           rate(malkuth_model_requests_total{status="rate_limited"}[5m]) > 1
         for: 5m
         labels: {severity: warning}
+
+      - alert: DecisionModelMostlyUncertain
+        expr: |
+          sum without (band) (rate(malkuth_decision_bands_total{band="uncertain"}[30m])) /
+          sum without (band) (rate(malkuth_decision_bands_total[30m])) > 0.5
+        for: 30m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.question }} on {{ $labels.agent }} is uncertain more than half the time — the bands or the wording need recalibration"
+
+      - alert: DecisionModelUnavailable
+        expr: |
+          sum by (agent, provider) (rate(malkuth_decision_unavailable_total[10m])) > 0.5
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "Agent {{ $labels.agent }} is running without its decision model — tasks fall back to the LLM path"
 
       - alert: CheckpointFailures
         expr: |

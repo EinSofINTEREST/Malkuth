@@ -20,6 +20,16 @@
     {"title": "Health", "type": "stat",
      "targets": [{"expr": "malkuth_agent_health{agent=\"$agent\"}"}]},
     {"title": "Recall tokens injected", "type": "timeseries",
-     "targets": [{"expr": "malkuth_memory_recall_injected_tokens{agent=\"$agent\"}"}]}
+     "targets": [{"expr": "malkuth_memory_recall_injected_tokens{agent=\"$agent\"}"}]},
+    {"title": "Recall filter outcomes", "type": "timeseries",
+     "targets": [{"expr": "sum by (band) (rate(malkuth_memory_recall_filtered_total{agent=\"$agent\"}[5m]))"}]},
+    {"title": "Decision calls by use", "type": "timeseries",
+     "targets": [{"expr": "sum by (use, status) (rate(malkuth_decision_calls_total{agent=\"$agent\"}[5m]))"}]},
+    {"title": "Decision latency p95", "type": "timeseries",
+     "targets": [{"expr": "histogram_quantile(0.95, sum by (le, provider) (rate(malkuth_decision_duration_seconds_bucket{agent=\"$agent\"}[5m])))"}]},
+    {"title": "Decision uncertain share", "type": "timeseries",
+     "targets": [{"expr": "sum without (band) (rate(malkuth_decision_bands_total{agent=\"$agent\",band=\"uncertain\"}[30m])) / sum without (band) (rate(malkuth_decision_bands_total{agent=\"$agent\"}[30m]))"}]},
+    {"title": "Decision fallbacks", "type": "timeseries",
+     "targets": [{"expr": "sum by (reason) (rate(malkuth_decision_unavailable_total{agent=\"$agent\"}[5m]))"}]}
   ]
 }

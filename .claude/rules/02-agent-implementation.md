@@ -56,6 +56,8 @@ class TaskRequest(BaseModel):
     input: dict[str, Any]                 # state 에서 추출된 입력 / direct 요청 본문
     config: TaskConfig                    # timeout, max_turns 등
     trace: TraceContext                   # 분산 추적 컨텍스트
+    decision: DecisionAsk | None = None   # 그래프 decision 노드 — 질문 참조(alias.question).
+                                          # 있으면 LLM 루프 대신 결정 한 번으로 답한다 (Decision Tasks 절)
 
 
 class TaskResult(BaseModel):
@@ -134,6 +136,23 @@ spec:
       - ref: memorysets/agent-longterm@0.1.0
         as: longterm
 
+  decision:                     # 결정 모델 — 01 Decision Models. 선택: 없으면 모든 쓰임이 원래 경로다
+    provider: jev               # configs 의 decision.providers 키 — 프록시가 종단한다
+    model: jev-1.13             # provider 의 모델 id — 버전 고정
+    sets:
+      - ref: decisionsets/research-triage@0.1.0
+        as: triage              # 질문 참조는 alias.question
+    recall_filter:              # 쓰임 1 — 회상 상위 k 를 한 번 더 거른다 (09)
+      question: triage.memory_is_relevant
+      uncertain: keep           # keep(기본) | drop
+    input_screen:               # 쓰임 2 — 신뢰하지 않는 입력의 지시문 표시 (Execution Loop)
+      question: triage.contains_instructions
+    tool_gates:                 # 쓰임 6 — 부수효과 도구 호출 전 판정 (Execution Loop)
+      - tools: ["mcp__mail__*", "post_*"]     # glob — 네임스페이스 이름 기준
+        question: triage.tool_call_fits_task
+        uncertain: block        # block(기본) | allow
+        unavailable: allow      # allow(기본) | block — provider 가 닿지 않을 때
+
   mcp:                          # 이 에이전트 전용 MCP 서버 — 03 참조
     servers:
       - name: filesystem
@@ -175,6 +194,10 @@ spec:
    [03-protocol-integration.md](03-protocol-integration.md) 의 서버 선언 스펙을 따른다 —
    stdio/sidecar/external 3 패턴과 `allowed_tools` / `optional` / `auth` /
    `env_allowlist` 전부 manifest 스키마의 정식 필드다 (03 의 예시가 곧 스키마 계약)
+8. **Decision Declaration**: `spec.decision` 은 선택이다. 있으면 `provider` 와 `sets` 가 필수이고,
+   `recall_filter` / `input_screen` / `tool_gates` 의 질문은 `sets` 의 alias 로 해석돼야 한다
+   (배포 검증 `MOD_001`). 질문 종류도 맞아야 한다 — 세 쓰임 모두 `predicate` (`MOD_003`).
+   provider 자격증명은 env 에 없다 — 프록시가 주입한다 (Secrets Injection)
 
 ## Docker Isolation Rules
 
@@ -248,8 +271,8 @@ Runtime layer →  env_allowlist 각 키를 local > group > global 순으로 해
               → (기동 시) docker env 주입 → 컨테이너
 ```
 
-- **프록시가 종단하는 서비스의 자격증명은 env 로 넣지 않는다**: 모델 API 키와 원격 MCP 서버
-  자격증명은 egress proxy 가 요청에 주입한다. 에이전트 컨테이너는 그 값을 갖지 않으므로
+- **프록시가 종단하는 서비스의 자격증명은 env 로 넣지 않는다**: 모델 API 키, 결정 모델 API 키,
+  원격 MCP 서버 자격증명은 egress proxy 가 요청에 주입한다. 에이전트 컨테이너는 그 값을 갖지 않으므로
   회수가 재배포 없이 반영된다
 - 그 밖의 secrets 는 runtime 이 기동 시점에 env 로 주입 — `env_allowlist` 에 있는 키만.
   env 로 넣은 값은 실시간 회수가 되지 않는다 (재배포 필요)
@@ -299,11 +322,12 @@ Runtime layer →  env_allowlist 각 키를 local > group > global 순으로 해
 ### Hot Reload
 
 - **Promptset / Skillset 교체**: `POST /reload` 로 무중단 리로드 지원 (신규 태스크부터 적용)
-  - 다시 읽는 것: promptset 선언(템플릿 목록·변수·출력 키), skillset 선언과 코드, 광고 도구와 AgentCard.
-    템플릿 **본문**은 렌더할 때마다 읽으므로 리로드와 무관하다
+  - 다시 읽는 것: promptset 선언(템플릿 목록·변수·출력 키), skillset 선언과 코드, decisionset
+    선언(질문·구간), 광고 도구와 AgentCard. 템플릿 **본문**은 렌더할 때마다 읽으므로 리로드와
+    무관하다
   - 진행 중 태스크는 시작할 때 잡은 모듈 묶음으로 끝까지 간다 — 한 태스크 안에서 옛·새 모듈이 섞이지 않는다
   - 새 묶음을 끝까지 조립한 뒤 교체한다. 실패하면 typed 에러로 답하고 이전 상태를 유지한다
-  - 메모리·peer·MCP 연결은 모듈이 아니라 배선이라 유지한다
+  - 메모리·peer·MCP 연결과 결정 provider 클라이언트는 모듈이 아니라 배선이라 유지한다
   - 리로드할 모듈이 없는 실행기(커스텀 entrypoint, echo)는 `unsupported` 로 답한다
 - **Manifest 변경**: 리로드 불가 — 새 버전으로 재배포 (컨테이너 교체)
 - **MCP 서버 목록 변경**: manifest 변경에 해당 — 재배포
@@ -360,6 +384,79 @@ async def execute(self, task: TaskRequest) -> TaskResult:
 3. **Parallel Tools**: 독립 tool call 은 `asyncio.gather` 로 병렬 실행
 4. **Usage Tracking**: 매 모델 호출의 토큰 사용량 누적 → TaskResult.usage
 5. **Event Emission**: 스트리밍 모드에서 turn 별 tool_call/tool_result 이벤트 발행
+
+### Decision Hooks — 루프 안의 결정 모델
+
+`spec.decision` 이 있으면 루프의 세 자리에서 결정 모델을 부른다. 셋 다 **원래 경로를 바꾸지
+않는 층**이다 — provider 가 없거나 `uncertain` 이면 결정 모델이 없을 때와 같이 동작한다
+([01-architecture.md](01-architecture.md) Decision Models).
+
+```python
+# 1. 회상 필터 — 태스크 진입, auto-recall 직후 (09 Context Assembly)
+hits = await self.recall(task)                                   # 검색은 인덱스가
+if self.decision.recall_filter:
+    hits = await self.decision.filter_relevant(task, hits)        # 상위 k 를 한 번에 물어 act/keep 만 남긴다
+
+# 2. 입력 판별 — tool 결과 / A2A 응답이 대화에 들어가기 직전
+outcome = tool_outcome(call, result)
+if self.decision.input_screen and await self.decision.looks_like_instructions(outcome):
+    outcome = outcome.flagged()                                  # 경계 표시를 강화하고 WARN + 메트릭. 버리지 않는다
+
+# 3. 도구 게이트 — 부수효과 도구를 실행하기 직전
+gate = self.decision.gate_for(call.name)
+if gate is not None:
+    verdict = await self.decision.gate(task, call, gate)          # act → 실행 / reject·uncertain(block) → 실행하지 않는다
+    if verdict.blocked:
+        return ToolOutcome(call.id, content=f"gated: {verdict.reason}", is_error=True)  # 모델이 다시 생각할 수 있게 결과로 돌려준다
+```
+
+1. **호출 횟수**: 회상 필터는 태스크당 1회(상위 k 를 한 요청에), 입력 판별은 결과당 1회, 게이트는
+   게이트된 호출당 1회. 루프의 turn 마다 반복하지 않는다
+2. **게이트는 편의다**: 컨테이너 안의 검사이므로 강제 수단이 아니다 (01 Access Control).
+   부수효과의 진짜 통제는 이그레스 판정과 도구 주입 여부다. 그래서 `unavailable` 기본값은
+   `allow` + WARN — provider 장애가 에이전트 전체를 멈추게 두지 않는다. `block` 은 그 도구의
+   부수효과가 provider 장애보다 비싼 경우에만 선언한다
+3. **차단은 태스크 실패가 아니다**: 게이트에 걸린 호출은 `is_error` 결과로 모델에 돌아간다 —
+   모델이 인자를 고치거나 다른 길을 택할 수 있다. 같은 도구가 한 태스크에서 두 번 차단되면 그
+   태스크의 이후 호출도 차단한다 (게이트를 두드리는 루프 방지)
+4. **판별은 신호다**: 입력 판별의 `act` 는 경계 표시(`[untrusted: instructions detected]`)와
+   `error_code` 없는 WARN 로그, `malkuth_decision_bands_total{use="input_screen"}` 로 남는다.
+   결과를 버리거나 태스크를 멈추지 않는다 — 03/09 의 경계 규칙은 결정 모델 없이도 유지된다
+5. **게이트에 넣는 state**: 태스크 입력(렌더된 프롬프트가 아니라 `TaskRequest.input`)과 도구
+   호출(이름·인자)만. 대화 전체를 보내지 않는다 — 비용이자 외부 반출이다
+6. **결정은 타임아웃이 짧다**: `decision.timeout_s`(기본 5초) — 넘기면 `unavailable` 로 취급한다.
+   판정이 생성만큼 느리면 두는 의미가 없다
+
+## Decision Tasks — 그래프 decision 노드
+
+그래프가 노드를 `decision:` 으로 선언하면 ([04-module-system.md](04-module-system.md)) 그 노드의
+태스크는 LLM 루프를 타지 않는다. agentd 는 `TaskRequest.decision` 을 보고 결정 한 번으로 답한다.
+
+```python
+async def decide(self, task: TaskRequest) -> TaskResult:
+    ask = task.decision                                          # alias.question + 어느 입력 키를 state 로 보낼지
+    question = self.decisionsets.resolve(ask.question)
+    state = render_state(task.input, ask.fields)                 # 선언된 키만 텍스트로 — 프롬프트 템플릿 없음
+    decision = await self.decision_model.decide(state, [question])
+    return TaskResult.completed(task, output={
+        "value": decision.value,             # predicate: bool / rating: 등급 / choice: 보기
+        "band": decision.band,               # act | uncertain | reject
+        "probability": decision.probability,
+        "distribution": decision.distribution,
+    })
+```
+
+1. **같은 계약**: TaskRequest/TaskResult, 멱등성, timeout, 로깅·메트릭은 그래프 태스크와 같다.
+   usage 는 0 토큰이다
+2. **에이전트가 provider 를 가진다**: 노드는 `agent:` 로 결정을 내릴 에이전트를 가리키고, 그
+   에이전트의 `spec.decision` 이 provider 와 decisionset 을 정한다. `spec.decision` 없는
+   에이전트에 decision 노드를 물리면 배포 검증 실패 (`MOD_001`)
+3. **답은 state 로**: 결과는 `output_map` 으로 state 에 병합된다. edge 조건은 state 를 읽는다 —
+   조건 안에서 결정 모델을 부르지 않는다 (재개 시 재판정 금지, 01 Decision Models 3)
+4. **unavailable 은 실패가 아니라 uncertain 이다**: provider 가 닿지 않으면 `band: uncertain`,
+   `value: null` 로 답하고 WARN 을 남긴다 — 그래프의 기본 edge 가 원래 경로(LLM 노드)로 보낸다.
+   그래서 decision 노드에는 조건 없는 기본 edge 가 하나 있어야 한다 (04 검증)
+5. **direct 요청에는 없다**: `decision` 은 그래프 노드가 넣는다. direct 요청은 항상 LLM 경로다
 
 ## Direct Requests — 인터랙티브 직접 호출
 
@@ -423,5 +520,6 @@ Material store (agent, version) → files      # 커스텀 에이전트의 빌�
 
 - 태스크 성공/실패율, 태스크 latency (p50/p95)
 - 모델 토큰 사용량, tool 호출 횟수/실패율
+- 결정 호출 횟수·지연, 쓰임별 구간 분포 (`uncertain` 비율), 게이트 차단 횟수
 - 컨테이너 재시작 횟수, health check 실패율
 - MCP 세션 상태, A2A 호출 성공률

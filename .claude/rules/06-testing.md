@@ -318,7 +318,10 @@ decisionset 의 `act_at` / `reject_at` 은 추측이 아니라 **라벨 데이�
 ([04-module-system.md](04-module-system.md) Decisionset Rules 2).
 
 1. **라벨 세트**: 질문마다 `modules/decisionsets/<name>/<ver>/calibration/<question>.jsonl` —
-   `{"state": {...}, "label": true}` 형태, 최소 50건, 양쪽 라벨 모두 포함. **실제 태스크·기억·
+   한 줄이 `{"state": {...}, "label": <gold>}` 이고 `label` 의 형태는 질문 종류가 정한다:
+   `predicate` 는 `true` / `false`, `rating` 은 선언된 등급 이름 하나(`"acceptable"`),
+   `choice` 는 선언된 보기 하나(`"bug"`). 선언 밖의 값이 있으면 로더가 거부한다 (`MOD_003`).
+   최소 50건, `predicate` 는 양쪽 라벨, `rating` / `choice` 는 모든 등급·보기가 나오게. **실제 태스크·기억·
    도구 결과를 그대로 넣지 않는다** — 모듈은 git 에 실리고, 비밀값이 아니라도 개인정보·테넌트
    기밀이 섞인다. 합성 예시이거나 되돌릴 수 없게 비식별화한 것만 두고, 실 데이터에서 파생한
    세트는 커밋 전에 프라이버시 검토를 거친다 (PR 본문에 검토자 명시)

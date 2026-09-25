@@ -202,3 +202,29 @@ def test_a_failure_while_assembling_the_app_closes_the_sessions(
         agentd.main()
 
     assert stdio.terminated == 1
+
+
+async def test_an_optional_server_that_failed_at_startup_shows_as_degraded(root, monkeypatch):  # noqa: F811
+    """생성자가 묶음의 일부만 받으면 degraded 가 빠져, 리로드 전까지 healthy 로 답한다."""
+    from malkuth.agentd.health import agent_health
+    from malkuth.core.agent import HealthState
+
+    class Refusing(FakeHttpClient):
+        async def connect(self, *, url, headers):
+            raise ConnectionError("remote server down")
+
+    launchers = Launchers(FakeStdioClient(tools=["read_file"]), Refusing())
+    monkeypatch.setattr(agentd, "build_mcp_client", launchers)
+    remote = {
+        "name": "corp",
+        "transport": "streamable-http",
+        "url": "https://mcp.example/mcp",
+        "optional": True,
+    }
+
+    executor = await agentd.build_executor(with_servers(FS, remote))
+
+    status = agent_health(executor)
+    assert status.status is HealthState.DEGRADED
+    assert status.components["mcp:corp"].state is HealthState.DEGRADED
+    await launchers.built[0].shutdown()

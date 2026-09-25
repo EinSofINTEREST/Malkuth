@@ -300,7 +300,7 @@ async def _standard_executor(
         peers=build_peer_client(manifest),
         mcp=mcp,
     )
-    return Executor(
+    executor = Executor(
         agent=manifest.name,
         model=AnthropicModel(config=manifest.spec.model, agent=manifest.name),
         tools=binding.tools,
@@ -319,6 +319,10 @@ async def _standard_executor(
             output_keys=binding.output_keys,
         ),
     )
+    # 기동 묶음을 통째로 건다 — 생성자는 일부 필드만 받아, 뜨지 못한 optional 서버(degraded)가
+    # 빠진 채 health 가 healthy 로 답한다. 리로드와 같은 경로다
+    executor.rebind(binding)
+    return executor
 
 
 async def load_modules(

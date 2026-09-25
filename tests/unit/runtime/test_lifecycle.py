@@ -11,7 +11,6 @@ from malkuth.core.errors import ErrorCategory, MalkuthError
 from malkuth.runtime.lifecycle import (
     AgentLifecycle,
     AgentState,
-    ReplicaRouter,
     RestartPolicy,
 )
 
@@ -217,45 +216,6 @@ def test_restarts_spread_over_time_do_not_trip_the_ceiling():
     assert agent.state is not AgentState.FAILED
 
 
-# --- 레플리카 라우팅 --------------------------------------------------------
-
-
-def test_router_requires_replicas():
-    with pytest.raises(ValueError, match="at least one replica"):
-        ReplicaRouter([])
-
-
-def test_round_robin_cycles_through_ready_replicas():
-    replicas = [ready_agent(f"a{i}") for i in range(3)]
-    router = ReplicaRouter(replicas)
-
-    picked = [router.next_replica().agent for _ in range(6)]
-
-    assert picked == ["a0", "a1", "a2", "a0", "a1", "a2"]
-
-
-def test_unready_replicas_are_skipped():
-    replicas = [ready_agent(f"a{i}") for i in range(3)]
-    replicas[1].transition(AgentState.DRAINING)
-    router = ReplicaRouter(replicas)
-
-    picked = {router.next_replica().agent for _ in range(4)}
-
-    assert picked == {"a0", "a2"}
-
-
-def test_no_ready_replica_is_a_retryable_error():
-    replicas = [ready_agent("a0")]
-    replicas[0].transition(AgentState.DRAINING)
-    router = ReplicaRouter(replicas)
-
-    with pytest.raises(MalkuthError) as exc_info:
-        router.next_replica()
-
-    assert exc_info.value.retryable is True
-    assert "no ready replica" in exc_info.value.message
-
-
 def test_lifecycle_errors_use_distinct_codes():
     """RT_002 는 "컨테이너 unhealthy" 다 — lifecycle 위반과 섞으면 라우팅이 흐려진다."""
     illegal = AgentLifecycle(agent="a", state=AgentState.DECLARED)
@@ -268,13 +228,8 @@ def test_lifecycle_errors_use_distinct_codes():
     with pytest.raises(MalkuthError) as restart_err:
         looping.plan_restart()
 
-    drained = ready_agent("a0")
-    drained.transition(AgentState.DRAINING)
-    with pytest.raises(MalkuthError) as router_err:
-        ReplicaRouter([drained]).next_replica()
-
-    codes = {transition_err.value.code, restart_err.value.code, router_err.value.code}
-    assert codes == {"RT_007", "RT_008", "RT_009"}
+    codes = {transition_err.value.code, restart_err.value.code}
+    assert codes == {"RT_007", "RT_008"}
 
 
 def test_failing_startup_health_becomes_unhealthy():

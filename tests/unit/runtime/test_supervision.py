@@ -3,7 +3,7 @@
 02 Lifecycle 의 상태 기계는 구현되어 있는데 **프로덕션에서 한 번도 돌지
 않았다** — `AgentLifecycle` 을 만드는 곳이 테스트뿐이었다 (#213).
 
-그래서 health 주기 확인도, `malkuth_agent_health` 도, `ReplicaRouter` 의
+그래서 health 주기 확인도, `malkuth_agent_health` 도, 레플리카 라우팅이 보는
 `accepts_tasks` 도 전부 죽어 있었다.
 """
 

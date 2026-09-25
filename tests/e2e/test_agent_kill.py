@@ -38,7 +38,7 @@ pytestmark = pytest.mark.e2e
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 # **에이전트 이름**이 키다 — 노드 id(watcher/classifier/notifier)가 아니라.
-# 런타임은 `agent_of(node.agent)` 로 클라이언트를 찾으므로, 노드 id 로 키를
+# 런타임은 `agent_name(node.agent)` 로 클라이언트를 찾으므로, 노드 id 로 키를
 # 만들면 모든 노드가 GRAPH_002 로 실패한다 (그래도 iteration 은 올라가서
 # 회차만 세는 검증은 통과한다 — 그래서 조용히 지나갔다)
 AGENT_PORTS = {"planner": 18082, "researcher": 18083, "writer": 18084}

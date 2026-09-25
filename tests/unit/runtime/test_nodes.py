@@ -10,8 +10,9 @@ import pytest
 
 from malkuth.core.agent import TaskResult, TaskStatus
 from malkuth.core.errors import ErrorCategory, MalkuthError
+from malkuth.core.manifest import agent_name
 from malkuth.orchestrator.topology import NodeSpec
-from malkuth.runtime.nodes import ControlNodeRuntime, agent_of
+from malkuth.runtime.nodes import ControlNodeRuntime
 from tests.fixtures.builders import make_task
 
 
@@ -47,7 +48,7 @@ def subgraph_node(node_id: str = "review") -> NodeSpec:
     ],
 )
 def test_agent_name_is_extracted_from_the_ref(ref, expected):
-    assert agent_of(ref) == expected
+    assert agent_name(ref) == expected
 
 
 async def test_node_is_routed_to_its_agent():

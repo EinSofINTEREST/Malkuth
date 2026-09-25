@@ -25,7 +25,7 @@ from pydantic import BaseModel
 
 from malkuth.catalog import MODULE_TYPES, Catalog, not_found
 from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
-from malkuth.core.manifest import AgentManifest
+from malkuth.core.manifest import AgentManifest, agent_name
 from malkuth.deploy import Finding, ValidationReport, validate_deployment
 from malkuth.materials import Materials, MaterialStore, check_files
 from malkuth.modules.promptset import PromptsetManifest
@@ -346,7 +346,7 @@ class Author:
             graph_name
             for graph_name, graph in self.catalog.graphs().items.items()
             if any(
-                node.agent is not None and _agent_of(node.agent) == name
+                node.agent is not None and agent_name(node.agent) == name
                 for node in graph.spec.nodes
             )
         )
@@ -536,11 +536,6 @@ class Author:
                 Path(tmp).unlink()
             raise
         return path
-
-
-def _agent_of(ref: str) -> str:
-    """``agents/{name}@{version}`` → name."""
-    return ref.split("/", 1)[1].split("@", 1)[0]
 
 
 __all__ = ["Author", "InUse"]

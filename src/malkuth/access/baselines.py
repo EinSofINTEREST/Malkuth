@@ -16,7 +16,7 @@ from urllib.parse import urlsplit
 
 from malkuth.access.model import Mode
 from malkuth.core.errors import ErrorCode, MalkuthError
-from malkuth.core.manifest import RESERVED_GLOBAL_GROUP, MemoryMode
+from malkuth.core.manifest import RESERVED_GLOBAL_GROUP, MemoryMode, agent_name
 
 if TYPE_CHECKING:
     from malkuth.access.store import AccessStore, Identity
@@ -157,7 +157,7 @@ class A2ABaseline:
                 if err.code == ErrorCode.NF_001:
                     continue
                 raise
-            agent_of = {n.id: _agent_name(n.agent) for n in topology.spec.nodes if n.agent}
+            agent_of = {n.id: agent_name(n.agent) for n in topology.spec.nodes if n.agent}
             callees |= {
                 agent_of[c.callee]
                 for c in topology.spec.connections
@@ -173,7 +173,7 @@ class A2ABaseline:
                 return False
             raise
         # connections 는 **노드 id** 를 잇는다 — 노드의 에이전트로 풀어서 비교한다
-        agent_of = {n.id: _agent_name(n.agent) for n in topology.spec.nodes if n.agent}
+        agent_of = {n.id: agent_name(n.agent) for n in topology.spec.nodes if n.agent}
         return any(
             agent_of.get(c.caller) == caller and agent_of.get(c.callee) == callee
             for c in topology.spec.connections
@@ -187,11 +187,6 @@ def _manifest(catalog: Catalog, agent: str) -> AgentManifest | None:
         if err.code == ErrorCode.NF_001:
             return None
         raise
-
-
-def _agent_name(ref: str) -> str:
-    """``agents/{name}@{version}`` → name."""
-    return ref.split("/", 1)[-1].split("@", 1)[0]
 
 
 ALL_TOOLS = "*"

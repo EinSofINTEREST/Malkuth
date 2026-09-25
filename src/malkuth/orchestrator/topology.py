@@ -507,26 +507,6 @@ def _cycle_edges(topology: GraphTopology) -> list[EdgeSpec]:
     return [e for e in topology.spec.edges if _reaches(graph, e.target, e.source)]
 
 
-def _has_cycle(topology: GraphTopology) -> bool:
-    """방향 순환 존재 여부 (self-loop 포함)."""
-    graph = _adjacency(topology)
-    visiting: set[str] = set()
-    visited: set[str] = set()
-
-    def walk(node: str) -> bool:
-        if node in visiting:
-            return True
-        if node in visited:
-            return False
-        visiting.add(node)
-        found = any(walk(nxt) for nxt in graph.get(node, set()))
-        visiting.discard(node)
-        visited.add(node)
-        return found
-
-    return walk(START)
-
-
 def _check_mode_topology(topology: GraphTopology) -> None:
     """모드별 토폴로지 규칙 — 두 모드 모두 END 도달과 순환 상한을 요구한다.
 

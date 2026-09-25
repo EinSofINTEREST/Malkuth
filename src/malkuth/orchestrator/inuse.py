@@ -14,6 +14,7 @@ import structlog
 
 from malkuth.authoring import InUse
 from malkuth.core.errors import MalkuthError
+from malkuth.core.manifest import agent_name
 from malkuth.orchestrator.run import RunStatus
 
 if TYPE_CHECKING:
@@ -24,10 +25,6 @@ log = structlog.get_logger(__name__)
 
 ACTIVE = frozenset({str(RunStatus.RUNNING), str(RunStatus.DRAINING)})
 """드레인 중도 아직 그 그래프로 돈다 — 끝날 때까지 선언은 고정이다."""
-
-
-def _agent_of(ref: str) -> str:
-    return ref.split("/", 1)[1].split("@", 1)[0]
 
 
 def run_backed(store: RunStore, catalog: Catalog) -> InUse:
@@ -52,7 +49,7 @@ def run_backed(store: RunStore, catalog: Catalog) -> InUse:
                     error_code=err.code,
                 )
                 continue
-            if any(n.agent is not None and _agent_of(n.agent) == name for n in graph.spec.nodes):
+            if any(n.agent is not None and agent_name(n.agent) == name for n in graph.spec.nodes):
                 return True
         return False
 

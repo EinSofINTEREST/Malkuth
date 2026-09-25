@@ -621,3 +621,20 @@ def test_an_external_mcp_url_must_be_a_valid_http_url(url):
 
     with pytest.raises(ValidationError):
         McpServerSpec(name="corp", transport="streamable-http", url=url)
+
+
+@pytest.mark.parametrize(
+    ("ref", "expected"),
+    [
+        ("agents/planner@0.1.0", ("planner", "0.1.0")),
+        ("agents/feed-watcher@1.2.3", ("feed-watcher", "1.2.3")),
+        # 형식이 틀려도 던지지 않는다 — 배포 검증이 "없는 에이전트" 로 보고한다
+        ("agents/planner", ("planner", "")),
+    ],
+)
+def test_an_agent_ref_splits_into_name_and_version(ref, expected):
+    """노드가 가리키는 에이전트를 찾는 규칙은 이 하나뿐이다 (#319)."""
+    from malkuth.core.manifest import agent_name, agent_ref_parts
+
+    assert agent_ref_parts(ref) == expected
+    assert agent_name(ref) == expected[0]

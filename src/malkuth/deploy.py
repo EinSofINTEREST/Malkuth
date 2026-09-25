@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
-from malkuth.core.manifest import RESERVED_GLOBAL_GROUP
+from malkuth.core.manifest import RESERVED_GLOBAL_GROUP, agent_name, agent_ref_parts
 from malkuth.modules.compatibility import check_promptset_templates
 from malkuth.modules.promptset import LoadedPromptset
 from malkuth.orchestrator.topology import GraphMode, validate_topology
@@ -37,7 +37,7 @@ def _nodes_by_agent(topology: GraphTopology) -> dict[str, list[NodeSpec]]:
     for node in topology.spec.nodes:
         if node.agent is None:
             continue
-        grouped.setdefault(_agent_ref_parts(node.agent)[0], []).append(node)
+        grouped.setdefault(agent_name(node.agent), []).append(node)
     return grouped
 
 
@@ -98,23 +98,6 @@ class ValidationReport:
                 ]
             },
         )
-
-
-def _agent_name(ref: str) -> str:
-    """``agents/{name}@{version}`` 에서 이름만 뽑는다."""
-    return _agent_ref_parts(ref)[0]
-
-
-def _agent_ref_parts(ref: str) -> tuple[str, str]:
-    """``agents/{name}@{version}`` 을 이름과 버전으로 나눈다.
-
-    버전을 버리면 04 의 semver 고정이 무의미해진다 — 존재하지 않는 버전을
-    가리켜도 통과하고, 런타임에는 실제 manifest 가 떠서 선언과 실행이
-    어긋난 채 굴러간다.
-    """
-    _, _, remainder = ref.partition("/")
-    name, _, version = remainder.partition("@")
-    return name, version
 
 
 @dataclass
@@ -190,7 +173,7 @@ class DeployValidator:
         for node in topology.spec.nodes:
             if node.agent is None:
                 continue
-            name, version = _agent_ref_parts(node.agent)
+            name, version = agent_ref_parts(node.agent)
             manifest = self.manifests.get(name)
             if manifest is None:
                 findings.append(
@@ -237,8 +220,8 @@ class DeployValidator:
         **컨테이너를 다 띄운 뒤 run 에서** 죽는다 — 그것을 여기로 앞당긴다 (#260).
         """
         findings = []
-        for agent_name, nodes in _nodes_by_agent(topology).items():
-            manifest = self.manifests.get(agent_name)
+        for bound_agent, nodes in _nodes_by_agent(topology).items():
+            manifest = self.manifests.get(bound_agent)
             if manifest is None:
                 continue  # agent_refs 가 이미 보고했다 — 같은 문제를 두 번 세지 않는다
             ref = manifest.spec.promptset.ref
@@ -265,14 +248,14 @@ class DeployValidator:
                         message=err.message,
                         details={
                             "graph": topology.metadata.name,
-                            "agent": agent_name,
+                            "agent": bound_agent,
                             **err.details,
                         },
                     )
                 )
             # 템플릿이 있는 노드는 변수까지 본다 — 이름 문제 하나로 입력 문제가
             # 가려지면 고치고 다시 돌릴 때마다 새 문제가 하나씩 나온다
-            findings.extend(self._check_node_inputs(topology, agent_name, ref, promptset, nodes))
+            findings.extend(self._check_node_inputs(topology, bound_agent, ref, promptset, nodes))
         return findings
 
     def _check_node_inputs(
@@ -422,7 +405,7 @@ class DeployValidator:
         if node is None or node.agent is None:
             return []
 
-        manifest = self.manifests.get(_agent_name(node.agent))
+        manifest = self.manifests.get(agent_name(node.agent))
         if manifest is None or manifest.spec.a2a.enabled:
             return []
 

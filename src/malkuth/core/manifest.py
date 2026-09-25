@@ -748,6 +748,23 @@ class GroupManifest(BaseModel):
         return self.metadata.name == RESERVED_GLOBAL_GROUP
 
 
+def agent_ref_parts(ref: str) -> tuple[str, str]:
+    """Split ``agents/{name}@{version}`` into name and version.
+
+    에이전트 참조를 이름과 버전으로 나눕니다 — 그래프 노드가 가리키는 에이전트를 찾는 **유일한**
+    규칙입니다. 같은 파싱이 일곱 곳에 복제돼 있었다 (#319). 형식을 강제하지 않습니다: 틀린 참조는
+    배포 검증이 "없는 에이전트" 로 보고하도록 이름을 그대로 돌려줍니다.
+    """
+    _, _, remainder = ref.partition("/")
+    name, _, version = remainder.partition("@")
+    return name, version
+
+
+def agent_name(ref: str) -> str:
+    """``agents/{name}@{version}`` → ``name``."""
+    return agent_ref_parts(ref)[0]
+
+
 class ParsedModuleRef(BaseModel):
     """A parsed module reference.
 

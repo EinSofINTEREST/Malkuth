@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 import structlog
 
 from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
+from malkuth.core.manifest import agent_name
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -22,13 +23,6 @@ if TYPE_CHECKING:
     from malkuth.runtime.control import ControlClient
 
 log = structlog.get_logger(__name__)
-
-
-def agent_of(ref: str) -> str:
-    """``agents/{name}@{version}`` 에서 이름만 뽑는다."""
-    _, _, remainder = ref.partition("/")
-    name, _, _ = remainder.partition("@")
-    return name
 
 
 @dataclass
@@ -73,7 +67,7 @@ class ControlNodeRuntime:
                 details={"node_id": node.id, "graph_ref": node.graph},
             )
 
-        name = agent_of(node.agent)
+        name = agent_name(node.agent)
         client = self.clients.get(name)
         if client is None:
             raise MalkuthError(
@@ -105,10 +99,10 @@ class ControlNodeRuntime:
         """
         if node.agent is None:
             return
-        client = self.clients.get(agent_of(node.agent))
+        client = self.clients.get(agent_name(node.agent))
         if client is None:
             return
         await client.cancel(task_id)
 
 
-__all__ = ["ControlNodeRuntime", "agent_of"]
+__all__ = ["ControlNodeRuntime"]

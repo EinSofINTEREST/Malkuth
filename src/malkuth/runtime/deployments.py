@@ -30,6 +30,7 @@ import structlog
 from malkuth.access.client import ACCESS_URL_ENV
 from malkuth.access.registry import ACCESS_CREDENTIAL_ENV
 from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
+from malkuth.core.manifest import agent_name
 from malkuth.protocols.mcp.transport import MCP_PROXY_URL_ENV
 from malkuth.runtime.images import image_tag
 from malkuth.runtime.launcher import LaunchedAgent, MemoryEndpoint
@@ -260,10 +261,6 @@ def _row(row: sqlite3.Row) -> DeploymentRecord:
         a2a_secret=row["a2a_secret"],
         declared=tuple(json.loads(row["declared"])),
     )
-
-
-def _agent_of(ref: str) -> str:
-    return ref.split("/", 1)[1].split("@", 1)[0]
 
 
 DECLARATION_MOUNT_PATH = "/app/declaration"
@@ -665,7 +662,7 @@ class DeploymentManager:
         for node in topology.spec.nodes:
             if node.agent is None:
                 continue
-            name = _agent_of(node.agent)
+            name = agent_name(node.agent)
             if name not in seen:
                 seen[name] = self.catalog.agent(name)
         return list(seen.values())
@@ -686,7 +683,7 @@ class DeploymentManager:
         이미 그 포트로 굳어 있다.
         """
         agent_of_node = {
-            node.id: _agent_of(node.agent) for node in topology.spec.nodes if node.agent
+            node.id: agent_name(node.agent) for node in topology.spec.nodes if node.agent
         }
         edges = [
             (agent_of_node[c.caller], agent_of_node[c.callee])

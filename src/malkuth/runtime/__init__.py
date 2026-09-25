@@ -13,7 +13,6 @@ from malkuth.runtime.launcher import AgentLauncher, LaunchedAgent
 from malkuth.runtime.lifecycle import (
     AgentLifecycle,
     AgentState,
-    ReplicaRouter,
     RestartPolicy,
 )
 from malkuth.runtime.quota import (
@@ -49,7 +48,6 @@ __all__ = [
     "ContainerSpec",
     "ControlClient",
     "PortBinding",
-    "ReplicaRouter",
     "ResolvedSecret",
     "ResourceTotals",
     "RestartPolicy",

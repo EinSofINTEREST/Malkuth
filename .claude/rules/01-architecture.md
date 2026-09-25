@@ -356,15 +356,14 @@ TypeSafe 의 Jev 이지만, 시스템은 Jev 가 아니라 **`DecisionModel` 계
 어댑터 하나로 바뀐다.
 
 ```
-            ┌──────────────── 에이전트 컨테이너 (agentd) ────────────────┐
-            │                                                          │
-            │   LLM 경로  ──▶ promptset ▶ model ▶ tools ▶ output         │
-            │      ▲                                                    │
-            │      │ uncertain / unavailable → 원래 경로로               │
-            │      │                                                    │
-            │   결정 모델 ──▶ 회상 필터 · 입력 판별 · 결정 노드 · 도구 게이트 │
-            │      │  (DecisionModel 계약 — decisionset 의 질문·구간)     │
-            └──────┼───────────────────────────────────────────────────┘
+            ┌─────────────────── 에이전트 컨테이너 (agentd) ────────────────────┐
+            │   LLM 경로  ──▶ promptset ▶ model ▶ tools ▶ output                │
+            │      ▲                                                            │
+            │      │ uncertain / unavailable → 원래 경로로                      │
+            │      │                                                            │
+            │   결정 모델 ──▶ 회상 필터 · 입력 판별 · 결정 노드 · 도구 게이트   │
+            │      │  (DecisionModel 계약 — decisionset 의 질문·구간)           │
+            └──────┼────────────────────────────────────────────────────────────┘
                    ▼
             Egress Proxy ──▶ decision provider API (Jev …) — 자격증명은 프록시가 주입
 ```

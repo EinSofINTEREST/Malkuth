@@ -127,7 +127,7 @@ spec:
       keep_kinds: [fact, summary]
       importance:                # 선택 — 원문 유지 vs 요약을 결정 모델의 등급으로 (01 Decision Models 쓰임 5)
         question: decisionsets/memory-curation@0.1.0#importance   # rating — 에이전트 밖의 모듈이라 전체 ref
-        keep_from: high          # 이 등급 이상(act)이면 원문 유지. uncertain/unavailable 은 저장된 importance 로
+                                 # act(질문의 act_level 이상)면 원문 유지. uncertain/unavailable 은 저장된 importance 로
 
   recall:                        # 자동 주입 기본값 (에이전트 manifest 로 override 가능)
     auto: true
@@ -318,8 +318,8 @@ agentd 가 태스크 프롬프트를 구성할 때:
    - 원본은 summary 의 `source` 로 추적 가능하게 archive 후 TTL 삭제
 3. **Importance 반영**: compaction 시 `importance` 높은 항목은 원문 유지 우선.
    memoryset 이 `compaction.importance` 를 선언하면 유지보수 그래프의 에이전트가 항목마다
-   결정 모델에 등급(`rating`)을 묻고, `keep_from` 등급 이상이 `act` 면 저장된 `importance` 대신
-   그 판정으로 원문을 유지한다. `uncertain` / `unavailable` 은 저장된 `importance` 로 —
+   결정 모델에 등급(`rating`)을 묻고, 판정이 `act`(질문의 `act_level` 이상)면 저장된 `importance`
+   대신 그 판정으로 원문을 유지한다. `uncertain` / `unavailable` 은 저장된 `importance` 로 —
    결정 모델이 없어도 compaction 은 같은 규칙으로 돈다. 요약문은 여전히 LLM 이 쓴다
 4. **Service run 필수**: 상주 그래프의 run scope 는 compaction 없이는 무한 성장 —
    service 그래프가 부착하는 run scope memoryset 은 compaction 선언 필수 (배포 검증)

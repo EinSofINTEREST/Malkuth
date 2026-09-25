@@ -202,3 +202,32 @@ def test_a_failure_while_assembling_the_app_closes_the_sessions(
         agentd.main()
 
     assert stdio.terminated == 1
+
+
+async def test_shutdown_closes_the_memory_client_too():
+    """열린 Memory Service 커넥션을 두고 끝내지 않는다 (#321)."""
+    from types import SimpleNamespace
+
+    closed = []
+
+    class Memory:
+        async def aclose(self):
+            closed.append("memory")
+
+    executor = SimpleNamespace(
+        binding=SimpleNamespace(tools=SimpleNamespace(mcp=None, memory=Memory()))
+    )
+
+    await agentd._close_wiring(executor)
+
+    assert closed == ["memory"]
+
+
+async def test_shutdown_without_memory_wiring_is_quiet():
+    from types import SimpleNamespace
+
+    executor = SimpleNamespace(
+        binding=SimpleNamespace(tools=SimpleNamespace(mcp=None, memory=None))
+    )
+
+    await agentd._close_wiring(executor)

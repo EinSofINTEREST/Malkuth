@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -54,10 +54,28 @@ class HttpMemoryAccess:
     token: str
     client: httpx.AsyncClient | None = None
     timeout_s: float = DEFAULT_TIMEOUT_S
+    _owned: httpx.AsyncClient | None = field(default=None, init=False, repr=False)
 
     def _http(self) -> httpx.AsyncClient:
-        """요청에 쓸 클라이언트 — 주입하지 않으면 매 호출마다 만든다."""
-        return self.client or httpx.AsyncClient(timeout=self.timeout_s)
+        """요청에 쓸 클라이언트 — 주입하지 않으면 **하나를 만들어 계속 쓴다**.
+
+        요청마다 만들고 닫으면 auto-recall 과 ``memory_search`` 마다 커넥션을 새로 맺는다
+        (#321). 만든 것은 이 인스턴스가 소유하고 :meth:`aclose` 가 닫는다.
+        """
+        if self.client is not None:
+            return self.client
+        if self._owned is None:
+            self._owned = httpx.AsyncClient(timeout=self.timeout_s)
+        return self._owned
+
+    async def aclose(self) -> None:
+        """Close the client this instance created — an injected client stays with its owner.
+
+        스스로 만든 클라이언트만 닫습니다. 주입된 클라이언트는 주입한 쪽이 닫습니다.
+        """
+        if self._owned is not None:
+            await self._owned.aclose()
+            self._owned = None
 
     async def _request(self, method: str, path: str, payload: dict[str, Any] | None = None) -> Any:
         """서비스에 요청하고 실패를 구조화 에러로 옮긴다.
@@ -65,7 +83,6 @@ class HttpMemoryAccess:
         모든 호출이 이 하나를 지납니다 — 메서드마다 따로 변환하면 한쪽이
         빠져 같은 장애가 어떤 창구를 썼는지에 따라 다른 타입으로 나옵니다.
         """
-        owned = self.client is None
         http = self._http()
         try:
             response = await http.request(
@@ -82,9 +99,6 @@ class HttpMemoryAccess:
                 retryable=True,
                 details={"cause": type(err).__name__},
             ) from err
-        finally:
-            if owned:
-                await http.aclose()
 
         if response.status_code >= 400:
             raise _service_error(response.status_code, _detail(response))

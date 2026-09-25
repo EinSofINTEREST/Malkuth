@@ -162,6 +162,33 @@ async def test_conditional_edge_skips_node_when_false():
     assert runtime.invoked == ["planner"]
 
 
+@pytest.mark.parametrize(
+    ("needs_research", "expected"), [(False, ["planner"]), (True, ["planner", "researcher"])]
+)
+async def test_a_declarative_condition_routes_like_the_function_it_replaces(
+    needs_research, expected
+):
+    """YAML 안의 선언식만으로 분기한다 — 조건 함수를 src/ 에 더하지 않는다 (#316)."""
+    topology = make_mission(
+        nodes=conditional_topology().model_dump(by_alias=True)["spec"]["nodes"],
+        edges=[
+            {"from": "START", "to": "planner"},
+            {"from": "planner", "to": "researcher", "condition": "state.needs_research"},
+            {"from": "planner", "to": "END", "condition": "not state.needs_research"},
+            {"from": "researcher", "to": "END"},
+        ],
+    )
+    runtime = (
+        FakeRuntime()
+        .script("planner", output={"needs_research": needs_research})
+        .script("researcher", output={"findings": ["f"]})
+    )
+
+    await build_graph(topology, runtime).ainvoke({"query": "q", "_run_id": "run-1"})
+
+    assert runtime.invoked == expected
+
+
 async def test_conditional_edge_follows_node_when_true():
     runtime = (
         FakeRuntime()

@@ -100,6 +100,36 @@ Memoryset 은 memory space 의 정책을 고정합니다: scope (`run | local | 
   state 에 두 분기를 합치는 규칙이 없어 run 이 도중에 죽는다. 대신 edge 에 조건을 준다 — 조건
   edge 옆의 조건 없는 edge 하나는 기본 경로다
 
+### YAML 안의 state 와 조건
+
+새 그래프에 코드가 필요 없다. state 필드를 선언하고 조건은 식으로 쓴다:
+
+```yaml
+spec:
+  state:
+    fields:
+      query: {type: string, required: true}
+      plan: {type: string}
+      needs_research: {type: boolean, default: true}
+      findings: {type: array}
+  edges:
+    - {from: planner, to: researcher, condition: state.needs_research}
+    - {from: planner, to: END, condition: not state.needs_research}
+```
+
+- **필드 타입**: `string`, `integer`, `number`, `boolean`, `array`, `object`. `required: true`
+  가 아니면 선택 필드이고, `default` 없는 선택 필드는 비어 있는 채(`array`, `object`) 또는
+  null 로 시작한다. `_` 로 시작하는 이름은 프레임워크 예약이다.
+- **조건**은 state 만 읽는다: `state.<field>` (중첩 값은 `.key`), 리터럴(`true`, `false`,
+  `null`, 숫자, 문자열, `[...]`), 비교(`==`, `!=`, `<`, `<=`, `>`, `>=`, `in`, `not in`),
+  `and` / `or` / `not`. 값 하나만 쓰면 참/거짓으로 읽는다 — 빈 목록·`0`·`null` 은 거짓이다.
+  함수 호출과 `state` 밖의 것은 그래프를 읽을 때 거부된다 (`GRAPH_001`). `null < 3` 처럼
+  비교할 수 없는 값을 비교하면 다른 가지로 조용히 넘어가지 않고 run 이 실패한다
+  (`GRAPH_003`).
+- **Deprecated**: `state.schema` 와 import ref 로 쓴 조건
+  (`malkuth.graphs.conditions:needs_research`) 은 한 버전 동안 그대로 동작한다. 가리킬 수
+  있는 곳은 `malkuth.graphs` 뿐이고, 검증이 import ref 조건마다 경고를 남긴다.
+
 ## 그룹
 
 그룹은 멤버 에이전트의 리소스(quota, secrets, 그룹 메모리)를 스코프합니다.

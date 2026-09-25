@@ -13,8 +13,10 @@ import importlib
 from enum import StrEnum
 from typing import TYPE_CHECKING, Annotated, Any, Literal, Protocol
 
+import structlog
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from malkuth.core.conditions import Predicate, is_import_ref, parse_condition
 from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
 from malkuth.core.manifest import AgentName, MemorySpec, SemVer
 
@@ -30,6 +32,8 @@ DEFAULT_IDLE_MIN_DELAY_S = 30.0
 DEFAULT_IDLE_MAX_DELAY_S = 600.0
 
 _IMPORT_REF_SEPARATOR = ":"
+
+log = structlog.get_logger(__name__)
 
 
 class GraphMode(StrEnum):
@@ -115,7 +119,8 @@ class NodeSpec(BaseModel):
 class EdgeSpec(BaseModel):
     """A directed edge, optionally conditional.
 
-    방향 간선. ``condition`` 이 있으면 조건부 라우팅이다.
+    방향 간선. ``condition`` 이 있으면 조건부 라우팅이다 — 선언식(``state.approved``) 이거나,
+    deprecated 인 조건 함수 import ref(``malkuth.graphs.conditions:draft_approved``) 다.
     """
 
     model_config = ConfigDict(frozen=True, populate_by_name=True)
@@ -124,6 +129,17 @@ class EdgeSpec(BaseModel):
     target: str = Field(alias="to")
     condition: str | None = None
     max_iterations: int | None = None
+
+    @field_validator("condition")
+    @classmethod
+    def _parsable_condition(cls, value: str | None) -> str | None:
+        """선언식은 읽는 시점에 문법을 본다 — import ref 의 해석은 배포 검증이 한다."""
+        if value is not None and not is_import_ref(value):
+            try:
+                parse_condition(value)
+            except MalkuthError as err:
+                raise ValueError(err.message) from err
+        return value
 
     @field_validator("max_iterations")
     @classmethod
@@ -210,16 +226,56 @@ class ServiceSpec(BaseModel):
         return value
 
 
-class StateSpec(BaseModel):
-    """Graph state schema binding.
+StateFieldType = Literal["string", "integer", "number", "boolean", "array", "object"]
 
-    그래프 state 스키마 바인딩. ``schema`` 는 pydantic 모델 import ref 다.
+
+class StateField(BaseModel):
+    """One state field declared inline in the graph.
+
+    그래프 YAML 안에 선언한 state 필드 하나 — promptset 변수 선언과 같은 어휘다.
     """
 
     model_config = ConfigDict(frozen=True)
 
-    schema_ref: str = Field(alias="schema")
+    type: StateFieldType
+    required: bool = False
+    default: Any = None
+    description: str | None = None
+
+    @model_validator(mode="after")
+    def _required_has_no_default(self) -> StateField:
+        """기본값이 있는 필수 필드는 필수가 아니다 — 둘 중 무엇을 뜻했는지 모호하다."""
+        if self.required and self.default is not None:
+            raise ValueError("a required state field cannot declare a default")
+        return self
+
+
+class StateSpec(BaseModel):
+    """Graph state schema binding.
+
+    그래프 state 스키마 바인딩 — 둘 중 하나로 선언한다:
+
+    - ``fields``: 그래프 YAML 안의 필드 선언. ``src/`` 를 고치지 않고 새 그래프를 만든다 (#316)
+    - ``schema``: ``malkuth.graphs`` 의 pydantic 모델 import ref (deprecated — 한 버전 유지)
+    """
+
+    model_config = ConfigDict(frozen=True, populate_by_name=True)
+
+    schema_ref: str | None = Field(default=None, alias="schema")
+    declared_fields: dict[str, StateField] | None = Field(default=None, alias="fields")
     checkpointer: str = "default"
+
+    @model_validator(mode="after")
+    def _exactly_one_schema(self) -> StateSpec:
+        if (self.schema_ref is None) == (self.declared_fields is None):
+            raise ValueError("state declares exactly one of 'fields' or 'schema'")
+        for name in self.declared_fields or {}:
+            # _run_id / _iterations 같은 예약 채널과 겹치면 프레임워크 값이 덮인다
+            if not name.isidentifier() or name.startswith("_"):
+                raise ValueError(
+                    f"state field name must be an identifier not starting with '_': {name}"
+                )
+        return self
 
 
 class GraphMetadata(BaseModel):
@@ -325,6 +381,14 @@ ImportRef = Annotated[str, Field(pattern=r"^[\w.]+:[\w.]+$")]
 """Importable reference — ``module.path:attribute``."""
 
 
+IMPORTABLE_PACKAGE = "malkuth.graphs"
+"""그래프 선언이 import 할 수 있는 유일한 패키지 — state 모델과 조건 함수를 두는 곳."""
+
+
+def _importable(module_path: str) -> bool:
+    return module_path == IMPORTABLE_PACKAGE or module_path.startswith(f"{IMPORTABLE_PACKAGE}.")
+
+
 def resolve_import_ref(ref: str) -> Any:
     """Import an object from a ``module:attribute`` reference.
 
@@ -343,6 +407,12 @@ def resolve_import_ref(ref: str) -> Any:
         raise _topology_error(f"invalid import ref: {ref}", ref=ref)
 
     module_path, _, attribute = ref.partition(_IMPORT_REF_SEPARATOR)
+    if not _importable(module_path):
+        # 검증 단계에서 import 하는 순간 모듈 최상위 코드가 돈다 — 저장된 YAML 문자열 하나로
+        # 임의 모듈을 실행시킬 수 없게, 그래프 계약을 두는 패키지만 연다 (#316)
+        raise _topology_error(
+            f"import ref outside {IMPORTABLE_PACKAGE}: {ref}", ref=ref, allowed=IMPORTABLE_PACKAGE
+        )
     try:
         module = importlib.import_module(module_path)
     except (ImportError, ValueError) as err:
@@ -517,11 +587,34 @@ def _check_connections(topology: GraphTopology) -> None:
                 )
 
 
+def resolve_condition(condition: str) -> Predicate:
+    """Turn an edge condition into a predicate over the graph state.
+
+    edge 조건을 state 판정 함수로 만듭니다 — 선언식이면 파싱하고, import ref 면 import 합니다.
+
+    Raises:
+        MalkuthError: GRAPH/``GRAPH_001`` if it can be neither parsed nor imported.
+    """
+    if is_import_ref(condition):
+        function: Predicate = resolve_import_ref(condition)
+        return function
+    return parse_condition(condition)
+
+
 def _check_conditions(topology: GraphTopology) -> None:
-    """conditional edge 의 조건 함수가 import 가능해야 한다."""
+    """conditional edge 의 조건이 판정 함수가 되어야 한다 — import ref 는 deprecated 로 알린다."""
     for edge in topology.spec.edges:
-        if edge.condition is not None:
-            resolve_import_ref(edge.condition)
+        if edge.condition is None:
+            continue
+        resolve_condition(edge.condition)
+        if is_import_ref(edge.condition):
+            log.warning(
+                "graph condition import ref is deprecated",
+                graph=topology.name,
+                edge=f"{edge.source}->{edge.target}",
+                condition=edge.condition,
+                replacement="a declarative condition such as state.<field>",
+            )
 
 
 def _check_input_maps(topology: GraphTopology, state_fields: frozenset[str]) -> None:

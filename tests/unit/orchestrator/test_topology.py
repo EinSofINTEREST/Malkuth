@@ -391,7 +391,7 @@ def test_unimportable_condition_is_rejected():
     topology = make_mission(
         edges=[
             {"from": "START", "to": "planner"},
-            {"from": "planner", "to": "researcher", "condition": "no.such.module:fn"},
+            {"from": "planner", "to": "researcher", "condition": "malkuth.graphs.nope:fn"},
             {"from": "researcher", "to": "END"},
         ]
     )
@@ -505,6 +505,56 @@ def test_subgraph_node_ref():
     review = topology.node("review")
     assert review.is_subgraph is True
     assert review.ref == "graphs/sub-review@1.0.0"
+
+
+@pytest.mark.parametrize(
+    "ref",
+    ["os:system", "subprocess:run", "malkuth.graphsx.evil:fn", "tests.fixtures.anything:fn"],
+)
+def test_an_import_ref_outside_the_graphs_package_is_refused_before_import(ref, monkeypatch):
+    """검증이 import 하는 순간 모듈 최상위 코드가 돈다 — YAML 문자열 하나로 돌면 안 된다."""
+    imported = []
+    monkeypatch.setattr(
+        "malkuth.orchestrator.topology.importlib.import_module", lambda name: imported.append(name)
+    )
+
+    with pytest.raises(MalkuthError) as exc_info:
+        resolve_import_ref(ref)
+
+    assert_graph_001(exc_info)
+    assert imported == []
+
+
+def test_a_declarative_condition_outside_the_grammar_is_refused_when_the_graph_is_read():
+    with pytest.raises(ValidationError, match="invalid condition"):
+        make_mission(
+            edges=[
+                {"from": "START", "to": "planner"},
+                {"from": "planner", "to": "researcher", "condition": "len(state.plan) > 0"},
+                {"from": "researcher", "to": "END"},
+            ]
+        )
+
+
+def test_a_condition_import_ref_is_still_honoured_but_flagged_deprecated(monkeypatch):
+    """한 버전은 그대로 동작한다 — 대신 운영자가 옮길 곳을 알게 한다."""
+    warnings = []
+    monkeypatch.setattr(
+        "malkuth.orchestrator.topology.log.warning", lambda event, **fields: warnings.append(fields)
+    )
+
+    validate_topology(
+        make_mission(
+            edges=[
+                {"from": "START", "to": "planner"},
+                {"from": "planner", "to": "researcher", "condition": condition_ref()},
+                {"from": "planner", "to": "END"},
+                {"from": "researcher", "to": "END"},
+            ]
+        )
+    )
+
+    assert [w["condition"] for w in warnings] == [condition_ref()]
 
 
 def test_import_ref_with_empty_module_is_wrapped_as_graph_001():

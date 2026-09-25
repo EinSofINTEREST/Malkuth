@@ -47,7 +47,10 @@
             <select name="mode"><option value="mission">mission</option><option value="service">service</option></select>
           </label>
           <label>목표 <input name="goal" required /></label>
-          <label>state schema <input name="state_schema" required /></label>
+          <label>state 필드 (JSON)
+            <textarea name="state_fields" rows="4" placeholder='{"query": {"type": "string", "required": true}, "plan": {"type": "string"}}'></textarea>
+          </label>
+          <label>state schema (deprecated) <input name="state_schema" placeholder="malkuth.graphs.schemas:ResearchState" /></label>
         </fieldset>
         <fieldset id="graph-service" hidden disabled>
           <legend>service idle 정책</legend>

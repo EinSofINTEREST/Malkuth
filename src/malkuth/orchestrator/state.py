@@ -6,12 +6,15 @@
 
 from __future__ import annotations
 
+import copy
+import json
+from collections.abc import Callable, Mapping
 from typing import Any
 
-from pydantic import BaseModel, TypeAdapter, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, create_model
 
 from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
-from malkuth.orchestrator.topology import NodeSpec, resolve_import_ref
+from malkuth.orchestrator.topology import NodeSpec, StateField, StateSpec, resolve_import_ref
 
 _STATE_PREFIX = "state."
 _OUTPUT_PREFIX = "output."
@@ -46,6 +49,69 @@ def resolve_state_schema(ref: str) -> type[BaseModel]:
     if not (isinstance(target, type) and issubclass(target, BaseModel)):
         raise _state_error(f"state schema is not a pydantic model: {ref}", ref=ref)
     return target
+
+
+_FIELD_TYPES: dict[str, Any] = {
+    "string": str,
+    "integer": int,
+    "number": float,
+    "boolean": bool,
+    "array": list[Any],
+    "object": dict[str, Any],
+}
+_EMPTY_FACTORIES: dict[str, Callable[[], Any]] = {"array": list, "object": dict}
+_INLINE_MODELS: dict[str, type[BaseModel]] = {}
+
+
+def resolve_graph_state(state: StateSpec, *, graph: str = "graph") -> type[BaseModel]:
+    """The pydantic model for a graph's state, whichever way it was declared.
+
+    그래프 state 의 pydantic 모델 — 인라인 ``fields`` 면 만들고, ``schema`` 면 import 합니다.
+
+    Raises:
+        MalkuthError: GRAPH/``GRAPH_001`` or ``GRAPH_003`` from :func:`resolve_state_schema`.
+    """
+    if state.declared_fields is None:
+        assert state.schema_ref is not None  # noqa: S101 — StateSpec 이 둘 중 하나를 강제
+        return resolve_state_schema(state.schema_ref)
+    return inline_state_model(graph, state.declared_fields)
+
+
+def inline_state_model(graph: str, fields: Mapping[str, StateField]) -> type[BaseModel]:
+    """YAML 필드 선언으로 state 모델을 만든다 — 같은 선언이면 같은 클래스를 돌려준다.
+
+    레포의 state 모델과 같은 규칙이다: 불변(frozen), 목록·객체는 비어 있는 채로 시작한다.
+    """
+    key = json.dumps(
+        [graph, {name: spec.model_dump(mode="json") for name, spec in fields.items()}],
+        sort_keys=True,
+    )
+    cached = _INLINE_MODELS.get(key)
+    if cached is not None:
+        return cached
+    definitions: dict[str, Any] = {name: _field_definition(spec) for name, spec in fields.items()}
+    model: type[BaseModel] = create_model(
+        f"{_class_name(graph)}State", __config__=ConfigDict(frozen=True), **definitions
+    )
+    _INLINE_MODELS[key] = model
+    return model
+
+
+def _field_definition(spec: StateField) -> tuple[Any, Any]:
+    kind = _FIELD_TYPES[spec.type]
+    description = spec.description
+    if spec.required:
+        return kind, Field(..., description=description)
+    if spec.default is not None:
+        default = spec.default
+        return kind, Field(default_factory=lambda: copy.deepcopy(default), description=description)
+    if spec.type in _EMPTY_FACTORIES:
+        return kind, Field(default_factory=_EMPTY_FACTORIES[spec.type], description=description)
+    return kind | None, Field(default=None, description=description)
+
+
+def _class_name(graph: str) -> str:
+    return "".join(part.capitalize() for part in graph.replace("_", "-").split("-")) or "Graph"
 
 
 def state_fields(schema: type[BaseModel]) -> frozenset[str]:

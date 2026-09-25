@@ -10,6 +10,9 @@
 - **Resource Model**: 에이전트 리소스는 **전역(global) / 소속 그룹(group) / 로컬(local)**
   3계층 스코프로 관리
 - **Execution Model**: 달성형(**mission**) run 과 무한 반복형(**service**) run 모두 지원
+- **Judgment Model**: 생성은 LLM 이, **타입이 정해진 판정**(예/아니오·등급·선택)은 결정 모델이
+  맡는다 — 결정 모델은 LLM 경로 위의 가속기·필터이며 없어도 시스템은 같은 답에 이른다
+  (Decision Models 절)
 - **Design Philosophy**: Isolation, composability, explicit contracts — everything is a module
 
 ### Architectural Layers
@@ -32,7 +35,7 @@
 ├──────────────────────────────────────────────┤
 │  Module Layer                                │
 │  (Skillsets, Promptsets, Memorysets,         │
-│   Graph modules, Module registry)            │
+│   Decisionsets, Graph modules, Registry)     │
 ├──────────────────────────────────────────────┤
 │  Storage & Observability Layer               │
 │  (Checkpoints, Memory store + index,         │
@@ -70,7 +73,7 @@
 
 5. **Module Layer**
    - Skillsets (tool bundles), promptsets (prompt bundles), memorysets (memory
-     policies), graph modules
+     policies), decisionsets (typed questions + bands), graph modules
    - Versioned, independently deployable, swappable at agent restart
 
 6. **Storage & Observability Layer**
@@ -109,6 +112,13 @@
 - Agent failure MUST NOT corrupt graph state (checkpoint before/after node execution)
 - Unhealthy agents are circuit-broken and restarted by the runtime
 - All external calls have timeouts and typed errors
+
+### 6. Decide Cheaply, Generate Deliberately
+- 값 집합이 미리 정해진 판정은 **결정 모델**에, 산출물·설명·계획은 **LLM** 에 맡긴다
+- 결정 모델의 답은 항상 **값 + 보정 확률**이고, 확률은 선언된 구간(act / uncertain / reject)으로
+  읽는다 — 값만 보고 행동하지 않는다
+- 결정 모델이 없거나 `uncertain` 이면 **원래 경로(LLM 또는 기본 동작)** 로 간다. 결정 모델은
+  정확성이 아니라 비용·지연·노이즈를 줄이는 층이다
 
 ## Interaction Model — 동등한 에이전트, 세 가지 접근
 
@@ -334,6 +344,89 @@ A2A 에서 피호출자는 통제받는 쪽이 아니라 **보호받는 쪽**이
 - env 로 주입된 비밀값 — 회수하려면 재배포한다. 프록시가 종단하는 서비스의 자격증명은
   env 가 아니라 프록시에서 주입한다 (02 Secrets Injection)
 
+## Decision Models — 판정은 결정 모델로, 생성은 LLM 으로
+
+LLM 은 생성·도구 호출·다단계 계획에 쓴다. 그러나 시스템 곳곳에는 답이 **미리 정한 값 중 하나**인
+판정이 있다 — 이 기억이 지금 태스크와 관련 있는가, 이 도구 결과에 지시문이 섞였는가, 초안이
+기준을 넘는가. 이런 판정에 생성 모델을 돌리면 느리고 비싸며, 무엇보다 확률이 보정되지 않는다.
+
+**결정 모델**(decision model)은 텍스트 state 와 타입이 정해진 질문을 받아, 선언된 값 중 하나를
+**보정된 확률**과 함께 돌려준다. 생성·도구 호출·대화·정확한 계산은 하지 못한다. 첫 provider 는
+TypeSafe 의 Jev 이지만, 시스템은 Jev 가 아니라 **`DecisionModel` 계약**에 의존한다 — provider 는
+어댑터 하나로 바뀐다.
+
+```
+            ┌──────────────── 에이전트 컨테이너 (agentd) ────────────────┐
+            │                                                          │
+            │   LLM 경로  ──▶ promptset ▶ model ▶ tools ▶ output         │
+            │      ▲                                                    │
+            │      │ uncertain / unavailable → 원래 경로로               │
+            │      │                                                    │
+            │   결정 모델 ──▶ 회상 필터 · 입력 판별 · 결정 노드 · 도구 게이트 │
+            │      │  (DecisionModel 계약 — decisionset 의 질문·구간)     │
+            └──────┼───────────────────────────────────────────────────┘
+                   ▼
+            Egress Proxy ──▶ decision provider API (Jev …) — 자격증명은 프록시가 주입
+```
+
+### 계약
+
+| 질문 종류 | 답 | 확률 |
+|---|---|---|
+| `predicate` | 명제가 참인가 (`true` / `false`) | 참일 확률 하나 |
+| `rating` | 서열 등급 하나 (최대 10단계) | 등급별 분포 + 기대 등급 |
+| `choice` | 보기 하나 | 보기별 분포 |
+
+결과는 `Decision(value, probability, distribution, band)` 이고, `band` 는 decisionset 이 선언한
+구간으로 확률을 읽은 것이다:
+
+| band | 뜻 | 기본 동작 |
+|---|---|---|
+| `act` | 확률이 `act_at` 이상 — 결정대로 행동한다 | 필터 통과·게이트 허용·분기 확정 |
+| `uncertain` | 그 사이 — 결정 모델이 답하지 못한 것 | **원래 경로** (LLM 판단 / 기본 동작) |
+| `reject` | 확률이 `reject_at` 이하 — 반대로 행동한다 | 필터 탈락·게이트 차단·분기 확정 |
+
+### 원칙
+
+1. **가속기이지 강제 수단이 아니다**: 결정은 에이전트 **컨테이너 안에서** 만든다. 01 Access
+   Control 의 기준으로 컨테이너 안의 검사는 강제가 아니므로, 도구 게이트·입력 판별은 편의이자
+   신호다. 권한은 여전히 레지스트리와 강제 지점이 쥔다
+2. **없어도 같은 답에 이른다**: provider 가 없거나 닿지 않으면 `uncertain` 과 같이 취급해
+   원래 경로로 간다. 결정 모델을 빼도 정확성은 같고 비용·지연·노이즈만 달라져야 한다 —
+   그렇지 않은 쓰임은 결정 모델의 자리가 아니다
+3. **결정은 기록된다**: 결정 노드의 답은 graph state 에, 회상 필터·compaction 의 답은 로그와
+   메트릭에 남는다. **edge 조건 안에서 결정 모델을 부르지 않는다** — checkpoint 에서 재개할 때
+   다시 판정하면 같은 run 이 다른 길로 간다
+4. **질문은 모듈이다**: 질문 문구·보기·등급·구간은 `decisionsets/{name}@{version}` 으로 버전
+   고정한다 ([04-module-system.md](04-module-system.md)). 문구 수정은 version bump 이고, 구간은
+   라벨 데이터로 정한다 ([06-testing.md](06-testing.md))
+5. **외부 호출이다**: provider 는 호스팅 API 다. 모델 API 와 같이 egress proxy 가 base URL 로
+   종단하고 자격증명을 주입한다 ([03-protocol-integration.md](03-protocol-integration.md)).
+   state 로 보내는 텍스트(기억·도구 결과)가 외부로 나간다는 점을 선언으로 받아들인다
+6. **선택지는 적게**: provider 는 보기가 많을수록 정확도가 떨어진다. `choice` 는 한 자리 수의
+   보기로 두고, 그 이상은 계층화하거나 LLM 에 맡긴다
+
+### 쓰임 — 어디에 두는가
+
+| 쓰임 | 질문 종류 | 선언 위치 | `uncertain` 일 때 | 규정 |
+|---|---|---|---|---|
+| 회상 필터 — 검색 상위 k 가 지금 태스크와 관련 있는가 | predicate | manifest `spec.decision.recall_filter` | 유지 (주입) | [09](09-memory-context.md) |
+| 입력 판별 — 도구 결과·A2A 응답·기억에 지시문이 섞였는가 | predicate | manifest `spec.decision.input_screen` | 표시 없음 | [02](02-agent-implementation.md), [09](09-memory-context.md) |
+| 리뷰 1차 판정 — 초안이 기준을 넘는가 | rating / predicate | 그래프 decision 노드 | LLM 리뷰어로 | [04](04-module-system.md) |
+| 분기 판정 — 조건이 읽을 불리언·소수 선택지 | predicate / choice | 그래프 decision 노드 | 기본 edge 로 | [04](04-module-system.md) |
+| compaction 중요도 — 원문 유지 vs 요약 | rating | memoryset `compaction.importance` | 저장된 `importance` | [09](09-memory-context.md) |
+| 도구 게이트 — 부수효과 호출이 태스크 입력과 맞는가 | predicate | manifest `spec.decision.tool_gates` | 차단 + 사유 (설정) | [02](02-agent-implementation.md) |
+
+### 쓰지 않는 곳
+
+- **권한 에이전트**: 규칙만으로 결정한다 (`access/steward.py`, 결정 D1). 확장 상한·allowlist·
+  레지스트리 판정은 결정적이어야 한다
+- **실행 루프 본체**: 생성과 도구 호출은 LLM 의 일이다
+- **결정적 검증**: 토폴로지·manifest·state 스키마·에러 분류·idle backoff·health — 규칙이 정확하다
+- **기억 검색 자체**: 결정 모델은 임베더가 아니다. 인덱스가 찾고, 결정 모델은 그 위에서 거른다
+- **선택지가 많은 라우팅**: 에이전트가 늘수록 정확도가 떨어지고, 에이전트 간 우열을 두지 않는
+  원칙과도 어긋난다
+
 ## Current Implementation Status
 
 ### 📋 Planned (v0.1.0 — bootstrap)
@@ -351,7 +444,10 @@ A2A 에서 피호출자는 통제받는 쪽이 아니라 **보호받는 쪽**이
   - Per-agent MCP client + server declaration
   - Per-agent A2A server + connection allowlist
 - **Module System**
-  - Skillset / promptset / memoryset loaders + local registry
+  - Skillset / promptset / memoryset / decisionset loaders + local registry
+- **Decision Models**
+  - `DecisionModel` 계약 + Jev provider 어댑터 + 판정 구간
+  - 회상 필터 · 입력 판별 · 그래프 decision 노드 · 도구 게이트 · compaction 중요도
 - **Memory System**
   - Memory Service (space + access token) / 하이브리드 인덱스 (vector + lexical)
   - Auto-recall + `memory_search` tool
@@ -381,6 +477,7 @@ malkuth/
 │       │   ├── agent.py         # BaseAgent, AgentContext, TaskRequest/Result
 │       │   ├── manifest.py      # AgentManifest 스키마 (pydantic)
 │       │   ├── skill.py         # @skill 데코레이터 + SkillContext
+│       │   ├── decision.py      # DecisionModel 계약, Question/Decision, 판정 구간(Band)
 │       │   ├── errors.py        # MalkuthError + ErrorCategory + 코드 상수
 │       │   └── events.py        # TaskEvent, 스트리밍 이벤트 모델
 │       │
@@ -404,7 +501,13 @@ malkuth/
 │       │   ├── skillset.py      # Skillset 스키마 + 로더
 │       │   ├── promptset.py     # Promptset 스키마 + 로더 (Jinja2)
 │       │   ├── memoryset.py     # Memoryset 스키마 (정책 선언)
+│       │   ├── decisionset.py   # Decisionset 스키마 + 로더 (질문·구간)
 │       │   └── registry.py      # 모듈 해석 (ref@version → 경로)
+│       │
+│       ├── decision/            # 결정 모델 — 계약 뒤의 provider 와 판정 (에이전트 컨테이너 안에서 실행)
+│       │   ├── bands.py         # 확률 → act/uncertain/reject
+│       │   ├── uses.py          # 회상 필터 · 입력 판별 · 도구 게이트 · 노드 판정 (계약만 쓴다)
+│       │   └── providers/       # jev.py (첫 provider), fake.py (테스트 대역)
 │       │
 │       ├── memory/              # Memory Service (컨텍스트 메모리 + 인덱스)
 │       │   ├── service.py       # space 관리 + access 토큰 검증 API
@@ -439,7 +542,8 @@ malkuth/
 ├── modules/                     # 배포 가능한 모듈 저장소 (로컬 레지스트리)
 │   ├── skillsets/<name>/        # skillset.yaml + skills/
 │   ├── promptsets/<name>/       # promptset.yaml + templates/
-│   └── memorysets/<name>/       # memoryset.yaml (메모리 정책)
+│   ├── memorysets/<name>/       # memoryset.yaml (메모리 정책)
+│   └── decisionsets/<name>/     # decisionset.yaml (질문·보기·구간)
 │
 ├── graphs/                      # 그래프 토폴로지 정의
 │   └── <graph-name>.yaml
@@ -506,6 +610,12 @@ malkuth/
 - **A2A**: `a2a-sdk` (Agent2Agent protocol)
 - **MCP**: `mcp` (official Model Context Protocol Python SDK)
 
+### Models
+- **Generation**: Anthropic Messages API (`anthropic` SDK) — provider 재시도는 끄고 agentd 가 재시도
+- **Decision**: `DecisionModel` 계약 뒤의 provider — v0.1 은 TypeSafe Jev (호스팅 API, 가중치
+  비공개). SDK 가 아니라 HTTP 로 부른다 — 프록시가 종단하는 base URL 하나면 충분하고, provider
+  SDK 의 자체 재시도·전송이 끼지 않는다
+
 ### Runtime
 - **Isolation**: Docker Engine 24+, `docker` Python SDK
 - **Agent Control API**: FastAPI + uvicorn (컨테이너 내부)
@@ -538,6 +648,7 @@ Client → Control Plane → Orchestrator(StateGraph)
                                                   ├── agentd (Control API)
                                                   ├── promptset render
                                                   ├── model call (LLM)
+                                                  ├── decision model (typed judgments)
                                                   ├── skillset tools
                                                   └── MCP servers (stdio/sidecar)
                               │
@@ -553,7 +664,8 @@ Client → Control Plane → Orchestrator(StateGraph)
 1. **Deploy**: Graph topology + agent manifests 검증 → 컨테이너 기동 → health 확인
 2. **Invoke**: 클라이언트가 run 제출 → orchestrator 가 initial state 구성
 3. **Node Execution**: orchestrator → runtime → 해당 agent 의 Control API `/invoke`
-4. **Tool Loop**: 에이전트 내부에서 모델 ↔ skillset/MCP tool 실행 루프
+4. **Tool Loop**: 에이전트 내부에서 모델 ↔ skillset/MCP tool 실행 루프 — 회상 필터·입력 판별·
+   도구 게이트는 이 안에서 결정 모델을 부른다. decision 노드는 루프 없이 결정 한 번으로 끝난다
 5. **Peer Call** (선택): 에이전트가 allowlist 내 peer 에이전트를 A2A 로 직접 호출
    (위임/질의 — 어느 쪽도 상위가 아님)
 6. **Checkpoint**: node 완료마다 state 저장 (실패 시 마지막 checkpoint 에서 재개)
@@ -569,7 +681,7 @@ Client → Control Plane → Orchestrator(StateGraph)
 | **A2A peer call** | 실행 중 peer 에이전트에게 위임/질의 (대등) | A2A protocol | 그래프 config 의 `connections` allowlist 에 선언된 방향만 허용 |
 | **Direct request** | 클라이언트 → 특정 에이전트 직접 요청 (인터랙티브 포함) | Control Plane → Agent Control API | 그래프 run 과 독립된 단독 태스크 — graph state 를 건드리지 않음 |
 | **Scoped memory** | group/global space 를 통한 지식 축적/공유 | Memory Service | memoryset 선언 + 소속 기반 접근 ([09-memory-context.md](09-memory-context.md)) |
-| **Egress** | 모델 API · 외부 HTTP · 원격 MCP 호출 | Egress Proxy | 에이전트는 외부 경로가 없다 — 모든 외부 호출은 프록시가 요청마다 판정 (Access Control) |
+| **Egress** | 모델 API · 결정 모델 API · 외부 HTTP · 원격 MCP 호출 | Egress Proxy | 에이전트는 외부 경로가 없다 — 모든 외부 호출은 프록시가 요청마다 판정 (Access Control) |
 
 Graph state 를 우회하는 사이드채널 (공유 파일, 공유 DB 테이블, 전역 큐) 은 금지.
 유일한 예외는 **선언된 group/global memory space** — 소속과 스코프로 접근이 검증되는
@@ -620,8 +732,16 @@ registry:
     skillsets: ./modules/skillsets
     promptsets: ./modules/promptsets
     memorysets: ./modules/memorysets
+    decisionsets: ./modules/decisionsets
     agents: ./agents
     graphs: ./graphs
+
+decision:
+  timeout_s: 5                  # 결정 호출 상한 — 판정은 생성보다 훨씬 빨라야 의미가 있다
+  providers:                    # provider 별 base URL — 프록시가 종단하고 자격증명을 주입한다
+    jev:
+      base_url: https://api.typesafe.ai
+      locales: [en]             # 검증된 언어만 — decisionset 의 locale 과 대조 (06 Calibration)
 
 memory:
   backend: sqlite               # sqlite (dev) | postgres (prod)
@@ -646,6 +766,10 @@ observability:
 6. Mode 별 토폴로지 규칙 충족 (mission: END 도달 / service: idle 정책 선언)
 7. A2A 포트 충돌이 없는가
 8. 그룹별 리소스 합계가 quota 이내인가, 전체 합계가 호스트 한도 내인가 (초과 시 경고/거부)
+9. 결정 모델 선언이 닫혀 있는가 — manifest·memoryset·그래프가 참조하는 decisionset ref 와
+   질문이 해석되고, 그 질문을 쓰는 에이전트가 `spec.decision.provider` 를 선언했으며, provider 가
+   decisionset 의 `locale` 을 지원하는가. 그래프 decision 노드의 `output_map` 이 `decision.` 키만
+   읽는가
 
 ## Scalability Considerations
 
@@ -689,3 +813,8 @@ observability:
 3. **Model API**
    - Provider rate limit 을 에이전트별 세마포어로 제어
    - 토큰 사용량 metric 수집 (`malkuth_model_tokens_total`)
+
+4. **Decision API**
+   - 호출 수와 구간 분포를 쓰임별로 수집 (`malkuth_decision_calls_total`,
+     `malkuth_decision_bands_total`) — `uncertain` 비율이 높으면 구간이나 질문이 잘못된 것이다
+   - 회상 필터는 태스크당 1회, 도구 게이트는 게이트된 호출당 1회 — 루프마다 부르지 않는다

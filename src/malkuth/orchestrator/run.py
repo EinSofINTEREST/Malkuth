@@ -297,6 +297,23 @@ class RunManager:
         return OrchestratorTelemetry(self._metrics, graph=handle.graph, mode=handle.mode)
 
 
+RESUMED_SUFFIX = ":resumed"
+"""재개한 service run 의 id 접미사 — 재개할 때마다 하나씩 붙는다."""
+
+
+def iteration_thread(run_id: str, iteration: int) -> str:
+    """service run 한 iteration 의 checkpoint thread — iteration 마다 새 thread 를 연다."""
+    return f"{run_id}:{iteration}"
+
+
+def run_generations(run_id: str) -> list[str]:
+    """재개로 이어진 run id 들 — 최근 것부터. ``x:resumed:resumed`` → 자신, ``x:resumed``, ``x``."""
+    generations = [run_id]
+    while generations[-1].endswith(RESUMED_SUFFIX):
+        generations.append(generations[-1].removesuffix(RESUMED_SUFFIX))
+    return generations
+
+
 class ServiceRunner:
     """Drives a service graph's perpetual iteration loop.
 
@@ -439,7 +456,7 @@ class ServiceRunner:
         실패하든 성공하든 iteration 은 진행한 것으로 센다 — 그래야 실패가 반복돼도
         ``max_iterations`` 경계가 유효하고, checkpoint thread 도 매번 새로 열린다.
         """
-        config = {"configurable": {"thread_id": f"{handle.run_id}:{handle.iteration}"}}
+        config = {"configurable": {"thread_id": iteration_thread(handle.run_id, handle.iteration)}}
         try:
             result = await self._graph.ainvoke(state, config)
         finally:

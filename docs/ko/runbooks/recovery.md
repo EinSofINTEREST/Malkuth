@@ -28,6 +28,9 @@ checkpoint 를 남기지 못하는 run 은 재개할 수 없다.
 3. 마지막 iteration checkpoint 에서 재개한다: `malkuth run resume <run_id>`.
 
 run 은 **다음** iteration 부터 이어진다 — 완료된 iteration 은 반복되지 않는다.
+state 는 control plane 이 재시작한 뒤라도 checkpointer 에서 읽는다: 마지막 iteration 이 끝났으면
+그 출력, 실패했으면 그 입력이다 (살아 있는 run 과 같이 실패한 회차의 부분 결과는 버린다).
+iteration checkpoint 를 남기지 않은 run 은 재개할 수 없다 (`STOR_002`) — 새 run 을 시작한다.
 
 ## Run 도중 노드 실패
 

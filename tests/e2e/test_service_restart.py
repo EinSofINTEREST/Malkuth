@@ -10,6 +10,7 @@ in-memory checkpointer 로는 넘길 수 없다 — 프로세스 밖에 state �
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -17,8 +18,9 @@ from typing import Any
 import pytest
 import yaml
 
+from malkuth.core.errors import ErrorCategory, ErrorCode, MalkuthError
 from malkuth.orchestrator.checkpoint import build_checkpointer, close_checkpointer
-from malkuth.orchestrator.run import RunManager
+from malkuth.orchestrator.run import RunManager, RunStatus
 from malkuth.orchestrator.runstore import SqliteRunStore
 from malkuth.orchestrator.submit import RunSubmitter
 from malkuth.orchestrator.topology import GraphTopology
@@ -36,7 +38,10 @@ from tests.e2e.test_stack import (
 pytestmark = pytest.mark.e2e
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-AGENT_PORTS = {"watcher": 18083, "classifier": 18082, "notifier": 18084}
+# **에이전트 이름**이 키다 — 노드 id(watcher/classifier/notifier)로 키를 만들면 런타임이
+# `agent_of(node.agent)` 로 클라이언트를 못 찾아 모든 노드가 GRAPH_002 로 실패한다. 회차만 세는
+# 검증은 그래도 통과해서 이 파일이 오래 그렇게 돌았다 (#310 에서 state 를 보자 드러남)
+AGENT_PORTS = {"researcher": 18083, "planner": 18082, "writer": 18084}
 CHECKPOINT_URL = "postgresql://malkuth:malkuth@127.0.0.1:15433/malkuth"
 
 
@@ -215,3 +220,45 @@ def test_the_checkpoint_store_is_declared_in_the_stack():
     assert "checkpoint-db" in compose["services"]
     volumes = compose["services"]["checkpoint-db"]["volumes"]
     assert any("checkpoint-data" in str(entry) for entry in volumes)
+
+
+class FailsAfterFirst:
+    """첫 iteration 은 실제 컨테이너로 보내고, 그 뒤로는 실패시켜 run 을 halted 로 만든다."""
+
+    def __init__(self, live: ControlNodeRuntime) -> None:
+        self.live = live
+        self.iterations = 0
+
+    async def invoke(self, node, task):
+        if node.id == "watcher":
+            self.iterations += 1
+        if self.iterations > 1:
+            raise MalkuthError(
+                category=ErrorCategory.GRAPH, code=ErrorCode.GRAPH_002, message="injected"
+            )
+        return await self.live.invoke(node, task)
+
+
+FEEDS = {"feeds": ["https://example.test/feed.xml"]}
+
+
+@requires_docker
+async def test_a_resumed_service_run_keeps_its_state_across_the_restart(process):
+    """빈 state 로 재개하면 watcher 가 피드 없이 불려 MOD_004 로 다시 멈춘다 (#310)."""
+    # 매번 새 id — checkpoint DB 에 남은 지난 실행의 thread 를 이어받으면 state 가 거기서 온다
+    run_id = f"e2e-state-{uuid.uuid4().hex[:8]}"
+    first = await process()
+    first.runtime = FailsAfterFirst(first.runtime)  # type: ignore[arg-type]
+    halted = await first.start_service(topology(), FEEDS, run_id=run_id, sleep=no_sleep)
+    await first.services[halted.run_id]
+    assert halted.status is RunStatus.HALTED
+
+    second = await process()  # 재시작 — 같은 저장소와 checkpointer 를 여는 새 객체
+    resumed = await second.resume_service(
+        topology(), run_id, max_iterations=halted.iteration + 1, sleep=no_sleep
+    )
+    await second.services[resumed.run_id]
+
+    assert resumed.status is RunStatus.STOPPED, resumed.error
+    assert resumed.failure_streak == 0
+    assert resumed.state["feeds"] == FEEDS["feeds"]

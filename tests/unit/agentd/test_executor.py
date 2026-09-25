@@ -9,6 +9,7 @@ import asyncio
 
 import pytest
 
+from malkuth.agentd import executor as executor_module
 from malkuth.agentd.executor import (
     AssistantTurn,
     Executor,
@@ -267,6 +268,20 @@ async def test_same_task_id_returns_the_cached_result():
 
     assert first == second
     assert model.turns == 1  # 두 번 실행되지 않는다
+
+
+async def test_the_oldest_result_is_forgotten_past_the_limit(monkeypatch):
+    """상주 컨테이너가 모든 결과를 끝까지 쥐면 메모리가 태스크 수만큼 자란다 (#315)."""
+    monkeypatch.setattr(executor_module, "REMEMBERED_RESULTS", 2)
+    executor, model, _ = make_executor([text("a"), text("b"), text("c"), text("again")])
+
+    for task_id in ("t1", "t2", "t3"):
+        await executor.execute(make_task(task_id=task_id))
+    await executor.execute(make_task(task_id="t3"))  # 아직 기억한다
+    assert model.turns == 3
+    await executor.execute(make_task(task_id="t1"))  # 잊었으므로 다시 돈다
+
+    assert model.turns == 4
 
 
 async def test_distinct_tasks_execute_separately():
